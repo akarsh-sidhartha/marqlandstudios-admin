@@ -1,93 +1,289 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import api from '../api';
-import { Download, Plus, Search, ChevronDown, ChevronRight, Edit2, Trash2, MapPin, Tag, Mail, Phone, Building2, Paperclip, FileText, Image as ImageIcon, Video, X, Eye } from 'lucide-react';
-import { INDIA_STATES, CITIES_BY_STATE, SearchableSelect } from '../utils/indiaLocations';
+import { createLogger } from '../utils/logger';
+import { SkeletonList } from '../components/PageLoader';
+import {
+  Download, Plus, Search, ChevronDown, ChevronRight,
+  Paperclip, FileText, Image as ImageIcon, Video, X, Building2,
+} from 'lucide-react';
+import { INDIA_STATES, SearchableSelect } from '../utils/indiaLocations';
 
+const log = createLogger('VendorList');
+
+// ── Design tokens (mirrors ClientList) ────────────────────────────────────────
+const T = {
+  navy:    '#0e1520',
+  gold:    '#b8975a',
+  gold2:   '#d4b06a',
+  offwhite:'#faf8f5',
+  text:    '#1a1a1a',
+  muted:   '#888',
+  border:  'rgba(0,0,0,0.07)',
+  borderG: 'rgba(184,151,90,0.18)',
+  dimBg:   'rgba(184,151,90,0.04)',
+  danger:  'rgba(220,38,38,0.6)',
+  dangerHover: '#dc2626',
+};
+const jost  = '"Jost", sans-serif';
+const serif = '"Cormorant Garamond", Georgia, serif';
+
+// ── Reusable focus-aware input ────────────────────────────────────────────────
+const inputStyle = (focused) => ({
+  width: '100%', padding: '10px 14px',
+  background: 'white',
+  border: `1px solid ${focused ? T.gold : T.border}`,
+  borderRadius: 3,
+  fontFamily: jost, fontSize: 13, fontWeight: 300,
+  color: T.text, outline: 'none',
+  boxSizing: 'border-box',
+  transition: 'border-color 0.2s',
+});
+
+const FocusInput = ({ value, onChange, placeholder, type = 'text', style: extra = {} }) => {
+  const [focused, setFocused] = useState(false);
+  return (
+    <input
+      type={type}
+      value={value}
+      onChange={onChange}
+      placeholder={placeholder}
+      onFocus={() => setFocused(true)}
+      onBlur={() => setFocused(false)}
+      style={{ ...inputStyle(focused), ...extra }}
+    />
+  );
+};
+
+const FocusTextarea = ({ value, onChange, placeholder, rows = 3 }) => {
+  const [focused, setFocused] = useState(false);
+  return (
+    <textarea
+      value={value}
+      onChange={onChange}
+      placeholder={placeholder}
+      rows={rows}
+      onFocus={() => setFocused(true)}
+      onBlur={() => setFocused(false)}
+      style={{
+        ...inputStyle(focused),
+        resize: 'vertical',
+        minHeight: 80,
+      }}
+    />
+  );
+};
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+const fmtSize = (bytes = 0) =>
+  bytes < 1_048_576
+    ? `${Math.round(bytes / 1024)} KB`
+    : `${(bytes / 1_048_576).toFixed(1)} MB`;
+
+const mediaIcon = (mimeType = '') => {
+  if (mimeType.startsWith('image/')) return <ImageIcon size={13} style={{ color: '#4f46e5', flexShrink: 0 }} />;
+  if (mimeType.startsWith('video/')) return <Video     size={13} style={{ color: '#7c3aed', flexShrink: 0 }} />;
+  return                                     <FileText  size={13} style={{ color: T.gold,   flexShrink: 0 }} />;
+};
+
+// ── Spinner ───────────────────────────────────────────────────────────────────
+const Spinner = () => (
+  <div style={{
+    width: 14, height: 14,
+    border: `2px solid ${T.borderG}`,
+    borderTopColor: T.gold,
+    borderRadius: '50%',
+    animation: 'spin 0.7s linear infinite',
+    flexShrink: 0,
+  }} />
+);
+
+// ── VendorList ────────────────────────────────────────────────────────────────
 const VendorList = () => {
-  const [vendors, setVendors] = useState([]);
-  const [searchTerm, setSearchTerm] = useState('');
-  const [expandedRows, setExpandedRows] = useState([]);
-  const [showModal, setShowModal] = useState(false);
-  const [isEditing, setIsEditing] = useState(false);
-  const [currentId, setCurrentId] = useState(null);
-  const [sortOrder, setSortOrder] = useState('asc');
-
-  // Filter States
+  const [vendors,       setVendors]       = useState([]);
+  const [isLoading,     setIsLoading]     = useState(true);
+  const [isSaving,      setIsSaving]      = useState(false);
+  const [isScanning,    setIsScanning]    = useState(false);
+  const [searchTerm,    setSearchTerm]    = useState('');
+  const [searchFocused, setSearchFocused] = useState(false);
+  const [expandedRows,  setExpandedRows]  = useState([]);
+  const [showModal,     setShowModal]     = useState(false);
+  const [isEditing,     setIsEditing]     = useState(false);
+  const [currentId,     setCurrentId]     = useState(null);
+  const [sortOrder,     setSortOrder]     = useState('asc');
   const [filterCategory, setFilterCategory] = useState('');
-  const [filterState, setFilterState] = useState('');
+  const [filterState,    setFilterState]    = useState('');
 
-  // Scanning States
-  const [cardImages, setCardImages] = useState({ front: null, back: null });
-  const [isScanning, setIsScanning] = useState(false);
+  // Card scanner
+  const [cardImages,    setCardImages]    = useState({ front: null, back: null });
 
-  // Media attachment state
-  const [newMediaFiles, setNewMediaFiles] = useState([]);   // new files to upload
-  const [keepMediaIds, setKeepMediaIds] = useState([]);   // existing media ids to retain
-  const [lightboxMedia, setLightboxMedia] = useState(null); // { url, mimeType, name }
+  // Media attachments
+  const [newMediaFiles, setNewMediaFiles] = useState([]);
+  const [keepMediaIds,  setKeepMediaIds]  = useState([]);
+  const [lightboxMedia, setLightboxMedia] = useState(null);
 
   const [formData, setFormData] = useState({
-    companyName: '',
-    state: '',
-    city: '',
-    category: '',
+    companyName:      '',
+    state:            '',
+    city:             '',
+    category:         '',
     suppliedProducts: '',
-    contacts: [{ name: '', phone: '', email: '' }]
+    contacts: [{ name: '', phone: '', email: '' }],
   });
 
   useEffect(() => { fetchVendors(); }, []);
 
+  // ── Data fetching ─────────────────────────────────────────────────────────
   const fetchVendors = async () => {
+    log.debug('Fetching vendors…');
+    setIsLoading(true);
     try {
       const res = await api.get('/vendors');
+      log.info('Vendors loaded', { count: res.data.length });
       setVendors(res.data);
-    } catch (err) { console.error("Fetch error:", err); }
+    } catch (err) {
+      log.error('Failed to fetch vendors', err.message);
+    } finally {
+      setIsLoading(false);
+    }
   };
 
-  // Dynamic list of states for filters and modal dropdown
-  const uniqueStates = useMemo(() => {
-    const states = vendors.map(v => v.state).filter(Boolean);
-    return [...new Set(states)].sort();
-  }, [vendors]);
+  // ── Derived data ──────────────────────────────────────────────────────────
+  const filteredVendors = useMemo(() => {
+    const s = searchTerm.toLowerCase();
+    return vendors
+      .filter(v => {
+        const matchesSearch =
+          v.companyName?.toLowerCase().includes(s) ||
+          v.suppliedProducts?.toLowerCase().includes(s) ||
+          v.contacts?.some(c => c.name?.toLowerCase().includes(s));
+        const matchesCat   = !filterCategory || v.category === filterCategory;
+        const matchesState = !filterState    || v.state    === filterState;
+        return matchesSearch && matchesCat && matchesState;
+      })
+      .sort((a, b) => {
+        const na = a.companyName?.toLowerCase() ?? '';
+        const nb = b.companyName?.toLowerCase() ?? '';
+        return sortOrder === 'asc' ? na.localeCompare(nb) : nb.localeCompare(na);
+      });
+  }, [vendors, searchTerm, filterCategory, filterState, sortOrder]);
+
+  // ── Handlers ──────────────────────────────────────────────────────────────
+  const toggleSort = () => setSortOrder(p => (p === 'asc' ? 'desc' : 'asc'));
+  const toggleRow  = (id) =>
+    setExpandedRows(p => p.includes(id) ? p.filter(r => r !== id) : [...p, id]);
 
   const handleResetFilters = () => {
     setSearchTerm('');
     setFilterCategory('');
     setFilterState('');
+    log.debug('Filters reset');
   };
 
-  const processVendors = () => {
-    let result = vendors.filter(v => {
-      const s = searchTerm.toLowerCase();
-      const contactMatch = v.contacts?.some(c => c.name?.toLowerCase().includes(s));
-      const matchesSearch = (
-        v.companyName?.toLowerCase().includes(s) ||
-        v.suppliedProducts?.toLowerCase().includes(s) ||
-        contactMatch
-      );
-      const matchesCategory = filterCategory === '' || v.category === filterCategory;
-      const matchesState = filterState === '' || v.state === filterState;
+  const handleContactChange = (index, field, value) => {
+    const updated = [...formData.contacts];
+    updated[index] = { ...updated[index], [field]: value };
+    setFormData({ ...formData, contacts: updated });
+  };
 
-      return matchesSearch && matchesCategory && matchesState;
-    });
+  const handleAddContact = () =>
+    setFormData({ ...formData, contacts: [...formData.contacts, { name: '', phone: '', email: '' }] });
 
-    result.sort((a, b) => {
-      const nameA = a.companyName?.toLowerCase() || '';
-      const nameB = b.companyName?.toLowerCase() || '';
-      if (sortOrder === 'asc') return nameA < nameB ? -1 : 1;
-      return nameA > nameB ? -1 : 1;
+  const handleRemoveContact = (index) => {
+    const updated = formData.contacts.filter((_, i) => i !== index);
+    setFormData({ ...formData, contacts: updated.length > 0 ? updated : [{ name: '', phone: '', email: '' }] });
+  };
+
+  const handleCardCapture = (side, e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onloadend = () => setCardImages(prev => ({ ...prev, [side]: reader.result }));
+    reader.readAsDataURL(file);
+  };
+
+  const handleScanCard = async () => {
+    log.debug('Scanning business card…');
+    setIsScanning(true);
+    try {
+      const res = await api.post('/vendors/scan-card', {
+        image: cardImages.front,
+        mimeType: 'image/jpeg',
+      });
+      const data = res.data;
+      setFormData(prev => ({
+        ...prev,
+        companyName: data.company_name || data.vendor_name || prev.companyName,
+        contacts: [{ name: data.name || '', phone: data.phone || '', email: data.email || '' }],
+      }));
+      if (data._provider && data._provider !== 'gemini') {
+        log.info('Card scanned via fallback provider', { provider: data._provider });
+      } else {
+        log.info('Card scanned successfully');
+      }
+    } catch (err) {
+      log.error('Card scan failed', err.message);
+      alert('Card scan failed. Please fill in the details manually.');
+    } finally {
+      setIsScanning(false);
+    }
+  };
+
+  const handleDeleteMedia = async (vendorId, mediaId, e) => {
+    e.stopPropagation();
+    if (!window.confirm('Remove this file?')) return;
+    log.info('Deleting media', { vendorId, mediaId });
+    try {
+      await api.delete(`/vendors/${vendorId}/media/${mediaId}`);
+      setKeepMediaIds(prev => prev.filter(id => id !== mediaId));
+      fetchVendors();
+    } catch (err) {
+      log.error('Media delete failed', err.message);
+      alert('Failed to delete file.');
+    }
+  };
+
+  const handleEdit = (v, e) => {
+    e.stopPropagation();
+    log.debug('Opening edit modal', { id: v._id, name: v.companyName });
+    setIsEditing(true);
+    setCurrentId(v._id);
+    setFormData({
+      companyName:      v.companyName,
+      state:            v.state            || '',
+      city:             v.city             || '',
+      category:         v.category         || '',
+      suppliedProducts: v.suppliedProducts || '',
+      contacts: v.contacts?.length > 0 ? [...v.contacts] : [{ name: '', phone: '', email: '' }],
     });
-    return result;
+    setKeepMediaIds((v.media || []).map(m => m._id));
+    setNewMediaFiles([]);
+    setShowModal(true);
+  };
+
+  const handleDelete = async (id, name, e) => {
+    e.stopPropagation();
+    if (!window.confirm(`Delete "${name}"?`)) return;
+    log.info('Deleting vendor', { id, name });
+    try {
+      await api.delete(`/vendors/${id}`);
+      fetchVendors();
+    } catch (err) {
+      log.error('Delete failed', err.message);
+      alert('Failed to delete vendor.');
+    }
   };
 
   const handleSave = async () => {
+    log.info(isEditing ? 'Updating vendor' : 'Creating vendor', { name: formData.companyName });
+    setIsSaving(true);
     try {
       const fd = new FormData();
-      fd.append('companyName', formData.companyName);
-      fd.append('state', formData.state);
-      fd.append('city', formData.city);
-      fd.append('category', formData.category);
+      fd.append('companyName',      formData.companyName);
+      fd.append('state',            formData.state);
+      fd.append('city',             formData.city);
+      fd.append('category',         formData.category);
       fd.append('suppliedProducts', formData.suppliedProducts);
-      fd.append('contacts', JSON.stringify(formData.contacts));
+      fd.append('contacts',         JSON.stringify(formData.contacts));
       if (isEditing) fd.append('keepMediaIds', keepMediaIds.join(','));
       newMediaFiles.forEach(f => fd.append('mediaFiles', f));
 
@@ -96,57 +292,16 @@ const VendorList = () => {
       } else {
         await api.post('/vendors', fd);
       }
+      log.info('Vendor saved successfully');
       setShowModal(false);
       resetForm();
       fetchVendors();
-    } catch (err) { alert("Error saving vendor: " + (err.response?.data?.message || err.message)); }
-  };
-
-  const handleDeleteMedia = async (vendorId, mediaId, e) => {
-    e.stopPropagation();
-    if (!window.confirm('Remove this file?')) return;
-    try {
-      await api.delete(`/vendors/${vendorId}/media/${mediaId}`);
-      setKeepMediaIds(prev => prev.filter(id => id !== mediaId));
-      fetchVendors();
-    } catch { alert('Failed to delete file'); }
-  };
-
-  const mediaIcon = (mimeType = '') => {
-    if (mimeType.startsWith('image/')) return <ImageIcon size={13} className="text-blue-500 shrink-0" />;
-    if (mimeType.startsWith('video/')) return <Video size={13} className="text-purple-500 shrink-0" />;
-    return <FileText size={13} className="text-orange-500 shrink-0" />;
-  };
-
-  const fmtSize = (bytes = 0) => bytes < 1048576
-    ? `${Math.round(bytes / 1024)}KB`
-    : `${(bytes / 1048576).toFixed(1)}MB`;
-
-  const handleDelete = async (id, name, e) => {
-    e.stopPropagation();
-    if (window.confirm(`Delete ${name}?`)) {
-      try {
-        await api.delete(`/vendors/${id}`);
-        fetchVendors();
-      } catch (err) { alert("Delete failed"); }
+    } catch (err) {
+      log.error('Save failed', err.response?.data?.message || err.message);
+      alert('Error saving vendor: ' + (err.response?.data?.message || err.message));
+    } finally {
+      setIsSaving(false);
     }
-  };
-
-  const handleEdit = (v, e) => {
-    e.stopPropagation();
-    setIsEditing(true);
-    setCurrentId(v._id);
-    setFormData({
-      companyName: v.companyName,
-      state: v.state || '',
-      city: v.city || '',
-      category: v.category || '',
-      suppliedProducts: v.suppliedProducts || '',
-      contacts: v.contacts && v.contacts.length > 0 ? [...v.contacts] : [{ name: '', phone: '', email: '' }]
-    });
-    setKeepMediaIds((v.media || []).map(m => m._id));
-    setNewMediaFiles([]);
-    setShowModal(true);
   };
 
   const resetForm = () => {
@@ -158,471 +313,998 @@ const VendorList = () => {
     setKeepMediaIds([]);
   };
 
-  const handleCardCapture = (side, e) => {
-    const file = e.target.files[0];
-    if (file) {
-      const reader = new FileReader();
-      reader.onloadend = () => setCardImages(prev => ({ ...prev, [side]: reader.result }));
-      reader.readAsDataURL(file);
-    }
-  };
-
   const exportToExcel = () => {
-    const headers = ["Vendor Name", "State", "Category", "Products", "Contact Name", "Phone", "Email"];
+    log.debug('Exporting vendors to CSV');
+    const headers = ['Vendor Name', 'State', 'Category', 'Products', 'Contact Name', 'Phone', 'Email'];
     const rows = filteredVendors.flatMap(v =>
       v.contacts.map(c => [v.companyName, v.state, v.category, v.suppliedProducts, c.name, c.phone, c.email])
     );
-    const csvContent = "data:text/csv;charset=utf-8," + [headers, ...rows].map(e => e.map(val => `"${val || ''}"`).join(",")).join("\n");
-    const encodedUri = encodeURI(csvContent);
-    const link = document.createElement("a");
-    link.setAttribute("href", encodedUri);
-    link.setAttribute("download", `Vendor_List_${new Date().toLocaleDateString()}.csv`);
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
+    const csv = 'data:text/csv;charset=utf-8,' +
+      [headers, ...rows].map(r => r.map(val => `"${val || ''}"`).join(',')).join('\n');
+    const a = document.createElement('a');
+    a.href = encodeURI(csv);
+    a.download = `Vendor_List_${new Date().toLocaleDateString()}.csv`;
+    document.body.appendChild(a); a.click(); document.body.removeChild(a);
   };
 
-  const filteredVendors = useMemo(() => {
-    return vendors
-      .filter(v => {
-        const matchesSearch = v.companyName.toLowerCase().includes(searchTerm.toLowerCase()) ||
-          (v.suppliedProducts && v.suppliedProducts.toLowerCase().includes(searchTerm.toLowerCase()));
-        const matchesCat = filterCategory ? v.category === filterCategory : true;
-        const matchesState = filterState ? v.state === filterState : true;
-        return matchesSearch && matchesCat && matchesState;
-      })
-      .sort((a, b) => {
-        if (sortOrder === 'asc') return a.companyName.localeCompare(b.companyName);
-        return b.companyName.localeCompare(a.companyName);
-      });
-  }, [vendors, searchTerm, filterCategory, filterState, sortOrder]);
-
-  const handleScanCard = async () => {
-    setIsScanning(true);
-    try {
-      // Uses dedicated /api/vendors/scan-card endpoint
-      // AI waterfall: Gemini → Mistral → Tesseract (auto-fallback when quota exceeded)
-      const res = await api.post('/vendors/scan-card', {
-        image: cardImages.front,
-        mimeType: "image/jpeg"
-      });
-      const data = res.data;
-      setFormData(prev => ({
-        ...prev,
-        companyName: data.company_name || data.vendor_name || prev.companyName,
-        contacts: [{ name: data.name || '', phone: data.phone || '', email: data.email || '' }]
-      }));
-      // Show which AI provider was used (useful for debugging quota issues)
-      if (data._provider && data._provider !== 'gemini') {
-        console.info(`Business card scanned via fallback provider: ${data._provider}`);
-      }
-    } catch (err) {
-      alert("Card scan failed. Please fill in the details manually.");
-      console.error("Scan error:", err);
-    } finally {
-      setIsScanning(false);
-    }
-  };
-
+  // ── Render ────────────────────────────────────────────────────────────────
   return (
-    <div className="p-4 md:p-6 bg-gray-50 min-h-screen font-sans">
+    <div style={{ minHeight: '100vh', background: T.offwhite, fontFamily: jost, padding: '56px 48px' }}>
 
-      {/* HEADER: Combined Search, Filters, and Add Button */}
-      <div className="bg-white p-4 rounded-xl shadow-sm border border-gray-100 mb-6">
-        <div className="flex flex-col lg:flex-row items-center gap-4">
-          <h1 className="text-xl font-black text-gray-800 uppercase tracking-tight lg:border-r lg:pr-4 border-gray-200 shrink-0">
-            Vendors
-          </h1>
+      {/* Spin keyframe injected once */}
+      <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
 
-          <div className="flex flex-col md:flex-row w-full gap-3 items-center">
-            <div className="relative flex-grow w-full">
-              <input
-                type="text"
-                placeholder="Search..."
-                className="w-full pl-10 pr-4 py-2 rounded-lg border border-gray-200 focus:ring-2 focus:ring-indigo-500 outline-none transition bg-gray-50/50"
-                value={searchTerm}
-                onChange={(e) => setSearchTerm(e.target.value)}
-              />
-              <span className="absolute left-3 top-2.5 text-gray-400">🔍</span>
-            </div>
+      {/* ── Page header ────────────────────────────────────────────────── */}
+      <div style={{ marginBottom: 40 }}>
+        <div style={{ width: 32, height: 1, background: T.gold, marginBottom: 20 }} />
+        <p style={{
+          fontSize: 9, fontWeight: 400, letterSpacing: '0.3em',
+          textTransform: 'uppercase', color: T.muted, marginBottom: 10,
+        }}>
+          Procurement
+        </p>
+        <h1 style={{
+          fontFamily: serif, fontSize: 40, fontWeight: 300,
+          color: T.navy, lineHeight: 1.05, margin: '0 0 24px',
+        }}>
+          Vendor <em style={{ color: T.gold }}>Management.</em>
+        </h1>
 
-            <select
-              className="w-full md:w-40 border p-2 rounded-lg text-xs font-bold bg-white"
-              value={filterCategory}
-              onChange={(e) => setFilterCategory(e.target.value)}
+        {/* Controls row */}
+        <div style={{ display: 'flex', gap: 14, flexWrap: 'wrap', alignItems: 'center' }}>
+
+          {/* Search */}
+          <div style={{ position: 'relative', flex: '1 1 260px', maxWidth: 420 }}>
+            <Search size={13} style={{
+              position: 'absolute', left: 13, top: '50%',
+              transform: 'translateY(-50%)', color: T.muted, pointerEvents: 'none',
+            }} />
+            <input
+              type="text"
+              placeholder="Search by company, product or contact…"
+              value={searchTerm}
+              onChange={e => setSearchTerm(e.target.value)}
+              onFocus={() => setSearchFocused(true)}
+              onBlur={() => setSearchFocused(false)}
+              style={{
+                width: '100%', padding: '10px 36px',
+                background: 'white',
+                border: `1px solid ${searchFocused ? T.gold : T.border}`,
+                borderRadius: 3,
+                fontFamily: jost, fontSize: 12, fontWeight: 300,
+                color: T.text, outline: 'none',
+                boxSizing: 'border-box', transition: 'border-color 0.2s',
+              }}
+            />
+            {searchTerm && (
+              <button
+                onClick={() => setSearchTerm('')}
+                style={{
+                  position: 'absolute', right: 12, top: '50%',
+                  transform: 'translateY(-50%)', background: 'none',
+                  border: 'none', cursor: 'pointer', color: T.muted, padding: 0,
+                }}
+              >✕</button>
+            )}
+          </div>
+
+          {/* Category filter */}
+          <select
+            value={filterCategory}
+            onChange={e => setFilterCategory(e.target.value)}
+            style={{
+              padding: '10px 14px', background: 'white',
+              border: `1px solid ${T.border}`, borderRadius: 3,
+              fontFamily: jost, fontSize: 11, fontWeight: 300,
+              color: filterCategory ? T.text : T.muted,
+              outline: 'none', cursor: 'pointer',
+            }}
+          >
+            <option value="">All Categories</option>
+            <option value="Gifting">Gifting</option>
+            <option value="Travel">Travel</option>
+          </select>
+
+          {/* State filter */}
+          <select
+            value={filterState}
+            onChange={e => setFilterState(e.target.value)}
+            style={{
+              padding: '10px 14px', background: 'white',
+              border: `1px solid ${T.border}`, borderRadius: 3,
+              fontFamily: jost, fontSize: 11, fontWeight: 300,
+              color: filterState ? T.text : T.muted,
+              outline: 'none', cursor: 'pointer',
+            }}
+          >
+            <option value="">All States</option>
+            {INDIA_STATES.map(s => <option key={s} value={s}>{s}</option>)}
+          </select>
+
+          {/* Reset filters */}
+          {(searchTerm || filterCategory || filterState) && (
+            <button
+              onClick={handleResetFilters}
+              style={{
+                background: 'none', border: 'none', cursor: 'pointer',
+                fontFamily: jost, fontSize: 9, fontWeight: 400,
+                letterSpacing: '0.2em', textTransform: 'uppercase',
+                color: T.danger, transition: 'color 0.2s',
+              }}
+              onMouseEnter={e => e.currentTarget.style.color = T.dangerHover}
+              onMouseLeave={e => e.currentTarget.style.color = T.danger}
             >
-              <option value="">All Categories</option>
-              <option value="Gifting">Gifting</option>
-              <option value="Travel">Travel</option>
-            </select>
-
-            <select
-              className="w-full md:w-40 border p-2 rounded-lg text-xs font-bold bg-white"
-              value={filterState}
-              onChange={(e) => setFilterState(e.target.value)}
-            >
-              <option value="">All States</option>
-              {INDIA_STATES.map(s => <option key={s} value={s}>{s}</option>)}
-            </select>
-
-            <button onClick={handleResetFilters} className="text-red-500 text-[10px] font-black uppercase px-2">
               Reset
             </button>
+          )}
 
-            <button
-              onClick={() => { resetForm(); setShowModal(true); }}
-              className="w-full md:w-auto bg-indigo-600 text-white px-5 py-2.5 rounded-lg font-bold hover:bg-indigo-700 transition shrink-0"
-            >
-              + Add Vendor
-            </button>
+          {/* Add vendor */}
+          <button
+            onClick={() => { resetForm(); setShowModal(true); }}
+            style={{
+              display: 'inline-flex', alignItems: 'center', gap: 8,
+              background: T.gold, color: T.navy,
+              border: 'none', padding: '11px 28px',
+              fontFamily: jost, fontSize: 10, fontWeight: 500,
+              letterSpacing: '0.22em', textTransform: 'uppercase',
+              cursor: 'pointer', transition: 'background 0.25s', flexShrink: 0,
+            }}
+            onMouseEnter={e => e.currentTarget.style.background = T.gold2}
+            onMouseLeave={e => e.currentTarget.style.background = T.gold}
+          >
+            <Plus size={12} /> Add Vendor
+          </button>
 
-            <button
-              onClick={exportToExcel}
-              className="flex items-center gap-2 bg-white border-2 border-slate-100 text-slate-600 px-6 py-3 rounded-2xl font-black text-xs uppercase hover:bg-slate-50 shadow-sm"
-            >
-              <Download size={16} />
-              Export
-            </button>
-          </div>
+          {/* Export */}
+          <button
+            onClick={exportToExcel}
+            style={{
+              display: 'inline-flex', alignItems: 'center', gap: 8,
+              background: 'transparent', color: T.muted,
+              border: `1px solid ${T.border}`, padding: '10px 20px',
+              fontFamily: jost, fontSize: 10, fontWeight: 400,
+              letterSpacing: '0.2em', textTransform: 'uppercase',
+              cursor: 'pointer', transition: 'border-color 0.25s, color 0.25s', flexShrink: 0,
+            }}
+            onMouseEnter={e => {
+              e.currentTarget.style.borderColor = T.gold;
+              e.currentTarget.style.color = T.gold;
+            }}
+            onMouseLeave={e => {
+              e.currentTarget.style.borderColor = T.border;
+              e.currentTarget.style.color = T.muted;
+            }}
+          >
+            <Download size={13} /> Export
+          </button>
         </div>
       </div>
 
-      {/* TABLE */}
-      <div className="bg-white shadow-sm rounded-xl border border-gray-200 overflow-x-auto">
-        <table className="w-full text-left min-w-[600px]">
-          <thead className="bg-gray-50 border-b uppercase text-[10px] font-black text-gray-500">
-            <tr>
-              <th className="p-3 w-10"></th>
-              <th className="p-3">Company / Info</th>
-              <th className="p-3">Products</th>
-              <th className="p-3 text-right">Actions</th>
+      {/* ── Table ──────────────────────────────────────────────────────── */}
+      <div style={{ background: 'white', border: `1px solid ${T.border}`, overflow: 'hidden' }}>
+        <table style={{ width: '100%', borderCollapse: 'collapse', minWidth: 600 }}>
+          <thead>
+            <tr style={{ borderBottom: `1px solid ${T.border}`, background: T.offwhite }}>
+              <th style={{ width: 44, padding: '12px 16px' }} />
+              <th
+                onClick={toggleSort}
+                style={{
+                  padding: '12px 16px', textAlign: 'left',
+                  fontFamily: jost, fontSize: 9, fontWeight: 400,
+                  letterSpacing: '0.25em', textTransform: 'uppercase',
+                  color: T.muted, cursor: 'pointer', userSelect: 'none',
+                  transition: 'color 0.2s', whiteSpace: 'nowrap',
+                }}
+                onMouseEnter={e => e.currentTarget.style.color = T.gold}
+                onMouseLeave={e => e.currentTarget.style.color = T.muted}
+              >
+                Company {sortOrder === 'asc' ? '↑' : '↓'}
+              </th>
+              <th style={{
+                padding: '12px 16px', textAlign: 'left',
+                fontFamily: jost, fontSize: 9, fontWeight: 400,
+                letterSpacing: '0.25em', textTransform: 'uppercase', color: T.muted,
+              }}>
+                Category / State
+              </th>
+              <th style={{
+                padding: '12px 16px', textAlign: 'left',
+                fontFamily: jost, fontSize: 9, fontWeight: 400,
+                letterSpacing: '0.25em', textTransform: 'uppercase', color: T.muted,
+              }}>
+                Primary Contact
+              </th>
+              <th style={{
+                padding: '12px 16px', textAlign: 'right',
+                fontFamily: jost, fontSize: 9, fontWeight: 400,
+                letterSpacing: '0.25em', textTransform: 'uppercase', color: T.muted,
+              }}>
+                Actions
+              </th>
             </tr>
           </thead>
+
           <tbody>
-            {processVendors().map(v => (
-              <React.Fragment key={v._id}>
-                <tr
-                  onClick={() => setExpandedRows(prev => prev.includes(v._id) ? prev.filter(id => id !== v._id) : [...prev, v._id])}
-                  className="cursor-pointer border-b hover:bg-gray-50 transition-colors"
-                >
-                  <td className="p-3 text-center text-gray-400 text-xs">
-                    {expandedRows.includes(v._id) ? '▼' : '▶'}
-                  </td>
-                  <td className="p-3">
-                    <div className="font-bold text-gray-800 text-sm uppercase">{v.companyName}</div>
-                    <div className="flex gap-2 mt-1 flex-wrap">
-                      <span className="text-[9px] bg-indigo-50 text-indigo-600 px-1.5 py-0.5 rounded font-black uppercase">{v.category || 'N/A'}</span>
-                      <span className="text-[9px] bg-gray-100 text-gray-500 px-1.5 py-0.5 rounded font-black uppercase">{v.state}</span>
-                      {v.media && v.media.length > 0 && (
-                        <span className="text-[9px] bg-amber-50 text-amber-600 px-1.5 py-0.5 rounded font-black uppercase flex items-center gap-1">
-                          <Paperclip size={9} /> {v.media.length} file{v.media.length !== 1 ? 's' : ''}
+            {isLoading ? (
+              <SkeletonList rows={8} cols={5} />
+            ) : filteredVendors.length === 0 ? (
+              <tr>
+                <td colSpan={5} style={{ padding: '64px 0', textAlign: 'center' }}>
+                  <Building2 size={28} style={{ color: 'rgba(0,0,0,0.12)', margin: '0 auto 12px', display: 'block' }} />
+                  <p style={{
+                    fontFamily: jost, fontSize: 12, fontWeight: 300,
+                    letterSpacing: '0.1em', color: T.muted,
+                  }}>
+                    No vendors found
+                  </p>
+                </td>
+              </tr>
+            ) : filteredVendors.map(v => {
+              const isExpanded = expandedRows.includes(v._id);
+              return (
+                <React.Fragment key={v._id}>
+                  {/* ── Row ── */}
+                  <tr
+                    onClick={() => toggleRow(v._id)}
+                    style={{
+                      cursor: 'pointer',
+                      borderBottom: `1px solid ${T.border}`,
+                      background: isExpanded ? T.dimBg : 'transparent',
+                      transition: 'background 0.2s',
+                    }}
+                    onMouseEnter={e => { if (!isExpanded) e.currentTarget.style.background = 'rgba(0,0,0,0.015)'; }}
+                    onMouseLeave={e => { if (!isExpanded) e.currentTarget.style.background = isExpanded ? T.dimBg : 'transparent'; }}
+                  >
+                    {/* Expand chevron */}
+                    <td style={{ padding: '14px 16px', textAlign: 'center', width: 44 }}>
+                      {isExpanded
+                        ? <ChevronDown  size={13} style={{ color: T.gold }} />
+                        : <ChevronRight size={13} style={{ color: T.muted }} />}
+                    </td>
+
+                    {/* Company name */}
+                    <td style={{
+                      padding: '14px 16px',
+                      fontFamily: jost, fontSize: 12, fontWeight: 500,
+                      letterSpacing: '0.06em', textTransform: 'uppercase', color: T.text,
+                    }}>
+                      {v.companyName}
+                      {v.media?.length > 0 && (
+                        <span style={{
+                          marginLeft: 10, display: 'inline-flex', alignItems: 'center', gap: 4,
+                          fontFamily: jost, fontSize: 9, fontWeight: 400,
+                          letterSpacing: '0.12em', textTransform: 'uppercase',
+                          color: T.gold, border: `1px solid ${T.borderG}`, padding: '2px 6px',
+                        }}>
+                          <Paperclip size={9} /> {v.media.length}
                         </span>
                       )}
-                    </div>
-                  </td>
-                  <td className="p-3 text-sm text-gray-500 truncate max-w-xs">{v.suppliedProducts || '---'}</td>
-                  <td className="p-3 text-right">
-                    <button onClick={(e) => handleEdit(v, e)} className="text-indigo-600 font-bold text-xs mr-3 hover:underline">EDIT</button>
-                    {/* RESTORED DELETE BUTTON */}
-                    <button onClick={(e) => handleDelete(v._id, v.companyName, e)} className="text-red-500 font-bold text-xs hover:underline">DELETE</button>
-                  </td>
-                </tr>
-                {expandedRows.includes(v._id) && (
-                  <tr className="bg-gray-50/50">
-                    <td colSpan="4" className="p-6 border-b">
-                      <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
-                        <div>
-                          <h4 className="text-[10px] font-black text-gray-400 uppercase mb-2">Products</h4>
-                          <p className="text-sm text-gray-700 bg-white p-3 rounded border italic">{v.suppliedProducts || 'N/A'}</p>
-                        </div>
-                        <div>
-                          <h4 className="text-[10px] font-black text-gray-400 uppercase mb-2">Contacts</h4>
-                          {v.contacts && v.contacts.length > 0 ? (
-                            v.contacts.map((c, i) => (
-                              <div key={i} className="mb-2 p-2 bg-white rounded border text-sm shadow-sm">
-                                <div className="font-bold text-indigo-600">{c.name || 'No Name'}</div>
-                                <div className="text-gray-600 text-xs">📞 {c.phone || 'N/A'}</div>
-                                <div className="text-gray-500 text-xs italic">✉️ {c.email || 'N/A'}</div>
-                              </div>
-                            ))
-                          ) : (
-                            <p className="text-xs text-gray-400">No contacts listed.</p>
-                          )}
-                        </div>
+                    </td>
 
-                        {/* ── Media files ── */}
-                        {v.media && v.media.length > 0 && (
-                          <div className="col-span-1 md:col-span-2 mt-2">
-                            <h4 className="text-[10px] font-black text-gray-400 uppercase mb-3 flex items-center gap-1">
-                              <Paperclip size={11} /> Attached Files ({v.media.length})
-                            </h4>
-                            <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-3">
-                              {v.media.map((m) => {
-                                const isImg = m.mimeType?.startsWith('image/');
-                                const isVid = m.mimeType?.startsWith('video/');
-                                return (
-                                  <div key={m._id}
-                                    className="relative group bg-white border border-gray-100 rounded-xl overflow-hidden shadow-sm hover:shadow-md transition-all">
-                                    <div
-                                      className="h-28 flex items-center justify-center bg-gray-50 cursor-pointer"
-                                      onClick={() => setLightboxMedia({ url: m.url, mimeType: m.mimeType, name: m.name })}>
-                                      {isImg ? (
-                                        <img src={m.url} alt={m.name} className="h-full w-full object-cover" />
-                                      ) : isVid ? (
-                                        <div className="flex flex-col items-center gap-1 text-purple-400">
-                                          <Video size={32} /><span className="text-[9px] font-bold uppercase">Video</span>
-                                        </div>
-                                      ) : (
-                                        <div className="flex flex-col items-center gap-1 text-orange-400">
-                                          <FileText size={32} />
-                                          <span className="text-[9px] font-bold uppercase text-gray-400">{m.name.split('.').pop()?.toUpperCase()}</span>
-                                        </div>
-                                      )}
-                                    </div>
-                                    <div className="px-2 py-1.5">
-                                      <div className="text-[10px] font-bold text-gray-700 truncate">{m.name}</div>
-                                      <div className="text-[9px] text-gray-400">{fmtSize(m.size)}</div>
-                                    </div>
-                                    <div className="absolute top-1.5 right-1.5 flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
-                                      <a href={m.url} download={m.name} onClick={e => e.stopPropagation()}
-                                        className="p-1.5 bg-white/90 rounded-lg shadow text-indigo-500 hover:bg-indigo-500 hover:text-white transition-all">
-                                        <Download size={11} />
-                                      </a>
-                                    </div>
-                                  </div>
-                                );
-                              })}
-                            </div>
-                          </div>
-                        )}</div>
+                    {/* Category / State */}
+                    <td style={{ padding: '14px 16px' }}>
+                      {v.category && (
+                        <span style={{
+                          display: 'inline-block', marginBottom: 2,
+                          fontFamily: jost, fontSize: 10, fontWeight: 400,
+                          letterSpacing: '0.15em', textTransform: 'uppercase',
+                          color: T.gold, border: `1px solid ${T.borderG}`, padding: '2px 8px',
+                        }}>
+                          {v.category}
+                        </span>
+                      )}
+                      {v.state && (
+                        <p style={{
+                          fontFamily: jost, fontSize: 12, fontWeight: 300,
+                          color: T.text, margin: 0,
+                        }}>
+                          {v.state}{v.city ? `, ${v.city}` : ''}
+                        </p>
+                      )}
+                    </td>
+
+                    {/* Primary contact */}
+                    <td style={{
+                      padding: '14px 16px',
+                      fontFamily: jost, fontSize: 15, fontWeight: 300, color: T.text,
+                    }}>
+                      {v.contacts?.[0]?.name || '—'}
+                      {v.contacts?.length > 1 && (
+                        <span style={{
+                          marginLeft: 8,
+                          fontFamily: jost, fontSize: 9, fontWeight: 400,
+                          letterSpacing: '0.15em', textTransform: 'uppercase',
+                          color: T.gold, border: `1px solid ${T.borderG}`, padding: '2px 7px',
+                        }}>
+                          +{v.contacts.length - 1}
+                        </span>
+                      )}
+                    </td>
+
+                    {/* Actions */}
+                    <td style={{ padding: '14px 16px', textAlign: 'right' }}>
+                      <button
+                        onClick={e => handleEdit(v, e)}
+                        style={{
+                          background: 'none', border: 'none', cursor: 'pointer',
+                          fontFamily: jost, fontSize: 12, fontWeight: 400,
+                          letterSpacing: '0.2em', textTransform: 'uppercase',
+                          color: T.gold, marginRight: 20, transition: 'color 0.2s',
+                        }}
+                        onMouseEnter={e => e.currentTarget.style.color = T.gold2}
+                        onMouseLeave={e => e.currentTarget.style.color = T.gold}
+                      >
+                        Edit
+                      </button>
+                      <button
+                        onClick={e => handleDelete(v._id, v.companyName, e)}
+                        style={{
+                          background: 'none', border: 'none', cursor: 'pointer',
+                          fontFamily: jost, fontSize: 12, fontWeight: 400,
+                          letterSpacing: '0.2em', textTransform: 'uppercase',
+                          color: T.danger, transition: 'color 0.2s',
+                        }}
+                        onMouseEnter={e => e.currentTarget.style.color = T.dangerHover}
+                        onMouseLeave={e => e.currentTarget.style.color = T.danger}
+                      >
+                        Delete
+                      </button>
                     </td>
                   </tr>
-                )}
-              </React.Fragment>
-            ))}
+
+                  {/* ── Expanded detail ── */}
+                  {isExpanded && (
+                    <tr>
+                      <td colSpan={5} style={{
+                        padding: '24px 24px 24px 48px',
+                        borderBottom: `1px solid ${T.border}`,
+                        background: T.dimBg,
+                      }}>
+                        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 32 }}>
+
+                          {/* Products */}
+                          <div>
+                            <p style={{
+                              fontFamily: jost, fontSize: 9, fontWeight: 400,
+                              letterSpacing: '0.28em', textTransform: 'uppercase',
+                              color: 'rgba(184,151,90,0.6)', marginBottom: 10,
+                            }}>
+                              Products Supplied
+                            </p>
+                            <p style={{
+                              fontFamily: jost, fontSize: 12, fontWeight: 300,
+                              color: T.text, background: 'white',
+                              border: `1px solid ${T.border}`, padding: '12px 14px',
+                              fontStyle: 'italic', margin: 0,
+                            }}>
+                              {v.suppliedProducts || 'N/A'}
+                            </p>
+                          </div>
+
+                          {/* Contacts */}
+                          <div>
+                            <p style={{
+                              fontFamily: jost, fontSize: 9, fontWeight: 400,
+                              letterSpacing: '0.28em', textTransform: 'uppercase',
+                              color: 'rgba(184,151,90,0.6)', marginBottom: 10,
+                            }}>
+                              Contact Directory
+                            </p>
+                            <div style={{
+                              display: 'grid',
+                              gridTemplateColumns: 'repeat(auto-fill, minmax(200px, 1fr))',
+                              gap: 10,
+                            }}>
+                              {v.contacts?.length > 0 ? v.contacts.map((c, i) => (
+                                <div key={i} style={{
+                                  background: 'white', border: `1px solid ${T.border}`,
+                                  padding: '14px 16px', display: 'flex', flexDirection: 'column', gap: 4,
+                                }}>
+                                  <p style={{ fontFamily: jost, fontSize: 12, fontWeight: 500, color: T.gold, margin: 0 }}>
+                                    {c.name || '—'}
+                                  </p>
+                                  <p style={{ fontFamily: jost, fontSize: 11, fontWeight: 300, color: T.muted, margin: 0 }}>
+                                    {c.phone || 'No phone'}
+                                  </p>
+                                  <p style={{
+                                    fontFamily: jost, fontSize: 11, fontWeight: 300, color: T.muted,
+                                    margin: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                                  }}>
+                                    {c.email || 'No email'}
+                                  </p>
+                                </div>
+                              )) : (
+                                <p style={{ fontFamily: jost, fontSize: 11, fontWeight: 300, color: T.muted }}>
+                                  No contacts listed.
+                                </p>
+                              )}
+                            </div>
+                          </div>
+
+                          {/* Media */}
+                          {v.media?.length > 0 && (
+                            <div style={{ gridColumn: '1 / -1' }}>
+                              <p style={{
+                                fontFamily: jost, fontSize: 9, fontWeight: 400,
+                                letterSpacing: '0.28em', textTransform: 'uppercase',
+                                color: 'rgba(184,151,90,0.6)', marginBottom: 10,
+                                display: 'flex', alignItems: 'center', gap: 6,
+                              }}>
+                                <Paperclip size={10} /> Attached Files ({v.media.length})
+                              </p>
+                              <div style={{
+                                display: 'grid',
+                                gridTemplateColumns: 'repeat(auto-fill, minmax(160px, 1fr))',
+                                gap: 10,
+                              }}>
+                                {v.media.map(m => {
+                                  const isImg = m.mimeType?.startsWith('image/');
+                                  const isVid = m.mimeType?.startsWith('video/');
+                                  return (
+                                    <div
+                                      key={m._id}
+                                      style={{
+                                        background: 'white', border: `1px solid ${T.border}`,
+                                        overflow: 'hidden', cursor: 'pointer',
+                                        transition: 'box-shadow 0.2s',
+                                      }}
+                                      onClick={() => setLightboxMedia({ url: m.url, mimeType: m.mimeType, name: m.name })}
+                                      onMouseEnter={e => e.currentTarget.style.boxShadow = `0 4px 12px rgba(184,151,90,0.15)`}
+                                      onMouseLeave={e => e.currentTarget.style.boxShadow = 'none'}
+                                    >
+                                      {/* Thumbnail */}
+                                      <div style={{
+                                        height: 100, background: T.offwhite,
+                                        display: 'flex', alignItems: 'center', justifyContent: 'center',
+                                        overflow: 'hidden',
+                                      }}>
+                                        {isImg ? (
+                                          <img src={m.url} alt={m.name} style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+                                        ) : isVid ? (
+                                          <div style={{ textAlign: 'center', color: '#7c3aed' }}>
+                                            <Video size={28} />
+                                            <p style={{ fontFamily: jost, fontSize: 8, letterSpacing: '0.2em', textTransform: 'uppercase', marginTop: 4 }}>Video</p>
+                                          </div>
+                                        ) : (
+                                          <div style={{ textAlign: 'center', color: T.gold }}>
+                                            <FileText size={28} />
+                                            <p style={{ fontFamily: jost, fontSize: 8, letterSpacing: '0.2em', textTransform: 'uppercase', marginTop: 4 }}>
+                                              {m.name.split('.').pop()?.toUpperCase()}
+                                            </p>
+                                          </div>
+                                        )}
+                                      </div>
+                                      {/* Meta */}
+                                      <div style={{ padding: '8px 10px' }}>
+                                        <p style={{
+                                          fontFamily: jost, fontSize: 10, fontWeight: 500,
+                                          color: T.text, margin: 0,
+                                          overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                                        }}>
+                                          {m.name}
+                                        </p>
+                                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: 4 }}>
+                                          <p style={{ fontFamily: jost, fontSize: 9, fontWeight: 300, color: T.muted, margin: 0 }}>
+                                            {fmtSize(m.size)}
+                                          </p>
+                                          <a
+                                            href={m.url}
+                                            download={m.name}
+                                            onClick={e => e.stopPropagation()}
+                                            style={{ color: T.gold, display: 'flex' }}
+                                          >
+                                            <Download size={11} />
+                                          </a>
+                                        </div>
+                                      </div>
+                                    </div>
+                                  );
+                                })}
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      </td>
+                    </tr>
+                  )}
+                </React.Fragment>
+              );
+            })}
           </tbody>
         </table>
+
+        {/* Footer count */}
+        {!isLoading && (
+          <div style={{
+            borderTop: `1px solid ${T.border}`, padding: '10px 18px',
+            fontFamily: jost, fontSize: 10, fontWeight: 300,
+            letterSpacing: '0.12em', color: T.muted, textAlign: 'right',
+          }}>
+            {filteredVendors.length} of {vendors.length} vendor{vendors.length !== 1 ? 's' : ''}
+          </div>
+        )}
       </div>
 
-      {/* MODAL */}
+      {/* ── Add / Edit Modal ────────────────────────────────────────────── */}
       {showModal && (
-        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-end md:items-center justify-center p-0 md:p-4 z-50">
-          <div className="bg-white rounded-t-3xl md:rounded-2xl shadow-2xl w-full max-w-3xl max-h-[95vh] overflow-y-auto">
-            <div className="p-6 border-b sticky top-0 bg-white z-10 flex justify-between items-center">
-              <h2 className="text-xl font-black text-gray-800 uppercase">{isEditing ? 'Update Vendor' : 'New Vendor'}</h2>
-              <button onClick={() => setShowModal(false)} className="text-gray-400 text-2xl">✕</button>
+        <div style={{
+          position: 'fixed', inset: 0,
+          background: 'rgba(14,21,32,0.75)',
+          backdropFilter: 'blur(4px)',
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          padding: 24, zIndex: 50,
+        }}>
+          <div style={{
+            background: 'white', border: `1px solid ${T.border}`,
+            padding: '36px 36px 0',
+            width: '100%', maxWidth: 680,
+            maxHeight: '90vh', overflowY: 'auto',
+          }}>
+            {/* Modal header */}
+            <div style={{
+              display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start',
+              marginBottom: 32, paddingBottom: 20, borderBottom: `1px solid ${T.border}`,
+            }}>
+              <div>
+                <p style={{
+                  fontFamily: jost, fontSize: 9, fontWeight: 400,
+                  letterSpacing: '0.28em', textTransform: 'uppercase',
+                  color: T.muted, marginBottom: 6,
+                }}>
+                  {isEditing ? 'Update Record' : 'New Registration'}
+                </p>
+                <h2 style={{ fontFamily: serif, fontSize: 28, fontWeight: 300, color: T.navy, margin: 0 }}>
+                  {isEditing ? 'Edit Vendor' : 'Add Vendor'}
+                </h2>
+              </div>
+              <button
+                onClick={() => setShowModal(false)}
+                style={{
+                  background: 'none', border: 'none', cursor: 'pointer',
+                  color: T.muted, fontSize: 20, lineHeight: 1, padding: 4, transition: 'color 0.2s',
+                }}
+                onMouseEnter={e => e.currentTarget.style.color = T.text}
+                onMouseLeave={e => e.currentTarget.style.color = T.muted}
+              >
+                ✕
+              </button>
             </div>
 
-            <div className="p-6 md:p-8 space-y-6">
-              {/* MOBILE SCANNER */}
-              <div className="p-4 bg-indigo-50/50 rounded-2xl border-2 border-dashed border-indigo-200">
-                <div className="flex flex-col gap-4">
-                  <div className="flex justify-between items-center px-1">
-                    <h3 className="text-[11px] font-black text-indigo-700 uppercase">AI Card Scanner</h3>
-                    {isScanning && <div className="w-3 h-3 border-2 border-indigo-500 border-t-transparent rounded-full animate-spin"></div>}
-                  </div>
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                    {['front', 'back'].map((side) => (
-                      <label key={side} className="relative flex flex-col items-center justify-center h-28 bg-white rounded-xl border-2 border-gray-100 cursor-pointer active:scale-[0.98] transition-all">
-                        {cardImages[side] ? (
-                          <img src={cardImages[side]} className="h-full w-full object-cover rounded-xl" alt={side} />
-                        ) : (
-                          <div className="flex flex-col items-center gap-1">
-                            <span className="text-xl">📷</span>
-                            <p className="text-[10px] font-black text-gray-400 uppercase">Scan {side}</p>
-                          </div>
-                        )}
-                        <input type="file" accept="image/*" capture="environment" className="hidden" onChange={(e) => handleCardCapture(side, e)} />
-                      </label>
-                    ))}
-                  </div>
-                  {cardImages.front && (
-                    <button onClick={handleScanCard} disabled={isScanning} className="w-full py-3 bg-indigo-600 text-white rounded-xl font-black text-xs uppercase">
-                      {isScanning ? 'Extracting...' : '✨ Auto-Fill Fields'}
-                    </button>
-                  )}
-                </div>
+            {/* ── AI Card Scanner ── */}
+            <div style={{
+              background: T.dimBg, border: `1px dashed ${T.borderG}`,
+              padding: 20, marginBottom: 28,
+            }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14 }}>
+                <p style={{
+                  fontFamily: jost, fontSize: 9, fontWeight: 400,
+                  letterSpacing: '0.28em', textTransform: 'uppercase', color: T.gold, margin: 0,
+                }}>
+                  AI Card Scanner
+                </p>
+                {isScanning && <Spinner />}
               </div>
-
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                <div>
-                  <label className="text-[10px] font-black text-gray-400 uppercase block mb-1">Company Name</label>
-                  <input className="w-full border-2 p-3 rounded-lg font-bold" value={formData.companyName} onChange={e => setFormData({ ...formData, companyName: e.target.value })} />
-                </div>
-                <div>
-                  <label className="text-[10px] font-black text-gray-400 uppercase block mb-1">Category</label>
-                  <select className="w-full border-2 p-3 rounded-lg font-bold bg-white" value={formData.category} onChange={e => setFormData({ ...formData, category: e.target.value })}>
-                    <option value="">Select Category</option>
-                    <option value="Gifting">Gifting</option>
-                    <option value="Travel">Travel</option>
-                  </select>
-                </div>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+                {['front', 'back'].map(side => (
+                  <label key={side} style={{
+                    display: 'flex', flexDirection: 'column', alignItems: 'center',
+                    justifyContent: 'center', height: 100,
+                    background: 'white', border: `1px solid ${T.border}`,
+                    cursor: 'pointer', transition: 'border-color 0.2s',
+                  }}
+                  onMouseEnter={e => e.currentTarget.style.borderColor = T.gold}
+                  onMouseLeave={e => e.currentTarget.style.borderColor = T.border}
+                  >
+                    {cardImages[side] ? (
+                      <img src={cardImages[side]} alt={side} style={{ height: '100%', width: '100%', objectFit: 'cover' }} />
+                    ) : (
+                      <>
+                        <span style={{ fontSize: 20 }}>📷</span>
+                        <p style={{
+                          fontFamily: jost, fontSize: 9, fontWeight: 400,
+                          letterSpacing: '0.2em', textTransform: 'uppercase',
+                          color: T.muted, marginTop: 6, marginBottom: 0,
+                        }}>
+                          Scan {side}
+                        </p>
+                      </>
+                    )}
+                    <input type="file" accept="image/*" capture="environment" style={{ display: 'none' }}
+                      onChange={e => handleCardCapture(side, e)} />
+                  </label>
+                ))}
               </div>
+              {cardImages.front && (
+                <button
+                  onClick={handleScanCard}
+                  disabled={isScanning}
+                  style={{
+                    width: '100%', marginTop: 12, padding: '11px 0',
+                    background: isScanning ? T.borderG : T.gold,
+                    color: T.navy, border: 'none', cursor: isScanning ? 'not-allowed' : 'pointer',
+                    fontFamily: jost, fontSize: 10, fontWeight: 500,
+                    letterSpacing: '0.22em', textTransform: 'uppercase',
+                    transition: 'background 0.25s',
+                  }}
+                >
+                  {isScanning ? 'Extracting…' : '✨ Auto-Fill Fields'}
+                </button>
+              )}
+            </div>
 
+            {/* ── Core fields ── */}
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 20, marginBottom: 20 }}>
               <div>
-                <SearchableSelect
-                  label="State / Region"
-                  value={formData.state}
-                  onChange={s => setFormData({ ...formData, state: s, city: '' })}
-                  options={INDIA_STATES}
-                  placeholder="Select state..."
+                <label style={{
+                  display: 'block', fontFamily: jost, fontSize: 9, fontWeight: 400,
+                  letterSpacing: '0.25em', textTransform: 'uppercase', color: T.muted, marginBottom: 8,
+                }}>
+                  Company Name
+                </label>
+                <FocusInput
+                  value={formData.companyName}
+                  onChange={e => setFormData({ ...formData, companyName: e.target.value })}
+                  placeholder="Company name"
                 />
               </div>
-
-              {/*     
               <div>
-                <label className="text-[10px] font-black text-gray-400 uppercase block mb-1">Place / City</label>
-                {formData.state && (CITIES_BY_STATE[formData.state] || []).length > 0 && (
-                  <SearchableSelect
-                    value={(CITIES_BY_STATE[formData.state] || []).includes(formData.city) ? formData.city : ''}
-                    onChange={c => setFormData({ ...formData, city: c })}
-                    options={CITIES_BY_STATE[formData.state] || []}
-                    placeholder="Select city from list…"
-                  />
-                )}
-                <input
-                  value={formData.city}
-                  onChange={e => setFormData({ ...formData, city: e.target.value })}
-                  placeholder={formData.state && (CITIES_BY_STATE[formData.state] || []).length > 0 ? 'Or type a custom city…' : 'Enter city…'}
-                  className="w-full mt-1.5 border-2 border-gray-200 rounded-lg px-3 py-2.5 text-sm font-bold outline-none focus:border-indigo-500 placeholder-gray-300"
-                />
+                <label style={{
+                  display: 'block', fontFamily: jost, fontSize: 9, fontWeight: 400,
+                  letterSpacing: '0.25em', textTransform: 'uppercase', color: T.muted, marginBottom: 8,
+                }}>
+                  Category
+                </label>
+                <select
+                  value={formData.category}
+                  onChange={e => setFormData({ ...formData, category: e.target.value })}
+                  style={{
+                    ...inputStyle(false), appearance: 'none',
+                    cursor: 'pointer', color: formData.category ? T.text : T.muted,
+                  }}
+                >
+                  <option value="">Select category…</option>
+                  <option value="Gifting">Gifting</option>
+                  <option value="Travel">Travel</option>
+                </select>
               </div>
-              */}
-              
-              <div>
-                <label className="text-[10px] font-black text-gray-400 uppercase block mb-1">Products Supplied</label>
-                <textarea className="w-full border-2 p-3 rounded-lg h-20" value={formData.suppliedProducts} onChange={e => setFormData({ ...formData, suppliedProducts: e.target.value })} />
-              </div>
+            </div>
 
-              <div className="bg-gray-50 p-4 rounded-xl border border-gray-100">
-                <div className="flex justify-between items-center mb-4 text-[10px] font-black text-gray-400 uppercase">
-                  <span>Contacts</span>
-                  <button onClick={() => setFormData({ ...formData, contacts: [...formData.contacts, { name: '', phone: '', email: '' }] })} className="text-indigo-600">+ Add New</button>
-                </div>
+            {/* State */}
+            <div style={{ marginBottom: 20 }}>
+              <label style={{
+                display: 'block', fontFamily: jost, fontSize: 9, fontWeight: 400,
+                letterSpacing: '0.25em', textTransform: 'uppercase', color: T.muted, marginBottom: 8,
+              }}>
+                State / Region
+              </label>
+              <SearchableSelect
+                value={formData.state}
+                onChange={s => setFormData({ ...formData, state: s, city: '' })}
+                options={INDIA_STATES}
+                placeholder="Select state…"
+              />
+            </div>
+
+            {/* City */}
+            <div style={{ marginBottom: 20 }}>
+              <label style={{
+                display: 'block', fontFamily: jost, fontSize: 9, fontWeight: 400,
+                letterSpacing: '0.25em', textTransform: 'uppercase', color: T.muted, marginBottom: 8,
+              }}>
+                City
+              </label>
+              <FocusInput
+                value={formData.city}
+                onChange={e => setFormData({ ...formData, city: e.target.value })}
+                placeholder="Enter city…"
+              />
+            </div>
+
+            {/* Products */}
+            <div style={{ marginBottom: 20 }}>
+              <label style={{
+                display: 'block', fontFamily: jost, fontSize: 9, fontWeight: 400,
+                letterSpacing: '0.25em', textTransform: 'uppercase', color: T.muted, marginBottom: 8,
+              }}>
+                Products Supplied
+              </label>
+              <FocusTextarea
+                value={formData.suppliedProducts}
+                onChange={e => setFormData({ ...formData, suppliedProducts: e.target.value })}
+                placeholder="List products or services supplied…"
+              />
+            </div>
+
+            {/* ── Contacts ── */}
+            <div style={{ borderTop: `1px solid ${T.border}`, paddingTop: 24, marginBottom: 24 }}>
+              <div style={{
+                display: 'flex', justifyContent: 'space-between',
+                alignItems: 'center', marginBottom: 16,
+              }}>
+                <p style={{
+                  fontFamily: jost, fontSize: 9, fontWeight: 400,
+                  letterSpacing: '0.28em', textTransform: 'uppercase',
+                  color: 'rgba(184,151,90,0.65)', margin: 0,
+                }}>
+                  Points of Contact
+                </p>
+                <button
+                  onClick={handleAddContact}
+                  style={{
+                    background: 'none', border: `1px solid ${T.borderG}`,
+                    cursor: 'pointer', padding: '5px 14px',
+                    fontFamily: jost, fontSize: 9, fontWeight: 400,
+                    letterSpacing: '0.2em', textTransform: 'uppercase',
+                    color: T.gold, transition: 'background 0.2s',
+                  }}
+                  onMouseEnter={e => e.currentTarget.style.background = T.dimBg}
+                  onMouseLeave={e => e.currentTarget.style.background = 'none'}
+                >
+                  + Add Person
+                </button>
+              </div>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
                 {formData.contacts.map((c, i) => (
-                  <div key={i} className="space-y-2 mb-4 bg-white p-3 rounded-lg border shadow-sm">
-                    <input placeholder="Name" className="w-full border-b text-sm p-1 font-semibold" value={c.name} onChange={e => {
-                      const nc = [...formData.contacts]; nc[i].name = e.target.value; setFormData({ ...formData, contacts: nc });
-                    }} />
-                    <div className="grid grid-cols-2 gap-2">
-                      <input placeholder="Phone" className="border-b text-sm p-1" value={c.phone} onChange={e => {
-                        const nc = [...formData.contacts]; nc[i].phone = e.target.value; setFormData({ ...formData, contacts: nc });
-                      }} />
-                      <input placeholder="Email" className="border-b text-sm p-1" value={c.email} onChange={e => {
-                        const nc = [...formData.contacts]; nc[i].email = e.target.value; setFormData({ ...formData, contacts: nc });
-                      }} />
+                  <div key={i} style={{
+                    display: 'flex', gap: 10, alignItems: 'center',
+                    padding: '14px 16px', background: T.offwhite, border: `1px solid ${T.border}`,
+                  }}>
+                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 10, flex: 1 }}>
+                      {['name', 'phone', 'email'].map(field => (
+                        <FocusInput
+                          key={field}
+                          value={c[field]}
+                          onChange={e => handleContactChange(i, field, e.target.value)}
+                          placeholder={field.charAt(0).toUpperCase() + field.slice(1)}
+                          style={{ fontSize: 12 }}
+                        />
+                      ))}
                     </div>
+                    <button
+                      onClick={() => handleRemoveContact(i)}
+                      style={{
+                        background: 'none', border: 'none', cursor: 'pointer',
+                        color: T.muted, fontSize: 16, lineHeight: 1, flexShrink: 0, transition: 'color 0.2s',
+                      }}
+                      onMouseEnter={e => e.currentTarget.style.color = T.dangerHover}
+                      onMouseLeave={e => e.currentTarget.style.color = T.muted}
+                    >
+                      ✕
+                    </button>
                   </div>
                 ))}
               </div>
             </div>
 
-            {/* ── Media Attachments ── */}
-            <div className="px-6 md:px-8 pb-4">
-              <div className="border-2 border-dashed border-gray-200 rounded-2xl p-4 space-y-3">
-                <div className="flex items-center justify-between">
-                  <h3 className="text-[11px] font-black text-gray-500 uppercase flex items-center gap-1.5">
-                    <Paperclip size={12} /> Attach Files
-                    <span className="text-gray-300 font-normal normal-case ml-1">
-                      Images · Documents · Video recordings
-                    </span>
-                  </h3>
-                  <label className="cursor-pointer flex items-center gap-1.5 px-3 py-1.5 bg-indigo-600 text-white rounded-lg text-[10px] font-black uppercase hover:bg-indigo-700 transition">
-                    <Plus size={11} /> Add Files
-                    <input type="file" multiple className="hidden"
-                      accept="image/*,video/*,application/pdf,.doc,.docx,.xls,.xlsx"
-                      onChange={e => setNewMediaFiles(prev => [...prev, ...Array.from(e.target.files)])} />
-                  </label>
-                </div>
+            {/* ── Media attachments ── */}
+            <div style={{ borderTop: `1px solid ${T.border}`, paddingTop: 24, marginBottom: 24 }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14 }}>
+                <p style={{
+                  fontFamily: jost, fontSize: 9, fontWeight: 400,
+                  letterSpacing: '0.28em', textTransform: 'uppercase',
+                  color: 'rgba(184,151,90,0.65)', margin: 0,
+                  display: 'flex', alignItems: 'center', gap: 6,
+                }}>
+                  <Paperclip size={10} /> Attachments
+                  <span style={{ fontWeight: 300, color: T.muted, textTransform: 'none', letterSpacing: 0 }}>
+                    · images, documents, video
+                  </span>
+                </p>
+                <label style={{
+                  display: 'inline-flex', alignItems: 'center', gap: 6,
+                  background: T.gold, color: T.navy, border: 'none',
+                  padding: '6px 16px', cursor: 'pointer',
+                  fontFamily: jost, fontSize: 9, fontWeight: 500,
+                  letterSpacing: '0.2em', textTransform: 'uppercase',
+                  transition: 'background 0.25s',
+                }}
+                onMouseEnter={e => e.currentTarget.style.background = T.gold2}
+                onMouseLeave={e => e.currentTarget.style.background = T.gold}
+                >
+                  <Plus size={10} /> Add Files
+                  <input type="file" multiple style={{ display: 'none' }}
+                    accept="image/*,video/*,application/pdf,.doc,.docx,.xls,.xlsx"
+                    onChange={e => setNewMediaFiles(prev => [...prev, ...Array.from(e.target.files)])} />
+                </label>
+              </div>
 
-                {/* Existing media (edit mode) */}
-                {isEditing && (() => {
-                  const editingVendor = vendors.find(v => v._id === currentId);
-                  const existingMedia = (editingVendor?.media || []).filter(m => keepMediaIds.includes(m._id));
-                  return existingMedia.length > 0 ? (
-                    <div className="space-y-1">
-                      <p className="text-[9px] font-black text-gray-400 uppercase">Existing Files</p>
-                      {existingMedia.map(m => (
-                        <div key={m._id} className="flex items-center justify-between bg-white border border-gray-100 rounded-lg px-3 py-2">
-                          <div className="flex items-center gap-2 min-w-0">
-                            {mediaIcon(m.mimeType)}
-                            <div className="min-w-0">
-                              <div className="text-xs font-bold text-gray-700 truncate">{m.name}</div>
-                              <div className="text-[9px] text-gray-400">{fmtSize(m.size)}</div>
-                            </div>
-                          </div>
-                          <button
-                            onClick={e => handleDeleteMedia(currentId, m._id, e)}
-                            className="p-1 text-red-400 hover:bg-red-50 rounded transition flex-shrink-0">
-                            <X size={13} />
-                          </button>
-                        </div>
-                      ))}
-                    </div>
-                  ) : null;
-                })()}
-
-                {/* New files staged for upload */}
-                {newMediaFiles.length > 0 && (
-                  <div className="space-y-1">
-                    <p className="text-[9px] font-black text-gray-400 uppercase">New Files ({newMediaFiles.length})</p>
-                    {newMediaFiles.map((f, i) => (
-                      <div key={i} className="flex items-center justify-between bg-indigo-50 border border-indigo-100 rounded-lg px-3 py-2">
-                        <div className="flex items-center gap-2 min-w-0">
-                          {mediaIcon(f.type)}
-                          <div className="min-w-0">
-                            <div className="text-xs font-bold text-indigo-700 truncate">{f.name}</div>
-                            <div className="text-[9px] text-indigo-400">{fmtSize(f.size)}</div>
+              {/* Existing media (edit mode) */}
+              {isEditing && (() => {
+                const editingVendor = vendors.find(v => v._id === currentId);
+                const existingMedia = (editingVendor?.media || []).filter(m => keepMediaIds.includes(m._id));
+                return existingMedia.length > 0 ? (
+                  <div style={{ marginBottom: 12 }}>
+                    <p style={{
+                      fontFamily: jost, fontSize: 9, fontWeight: 400,
+                      letterSpacing: '0.2em', textTransform: 'uppercase',
+                      color: T.muted, marginBottom: 8,
+                    }}>
+                      Existing Files
+                    </p>
+                    {existingMedia.map(m => (
+                      <div key={m._id} style={{
+                        display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                        background: 'white', border: `1px solid ${T.border}`,
+                        padding: '10px 14px', marginBottom: 6,
+                      }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 0 }}>
+                          {mediaIcon(m.mimeType)}
+                          <div style={{ minWidth: 0 }}>
+                            <p style={{
+                              fontFamily: jost, fontSize: 11, fontWeight: 500, color: T.text,
+                              margin: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                            }}>
+                              {m.name}
+                            </p>
+                            <p style={{ fontFamily: jost, fontSize: 9, fontWeight: 300, color: T.muted, margin: 0 }}>
+                              {fmtSize(m.size)}
+                            </p>
                           </div>
                         </div>
                         <button
-                          onClick={() => setNewMediaFiles(prev => prev.filter((_, j) => j !== i))}
-                          className="p-1 text-red-400 hover:bg-red-50 rounded transition flex-shrink-0">
+                          onClick={e => handleDeleteMedia(currentId, m._id, e)}
+                          style={{ background: 'none', border: 'none', cursor: 'pointer', color: T.danger, display: 'flex' }}
+                          onMouseEnter={e => e.currentTarget.style.color = T.dangerHover}
+                          onMouseLeave={e => e.currentTarget.style.color = T.danger}
+                        >
                           <X size={13} />
                         </button>
                       </div>
                     ))}
                   </div>
-                )}
+                ) : null;
+              })()}
 
-                {newMediaFiles.length === 0 && !(isEditing && vendors.find(v => v._id === currentId)?.media?.length) && (
-                  <p className="text-[11px] text-gray-300 text-center py-2">No files attached yet</p>
-                )}
-              </div>
+              {/* Staged new files */}
+              {newMediaFiles.length > 0 && (
+                <div>
+                  <p style={{
+                    fontFamily: jost, fontSize: 9, fontWeight: 400,
+                    letterSpacing: '0.2em', textTransform: 'uppercase',
+                    color: T.gold, marginBottom: 8,
+                  }}>
+                    New Files ({newMediaFiles.length})
+                  </p>
+                  {newMediaFiles.map((f, i) => (
+                    <div key={i} style={{
+                      display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                      background: T.dimBg, border: `1px solid ${T.borderG}`,
+                      padding: '10px 14px', marginBottom: 6,
+                    }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 0 }}>
+                        {mediaIcon(f.type)}
+                        <div style={{ minWidth: 0 }}>
+                          <p style={{
+                            fontFamily: jost, fontSize: 11, fontWeight: 500, color: T.gold,
+                            margin: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                          }}>
+                            {f.name}
+                          </p>
+                          <p style={{ fontFamily: jost, fontSize: 9, fontWeight: 300, color: T.muted, margin: 0 }}>
+                            {fmtSize(f.size)}
+                          </p>
+                        </div>
+                      </div>
+                      <button
+                        onClick={() => setNewMediaFiles(prev => prev.filter((_, j) => j !== i))}
+                        style={{ background: 'none', border: 'none', cursor: 'pointer', color: T.danger, display: 'flex' }}
+                        onMouseEnter={e => e.currentTarget.style.color = T.dangerHover}
+                        onMouseLeave={e => e.currentTarget.style.color = T.danger}
+                      >
+                        <X size={13} />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {newMediaFiles.length === 0 && !(isEditing && vendors.find(v => v._id === currentId)?.media?.length) && (
+                <p style={{
+                  fontFamily: jost, fontSize: 11, fontWeight: 300,
+                  color: 'rgba(0,0,0,0.2)', textAlign: 'center', padding: '12px 0',
+                }}>
+                  No files attached yet
+                </p>
+              )}
             </div>
 
-            <div className="p-6 bg-gray-50 border-t flex flex-col md:flex-row justify-end gap-3">
-              <button onClick={() => setShowModal(false)} className="px-6 py-3 font-bold text-gray-400 uppercase text-xs">Cancel</button>
-              <button onClick={handleSave} className="bg-indigo-600 text-white px-10 py-3 rounded-xl font-black uppercase text-xs">Save Vendor</button>
+            {/* Modal footer */}
+            <div style={{
+              display: 'flex', justifyContent: 'flex-end', gap: 14,
+              borderTop: `1px solid ${T.border}`,
+              padding: '20px 0 28px',
+              position: 'sticky', bottom: 0,
+              background: 'white',
+            }}>
+              <button
+                onClick={() => setShowModal(false)}
+                style={{
+                  background: 'none', border: 'none', cursor: 'pointer',
+                  fontFamily: jost, fontSize: 10, fontWeight: 400,
+                  letterSpacing: '0.2em', textTransform: 'uppercase',
+                  color: T.muted, padding: '10px 20px', transition: 'color 0.2s',
+                }}
+                onMouseEnter={e => e.currentTarget.style.color = T.text}
+                onMouseLeave={e => e.currentTarget.style.color = T.muted}
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleSave}
+                disabled={isSaving}
+                style={{
+                  display: 'inline-flex', alignItems: 'center', gap: 10,
+                  background: isSaving ? T.borderG : T.gold,
+                  color: T.navy, border: 'none', padding: '12px 36px',
+                  fontFamily: jost, fontSize: 10, fontWeight: 500,
+                  letterSpacing: '0.22em', textTransform: 'uppercase',
+                  cursor: isSaving ? 'not-allowed' : 'pointer', transition: 'background 0.25s',
+                }}
+                onMouseEnter={e => { if (!isSaving) e.currentTarget.style.background = T.gold2; }}
+                onMouseLeave={e => { if (!isSaving) e.currentTarget.style.background = T.gold; }}
+              >
+                {isSaving && <Spinner />}
+                {isSaving ? 'Saving…' : 'Confirm'}
+              </button>
             </div>
           </div>
         </div>
       )}
-      {/* ── Media Lightbox ── */}
+
+      {/* ── Media Lightbox ──────────────────────────────────────────────── */}
       {lightboxMedia && (
-        <div className="fixed inset-0 bg-black/90 z-[200] flex items-center justify-center p-4"
-          onClick={() => setLightboxMedia(null)}>
-          <button className="absolute top-6 right-6 text-white/60 hover:text-white p-2">
+        <div
+          style={{
+            position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.92)',
+            zIndex: 200, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 16,
+          }}
+          onClick={() => setLightboxMedia(null)}
+        >
+          <button
+            style={{
+              position: 'absolute', top: 24, right: 24,
+              background: 'none', border: 'none', cursor: 'pointer',
+              color: 'rgba(255,255,255,0.5)', transition: 'color 0.2s',
+            }}
+            onMouseEnter={e => e.currentTarget.style.color = 'white'}
+            onMouseLeave={e => e.currentTarget.style.color = 'rgba(255,255,255,0.5)'}
+          >
             <X size={28} />
           </button>
-          <div className="max-w-4xl w-full max-h-[90vh] flex flex-col items-center"
-            onClick={e => e.stopPropagation()}>
+          <div
+            style={{ maxWidth: 900, width: '100%', maxHeight: '90vh', display: 'flex', flexDirection: 'column', alignItems: 'center' }}
+            onClick={e => e.stopPropagation()}
+          >
             {lightboxMedia.mimeType?.startsWith('image/') ? (
               <img src={lightboxMedia.url} alt={lightboxMedia.name}
-                className="max-h-[80vh] max-w-full object-contain rounded-lg shadow-2xl" />
+                style={{ maxHeight: '80vh', maxWidth: '100%', objectFit: 'contain', borderRadius: 2 }} />
             ) : lightboxMedia.mimeType?.startsWith('video/') ? (
               <video src={lightboxMedia.url} controls autoPlay
-                className="max-h-[80vh] max-w-full rounded-lg shadow-2xl" />
+                style={{ maxHeight: '80vh', maxWidth: '100%', borderRadius: 2 }} />
             ) : (
               <iframe src={lightboxMedia.url} title={lightboxMedia.name}
-                className="w-full h-[80vh] rounded-lg shadow-2xl bg-white" />
+                style={{ width: '100%', height: '80vh', borderRadius: 2, background: 'white', border: 'none' }} />
             )}
-            <div className="mt-4 flex items-center gap-4">
-              <span className="text-white/70 text-sm">{lightboxMedia.name}</span>
-              <a href={lightboxMedia.url} download={lightboxMedia.name}
+            <div style={{ marginTop: 16, display: 'flex', alignItems: 'center', gap: 20 }}>
+              <span style={{ fontFamily: jost, fontSize: 12, fontWeight: 300, color: 'rgba(255,255,255,0.6)' }}>
+                {lightboxMedia.name}
+              </span>
+              <a
+                href={lightboxMedia.url}
+                download={lightboxMedia.name}
                 onClick={e => e.stopPropagation()}
-                className="flex items-center gap-1.5 px-4 py-2 bg-white/10 hover:bg-white/20 text-white rounded-lg text-sm font-bold transition">
-                <Download size={14} /> Download
+                style={{
+                  display: 'inline-flex', alignItems: 'center', gap: 6,
+                  padding: '8px 20px', background: 'rgba(255,255,255,0.1)',
+                  color: 'white', textDecoration: 'none',
+                  fontFamily: jost, fontSize: 10, fontWeight: 400,
+                  letterSpacing: '0.2em', textTransform: 'uppercase',
+                  transition: 'background 0.2s',
+                }}
+                onMouseEnter={e => e.currentTarget.style.background = 'rgba(255,255,255,0.2)'}
+                onMouseLeave={e => e.currentTarget.style.background = 'rgba(255,255,255,0.1)'}
+              >
+                <Download size={13} /> Download
               </a>
             </div>
           </div>

@@ -1,6 +1,11 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useParams } from 'react-router-dom';
 import { initNotifications, requestNotifPermission, pushNotif, subscribeToPortalPush } from '../utils/portalNotifications';
+import { createLogger } from '../utils/logger';
+
+// ─── Logger ───────────────────────────────────────────────────────────────────
+const log = createLogger('ClientPortalView');
+const sdLog = createLogger('SmartDescription');
 
 // ─────────────────────────────────────────────────────────────────────────────
 // DESIGN SYSTEM — "The Digital Concierge" (DESIGN.md)
@@ -128,8 +133,8 @@ const Lightbox = ({ src, alt, all, startIdx, onClose }) => {
 const AttachChip = ({ att, isTeam }) => {
   const handleDownload = async (e) => {
     e.preventDefault();
+    log.debug('Downloading attachment', { name: att.name });
     try {
-      // Fetch the file as a blob so download works cross-origin
       const res = await fetch(att.url);
       if (!res.ok) throw new Error('File not found');
       const blob = await res.blob();
@@ -142,7 +147,7 @@ const AttachChip = ({ att, isTeam }) => {
       document.body.removeChild(a);
       URL.revokeObjectURL(url);
     } catch (err) {
-      // Fallback: open in new tab
+      log.warn('Attachment download failed, opening in new tab', err.message);
       window.open(att.url, '_blank');
     }
   };
@@ -355,6 +360,7 @@ const ProductCarousel = ({ images, primaryUrl, productName, onZoom }) => {
 const PropAttachChip = ({ att }) => {
   const handleClick = async (e) => {
     e.preventDefault();
+    log.debug('Downloading property attachment', { name: att.name });
     try {
       const res = await fetch(att.url);
       if (!res.ok) throw new Error('Not found');
@@ -364,7 +370,7 @@ const PropAttachChip = ({ att }) => {
       a.href = url; a.download = att.name;
       document.body.appendChild(a); a.click();
       document.body.removeChild(a); URL.revokeObjectURL(url);
-    } catch { window.open(att.url, '_blank'); }
+    } catch(err) { log.warn('Property attachment download failed', err.message); window.open(att.url, '_blank'); }
   };
   return (
     <a href={att.url} target="_blank" rel="noreferrer" onClick={handleClick}
@@ -402,6 +408,7 @@ const SmartDescription = ({ text, itemId }) => {
   }, []);
 
   const parse = async () => {
+    sdLog.info('Parsing property description via AI', { itemId, length: text?.length });
     setState('loading');
     try {
       const response = await fetch('https://api.anthropic.com/v1/messages', {
@@ -431,8 +438,9 @@ Rules: Each point max 12 words. Distance/travel info → "travel". Never duplica
         setSections(parsed.sections);
         setState('done');
         sessionStorage.setItem(cacheKey, JSON.stringify(parsed.sections));
-      } else { setState('error'); }
-    } catch { setState('error'); }
+        sdLog.info('SmartDescription parsed and cached', { itemId, sections: parsed.sections.length });
+      } else { setState('error'); sdLog.warn('SmartDescription: no sections returned', { itemId }); }
+    } catch(err) { setState('error'); sdLog.error('SmartDescription parse failed', err.message); }
   };
 
   if (!text) return null;
@@ -515,6 +523,17 @@ const Toast = ({ toasts }) => (
 // ─────────────────────────────────────────────────────────────────────────────
 // MAIN COMPONENT
 // ─────────────────────────────────────────────────────────────────────────────
+// ── Skeleton bar — matches the existing pulse animation aesthetic ─────────────
+// Used to buffer loading states instead of raw spinners.
+const SkeletonBar = ({ w = '100%', h = 12, style: extra = {} }) => (
+  <div style={{
+    height: h, width: w, borderRadius: 6,
+    background: 'rgba(184,151,90,0.08)',
+    animation: 'pulse 1.5s ease infinite',
+    ...extra,
+  }} />
+);
+
 // ── Mobile breakpoint hook ────────────────────────────────────────────────────
 const useMobile = () => {
   const [mob, setMob] = React.useState(() => window.innerWidth <= 480);
@@ -571,11 +590,12 @@ const ClientPortalView = () => {
       s.has(id) ? s.delete(id) : s.add(id);
       // Persist to DB so shortlist survives page refresh
       const ids = Array.from(s);
+      log.debug('Updating shortlist', { itemId: id, total: ids.length });
       fetch(`/api/portal/public/${slug}/shortlist`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ ids }),
-      }).catch(() => {}); // fire and forget — don't block UI
+      }).catch(err => log.warn('Shortlist sync failed', err.message));
       return s;
     });
   };
@@ -583,9 +603,15 @@ const ClientPortalView = () => {
   useEffect(()=>{
     initNotifications(); // register SW, no permission prompt yet
     load();
-    fetch(`/api/portal/public/${slug}/view`,{method:'POST'}).catch(()=>{});
+    log.info('Portal view mounted', { slug });
+    fetch(`/api/portal/public/${slug}/view`,{method:'POST'}).catch(err =>
+      log.warn('View count increment failed', err.message)
+    );
     pollTimer.current = setInterval(()=>load(true), 12000);
-    return ()=>clearInterval(pollTimer.current);
+    return ()=>{
+      clearInterval(pollTimer.current);
+      log.debug('Portal view unmounted', { slug });
+    };
   },[slug]);
 
   useEffect(()=>{ if(tab==='chat') chatEnd.current?.scrollIntoView({behavior:'smooth'}); },[portal?.messages,tab]);
@@ -593,13 +619,15 @@ const ClientPortalView = () => {
   // Fetch shipments when shipments tab is first opened
   useEffect(()=>{
     if(tab!=='shipments'||shipmentsLoaded||!portal?.orderId) return;
+    log.info('Fetching shipments', { slug });
     fetch(`/api/portal/public/${slug}/shipments`)
-      .then(r=>r.ok?r.json():[])
-      .then(data=>{ setShipments(Array.isArray(data)?data:[]); setShipmentsLoaded(true); })
-      .catch(()=>setShipmentsLoaded(true));
+      .then(r=>{ if(!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })
+      .then(data=>{ const arr=Array.isArray(data)?data:[]; log.info('Shipments loaded',{count:arr.length}); setShipments(arr); setShipmentsLoaded(true); })
+      .catch(err=>{ log.error('Shipments fetch failed', err.message); setShipmentsLoaded(true); });
   },[tab,shipmentsLoaded,portal,slug]);
 
   const load = async (silent=false) => {
+    if (!silent) log.debug('Loading portal', { slug });
     try{
       const res = await fetch(`/api/portal/public/${slug}`);
       if(!res.ok) throw new Error((await res.json()).message);
@@ -609,12 +637,14 @@ const ClientPortalView = () => {
         if(teamMsgs.length>prevMsgCount.current){
           const newest=teamMsgs[teamMsgs.length-1];
           const preview=newest.text?newest.text.slice(0,55)+(newest.text.length>55?'…':''):newest.attachments?.length?`📎 ${newest.attachments[0].name}`:'New message';
+          log.info('New team message detected', { preview: preview.slice(0, 40) });
           showToast('Marqland Team',preview,'💬');
           pushNotif('Marqland Studios — New Message', preview, 'portal-team-msg');
         }
         prevMsgCount.current=(data.messages||[]).filter(m=>m.sender==='team').length;
       } else {
         prevMsgCount.current=(data.messages||[]).filter(m=>m.sender==='team').length;
+        if (!silent) log.info('Portal loaded', { slug, type: data.type });
       }
       setPortal(data);
       // Restore shortlist from DB on first load (not on silent polls).
@@ -624,7 +654,7 @@ const ClientPortalView = () => {
       }
       const name=data.orderPlacedBy||data.clientName||'';
       setClientName(name); if(name) setNameSet(true);
-    }catch(e){ if(!silent) setError(e.message||'Link invalid or expired.'); }
+    }catch(e){ if(!silent){ log.error('Portal load failed', e.message); setError(e.message||'Link invalid or expired.'); } }
     finally  { if(!silent) setLoading(false); }
   };
 
@@ -634,6 +664,7 @@ const ClientPortalView = () => {
     const perm = await requestNotifPermission();
     if (perm === 'granted') subscribeToPortalPush(fetch); // register for server-side push
     const sender=clientName?.trim()||portal?.orderPlacedBy||portal?.clientName||'Client';
+    log.info('Sending message', { sender, hasText: !!msg.trim(), fileCount: files.length });
     setSending(true);
     try{
       const fd=new FormData();
@@ -641,10 +672,11 @@ const ClientPortalView = () => {
       files.forEach(f=>fd.append('files',f));
       const r=await fetch(`/api/portal/public/${slug}/message`,{method:'POST',body:fd});
       if(!r.ok){ const e=await r.json().catch(()=>({})); throw new Error(e.message||'Send failed'); }
+      log.info('Message sent successfully');
       setMsg(''); setFiles([]);
       showToast('Delivered','Your message has been sent to the team.','✓');
       await load();
-    }catch(e){ alert('Could not send: '+e.message); }
+    }catch(e){ log.error('Message send failed', e.message); alert('Could not send: '+e.message); }
     finally{ setSending(false); }
   };
 
@@ -944,9 +976,29 @@ const ClientPortalView = () => {
             'Exception':         {bg:'rgba(239,68,68,0.12)',   color:'#fca5a5'},
           };
           if(!shipmentsLoaded) return (
-            <div style={{textAlign:'center',padding:'64px 0'}}>
-              <div style={{width:32,height:32,border:'1px solid rgba(184,151,90,0.3)',borderTopColor:'#b8975a',borderRadius:'50%',animation:'spin .9s linear infinite',margin:'0 auto 16px'}}/>
-              <div style={{fontSize:12,color:'#888888',fontFamily:"'Jost',sans-serif"}}>Loading shipments…</div>
+            <div>
+              {/* Summary strip skeleton */}
+              <div style={{display:'flex',alignItems:'center',gap:14,marginBottom:16,padding:'20px 24px',background:'#fff',border:'1px solid rgba(0,0,0,0.07)'}}>
+                <div style={{width:1,height:24,background:'rgba(184,151,90,0.3)',flexShrink:0}}/>
+                <div style={{flex:1,display:'flex',flexDirection:'column',gap:6}}>
+                  <SkeletonBar w="18%" h={14}/>
+                  <SkeletonBar w="30%" h={10}/>
+                </div>
+              </div>
+              {/* Card skeletons */}
+              <div style={{display:'flex',flexDirection:'column',gap:10}}>
+                {Array.from({length:4}).map((_,i)=>(
+                  <div key={i} style={{background:'#fff',border:'1px solid rgba(0,0,0,0.07)',padding:'20px 24px',display:'flex',alignItems:'center',gap:16,borderRadius:4,animation:`obsidianFadeIn .5s ease ${i*0.08}s both`}}>
+                    <SkeletonBar w={10} h={10} style={{borderRadius:'50%',flexShrink:0}}/>
+                    <div style={{flex:1,display:'flex',flexDirection:'column',gap:6}}>
+                      <SkeletonBar w="35%" h={13}/>
+                      <SkeletonBar w="50%" h={10}/>
+                    </div>
+                    <SkeletonBar w={100} h={26} style={{borderRadius:7,flexShrink:0}}/>
+                    <SkeletonBar w={70} h={22} style={{borderRadius:20,flexShrink:0}}/>
+                  </div>
+                ))}
+              </div>
             </div>
           );
           if(shipments.length===0) return (
@@ -1813,11 +1865,12 @@ const CostCalculator = ({ portal, wishlisted=new Set() }) => {
       Object.entries(calcsRef.current).forEach(([id, c]) => {
         merged[id] = { ...(persistedCalc[id] || {}), ...c };
       });
+      log.debug('Persisting calculator state', { slug });
       fetch(`/api/portal/public/${slug}/calculator`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ calculatorState: merged }),
-      }).catch(() => {});
+      }).catch(err => log.warn('Calculator state persist failed', err.message));
     }, 800);
   }, [slug]);
 

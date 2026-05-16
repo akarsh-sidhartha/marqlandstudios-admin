@@ -1,86 +1,126 @@
 import React, { useState, useEffect } from 'react';
 import api from '../api';
-import { Download, Plus, Search, ChevronDown, ChevronRight, Edit2, Trash2, Mail, Phone, Building2 } from 'lucide-react';
+import { createLogger } from '../utils/logger';
+import { SectionLoader, SkeletonList } from '../components/PageLoader';
+import { Download, Search, ChevronDown, ChevronRight, Edit2, Trash2, Building2 } from 'lucide-react';
 
+const log = createLogger('ClientList');
+
+// ── Design tokens ─────────────────────────────────────────────────────────────
+const T = {
+  navy:    '#0e1520',
+  gold:    '#b8975a',
+  gold2:   '#d4b06a',
+  offwhite:'#faf8f5',
+  text:    '#1a1a1a',
+  muted:   '#888',
+  border:  'rgba(0,0,0,0.07)',
+  borderG: 'rgba(184,151,90,0.18)',
+  dimBg:   'rgba(184,151,90,0.04)',
+};
+const jost  = '"Jost", sans-serif';
+const serif = '"Cormorant Garamond", Georgia, serif';
+
+// ── Shared input style ────────────────────────────────────────────────────────
+const inputStyle = (focused) => ({
+  width: '100%', padding: '10px 14px',
+  background: 'white',
+  border: `1px solid ${focused ? T.gold : T.border}`,
+  borderRadius: 3,
+  fontFamily: jost, fontSize: 13, fontWeight: 300,
+  color: T.text, outline: 'none',
+  boxSizing: 'border-box',
+  transition: 'border-color 0.2s',
+});
+
+const FocusInput = ({ value, onChange, placeholder, style: extra = {} }) => {
+  const [focused, setFocused] = useState(false);
+  return (
+    <input
+      value={value}
+      onChange={onChange}
+      placeholder={placeholder}
+      onFocus={() => setFocused(true)}
+      onBlur={() => setFocused(false)}
+      style={{ ...inputStyle(focused), ...extra }}
+    />
+  );
+};
+
+// ── ClientList ────────────────────────────────────────────────────────────────
 const ClientList = () => {
-  const [clients, setClients]       = useState([]);
-  const [searchTerm, setSearchTerm] = useState('');
+  const [clients, setClients]           = useState([]);
+  const [isLoading, setIsLoading]       = useState(true);
+  const [searchTerm, setSearchTerm]     = useState('');
   const [expandedRows, setExpandedRows] = useState([]);
-  const [showModal, setShowModal]   = useState(false);
-  const [isEditing, setIsEditing]   = useState(false);
-  const [currentId, setCurrentId]   = useState(null);
-  const [sortOrder, setSortOrder]   = useState('asc');
+  const [showModal, setShowModal]       = useState(false);
+  const [isEditing, setIsEditing]       = useState(false);
+  const [currentId, setCurrentId]       = useState(null);
+  const [sortOrder, setSortOrder]       = useState('asc');
+  const [searchFocused, setSearchFocused] = useState(false);
 
   const [formData, setFormData] = useState({
     companyName: '',
-    contacts: [{ name: '', phone: '', email: '' }]
+    contacts: [{ name: '', phone: '', email: '' }],
   });
 
   useEffect(() => { fetchClients(); }, []);
 
   const fetchClients = async () => {
+    log.debug('Fetching clients…');
+    setIsLoading(true);
     try {
-      const res = await api.get('/clients'); // ← added await (was missing before)
+      const res = await api.get('/clients');
+      log.info('Clients loaded', { count: res.data.length });
       setClients(res.data);
     } catch (err) {
-      console.error("Error fetching clients", err);
+      log.error('Failed to fetch clients', err.message);
+    } finally {
+      setIsLoading(false);
     }
   };
 
   const processClients = () => {
-    let result = clients.filter(c => {
-      const searchStr = searchTerm.toLowerCase();
-      const contactMatch = c.contacts?.some(contact =>
-        contact.name?.toLowerCase().includes(searchStr)
-      );
-      return c.companyName?.toLowerCase().includes(searchStr) || contactMatch;
-    });
-    result.sort((a, b) => {
-      const nameA = a.companyName.toLowerCase();
-      const nameB = b.companyName.toLowerCase();
-      if (sortOrder === 'asc') return nameA < nameB ? -1 : 1;
-      return nameA > nameB ? -1 : 1;
-    });
-    return result;
+    const s = searchTerm.toLowerCase();
+    return clients
+      .filter(c =>
+        c.companyName?.toLowerCase().includes(s) ||
+        c.contacts?.some(ct => ct.name?.toLowerCase().includes(s))
+      )
+      .sort((a, b) => {
+        const na = a.companyName.toLowerCase();
+        const nb = b.companyName.toLowerCase();
+        return sortOrder === 'asc' ? (na < nb ? -1 : 1) : (na > nb ? -1 : 1);
+      });
   };
 
   const filteredClients = processClients();
 
-  const toggleSort = () => setSortOrder(prev => prev === 'asc' ? 'desc' : 'asc');
-
-  const toggleRow = (id) => {
-    setExpandedRows(prev =>
-      prev.includes(id) ? prev.filter(rowId => rowId !== id) : [...prev, id]
-    );
-  };
+  const toggleSort  = () => setSortOrder(p => p === 'asc' ? 'desc' : 'asc');
+  const toggleRow   = (id) => setExpandedRows(p => p.includes(id) ? p.filter(r => r !== id) : [...p, id]);
 
   const handleContactChange = (index, field, value) => {
-    const updatedContacts = [...formData.contacts];
-    updatedContacts[index][field] = value;
-    setFormData({ ...formData, contacts: updatedContacts });
+    const updated = [...formData.contacts];
+    updated[index][field] = value;
+    setFormData({ ...formData, contacts: updated });
   };
 
-  const handleAddContactRow = () => {
-    setFormData({ ...formData, contacts: [...formData.contacts, { name: '', phone: '', email: '' }] });
-  };
-
+  const handleAddContactRow    = () => setFormData({ ...formData, contacts: [...formData.contacts, { name: '', phone: '', email: '' }] });
   const handleRemoveContactRow = (index) => {
-    const updatedContacts = formData.contacts.filter((_, i) => i !== index);
-    setFormData({
-      ...formData,
-      contacts: updatedContacts.length > 0 ? updatedContacts : [{ name: '', phone: '', email: '' }]
-    });
+    const updated = formData.contacts.filter((_, i) => i !== index);
+    setFormData({ ...formData, contacts: updated.length > 0 ? updated : [{ name: '', phone: '', email: '' }] });
   };
 
   const handleDelete = async (id, name, e) => {
     e.stopPropagation();
-    if (window.confirm(`Are you sure you want to delete client "${name}"?`)) {
-      try {
-        await api.delete(`/clients/${id}`); // ← added await
-        fetchClients();
-      } catch (err) {
-        alert("Failed to delete client.");
-      }
+    if (!window.confirm(`Delete client "${name}"?`)) return;
+    log.info('Deleting client', { id, name });
+    try {
+      await api.delete(`/clients/${id}`);
+      fetchClients();
+    } catch (err) {
+      log.error('Delete failed', err.message);
+      alert('Failed to delete client.');
     }
   };
 
@@ -90,53 +130,39 @@ const ClientList = () => {
     setCurrentId(client._id);
     setFormData({
       companyName: client.companyName,
-      contacts: client.contacts.length > 0 ? client.contacts : [{ name: '', phone: '', email: '' }]
+      contacts: client.contacts.length > 0 ? client.contacts : [{ name: '', phone: '', email: '' }],
     });
     setShowModal(true);
   };
 
   const handleSave = async () => {
+    log.info(isEditing ? 'Updating client' : 'Creating client', { companyName: formData.companyName });
     try {
-      if (isEditing) {
-        await api.put(`/clients/${currentId}`, formData); // ← fixed: was /clients/${id} (id undefined)
-      } else {
-        await api.post('/clients', formData); // ← added await
-      }
+      if (isEditing) await api.put(`/clients/${currentId}`, formData);
+      else            await api.post('/clients', formData);
       setShowModal(false);
       resetForm();
       fetchClients();
     } catch (err) {
-      alert("Error saving client.");
+      log.error('Save failed', err.message);
+      alert('Error saving client.');
     }
   };
 
   const exportToExcel = () => {
-    const headers = ["Company Name", "Contact Person", "Phone", "Email"];
-    const rows = filteredClientsforExcel.flatMap(client =>
-      client.contacts.map(contact => [
-        client.companyName,
-        contact.name,
-        contact.phone,
-        contact.email
-      ])
-    );
-    const csvContent = "data:text/csv;charset=utf-8,"
-      + [headers, ...rows].map(e => e.map(val => `"${val || ''}"`).join(",")).join("\n");
-    const encodedUri = encodeURI(csvContent);
-    const link = document.createElement("a");
-    link.setAttribute("href", encodedUri);
-    link.setAttribute("download", `Client_List_${new Date().toLocaleDateString()}.csv`);
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
+    log.debug('Exporting clients to CSV');
+    const headers = ['Company Name', 'Contact Person', 'Phone', 'Email'];
+    const rows = clients
+      .filter(c => c.companyName.toLowerCase().includes(searchTerm.toLowerCase()))
+      .sort((a, b) => sortOrder === 'asc' ? a.companyName.localeCompare(b.companyName) : b.companyName.localeCompare(a.companyName))
+      .flatMap(c => c.contacts.map(ct => [c.companyName, ct.name, ct.phone, ct.email]));
+    const csv = 'data:text/csv;charset=utf-8,' +
+      [headers, ...rows].map(r => r.map(v => `"${v || ''}"`).join(',')).join('\n');
+    const a = document.createElement('a');
+    a.href = encodeURI(csv);
+    a.download = `Client_List_${new Date().toLocaleDateString()}.csv`;
+    document.body.appendChild(a); a.click(); document.body.removeChild(a);
   };
-
-  const filteredClientsforExcel = clients
-    .filter(c => c.companyName.toLowerCase().includes(searchTerm.toLowerCase()))
-    .sort((a, b) => {
-      if (sortOrder === 'asc') return a.companyName.localeCompare(b.companyName);
-      return b.companyName.localeCompare(a.companyName);
-    });
 
   const resetForm = () => {
     setFormData({ companyName: '', contacts: [{ name: '', phone: '', email: '' }] });
@@ -145,100 +171,288 @@ const ClientList = () => {
   };
 
   return (
-    <div className="p-6 bg-gray-50 min-h-screen">
-      {/* HEADER */}
-      <div className="flex flex-row items-center justify-between gap-6 mb-8 bg-white p-4 rounded-xl shadow-sm border border-gray-100">
-        <h1 className="text-xl font-black text-gray-800 tracking-tight uppercase whitespace-nowrap border-r pr-6 border-gray-200">
-          Client Management
+    <div style={{ minHeight: '100vh', background: T.offwhite, fontFamily: jost, padding: '56px 48px' }}>
+
+      {/* ── Page header ──────────────────────────────────────────────── */}
+      <div style={{ marginBottom: 40 }}>
+        <div style={{ width: 32, height: 1, background: T.gold, marginBottom: 20 }} />
+        <p style={{
+          fontSize: 9, fontWeight: 400, letterSpacing: '0.3em',
+          textTransform: 'uppercase', color: T.muted, marginBottom: 10,
+        }}>
+          Documentation
+        </p>
+        <h1 style={{
+          fontFamily: serif, fontSize: 40, fontWeight: 300,
+          color: T.navy, lineHeight: 1.05, margin: '0 0 24px',
+        }}>
+          Client <em style={{ color: T.gold }}>Management.</em>
         </h1>
 
-        <div className="flex-grow max-w-2xl relative group">
-          <span className="absolute left-3 top-3 text-gray-400">🔍</span>
-          <input
-            type="text"
-            placeholder="Search by company or contact name..."
-            className="w-full pl-10 pr-10 py-2.5 rounded-lg border border-gray-200 focus:ring-2 focus:ring-indigo-500 outline-none transition bg-gray-50/50"
-            value={searchTerm}
-            onChange={(e) => setSearchTerm(e.target.value)}
-          />
-          {searchTerm && (
-            <button
-              onClick={() => setSearchTerm('')}
-              className="absolute right-3 top-2.5 text-gray-400 hover:text-gray-600 bg-gray-200 hover:bg-gray-300 rounded-full w-6 h-6 flex items-center justify-center transition"
-            >✕</button>
-          )}
+        {/* Controls row */}
+        <div style={{ display: 'flex', gap: 14, flexWrap: 'wrap', alignItems: 'center' }}>
+          {/* Search */}
+          <div style={{ position: 'relative', flex: '1 1 260px', maxWidth: 420 }}>
+            <Search size={13} style={{
+              position: 'absolute', left: 13, top: '50%',
+              transform: 'translateY(-50%)', color: T.muted, pointerEvents: 'none',
+            }} />
+            <input
+              type="text"
+              placeholder="Search by company or contact…"
+              value={searchTerm}
+              onChange={e => setSearchTerm(e.target.value)}
+              onFocus={() => setSearchFocused(true)}
+              onBlur={() => setSearchFocused(false)}
+              style={{
+                width: '100%', padding: '10px 36px 10px 36px',
+                background: 'white',
+                border: `1px solid ${searchFocused ? T.gold : T.border}`,
+                borderRadius: 3,
+                fontFamily: jost, fontSize: 12, fontWeight: 300,
+                color: T.text, outline: 'none',
+                boxSizing: 'border-box', transition: 'border-color 0.2s',
+              }}
+            />
+            {searchTerm && (
+              <button
+                onClick={() => setSearchTerm('')}
+                style={{
+                  position: 'absolute', right: 12, top: '50%',
+                  transform: 'translateY(-50%)', background: 'none',
+                  border: 'none', cursor: 'pointer', color: T.muted,
+                  display: 'flex', padding: 0,
+                }}
+              >✕</button>
+            )}
+          </div>
+
+          {/* Add client */}
+          <button
+            onClick={() => { resetForm(); setShowModal(true); }}
+            style={{
+              display: 'inline-flex', alignItems: 'center', gap: 8,
+              background: T.gold, color: T.navy,
+              border: 'none', padding: '11px 28px',
+              fontFamily: jost, fontSize: 10, fontWeight: 500,
+              letterSpacing: '0.22em', textTransform: 'uppercase',
+              cursor: 'pointer', transition: 'background 0.25s',
+              flexShrink: 0,
+            }}
+            onMouseEnter={e => e.currentTarget.style.background = T.gold2}
+            onMouseLeave={e => e.currentTarget.style.background = T.gold}
+          >
+            + Add Client
+          </button>
+
+          {/* Export */}
+          <button
+            onClick={exportToExcel}
+            style={{
+              display: 'inline-flex', alignItems: 'center', gap: 8,
+              background: 'transparent', color: T.muted,
+              border: `1px solid ${T.border}`, padding: '10px 20px',
+              fontFamily: jost, fontSize: 10, fontWeight: 400,
+              letterSpacing: '0.2em', textTransform: 'uppercase',
+              cursor: 'pointer', transition: 'border-color 0.25s, color 0.25s',
+              flexShrink: 0,
+            }}
+            onMouseEnter={e => {
+              e.currentTarget.style.borderColor = T.gold;
+              e.currentTarget.style.color = T.gold;
+            }}
+            onMouseLeave={e => {
+              e.currentTarget.style.borderColor = T.border;
+              e.currentTarget.style.color = T.muted;
+            }}
+          >
+            <Download size={13} /> Export
+          </button>
         </div>
-
-        <button
-          onClick={() => { resetForm(); setShowModal(true); }}
-          className="bg-indigo-600 text-white px-6 py-2.5 rounded-lg font-bold hover:bg-indigo-700 shadow-md transition whitespace-nowrap flex-shrink-0"
-        >
-          + Add Client
-        </button>
-
-        <button
-          onClick={exportToExcel}
-          className="flex items-center gap-2 bg-white border-2 border-slate-100 text-slate-600 px-6 py-3 rounded-2xl font-black text-xs uppercase hover:bg-slate-50 transition-all shadow-sm"
-        >
-          <Download size={16} />
-          Export
-        </button>
       </div>
 
-      {/* TABLE */}
-      <div className="bg-white shadow-sm rounded-xl border border-gray-200 overflow-hidden">
-        <table className="w-full text-left border-collapse">
-          <thead className="bg-gray-100 border-b border-gray-200 uppercase text-[11px] font-black text-gray-500">
-            <tr>
-              <th className="p-3 w-10"></th>
-              <th className="p-3 cursor-pointer hover:text-indigo-600 transition flex items-center gap-1" onClick={toggleSort}>
-                Client Company {sortOrder === 'asc' ? '↑' : '↓'}
+      {/* ── Table ────────────────────────────────────────────────────── */}
+      <div style={{
+        background: 'white',
+        border: `1px solid ${T.border}`,
+        overflow: 'hidden',
+      }}>
+        <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+          <thead>
+            <tr style={{
+              borderBottom: `1px solid ${T.border}`,
+              background: T.offwhite,
+            }}>
+              {/* Expand toggle col */}
+              <th style={{ width: 44, padding: '12px 16px' }} />
+              <th
+                onClick={toggleSort}
+                style={{
+                  padding: '12px 16px', textAlign: 'left',
+                  fontFamily: jost, fontSize: 9, fontWeight: 400,
+                  letterSpacing: '0.25em', textTransform: 'uppercase',
+                  color: T.muted, cursor: 'pointer', userSelect: 'none',
+                  transition: 'color 0.2s',
+                  whiteSpace: 'nowrap',
+                }}
+                onMouseEnter={e => e.currentTarget.style.color = T.gold}
+                onMouseLeave={e => e.currentTarget.style.color = T.muted}
+              >
+                Company {sortOrder === 'asc' ? '↑' : '↓'}
               </th>
-              <th className="p-3">Primary Contact</th>
-              <th className="p-3 text-right">Actions</th>
+              <th style={{
+                padding: '12px 16px', textAlign: 'left',
+                fontFamily: jost, fontSize: 9, fontWeight: 400,
+                letterSpacing: '0.25em', textTransform: 'uppercase', color: T.muted,
+              }}>
+                Primary Contact
+              </th>
+              <th style={{
+                padding: '12px 16px', textAlign: 'right',
+                fontFamily: jost, fontSize: 9, fontWeight: 400,
+                letterSpacing: '0.25em', textTransform: 'uppercase', color: T.muted,
+              }}>
+                Actions
+              </th>
             </tr>
           </thead>
           <tbody>
-            {filteredClients.map(c => {
+            {isLoading ? (
+              <SkeletonList rows={8} cols={4} />
+            ) : filteredClients.length === 0 ? (
+              <tr>
+                <td colSpan={4} style={{ padding: '64px 0', textAlign: 'center' }}>
+                  <Building2 size={28} style={{ color: 'rgba(0,0,0,0.12)', margin: '0 auto 12px', display: 'block' }} />
+                  <p style={{
+                    fontFamily: jost, fontSize: 12, fontWeight: 300,
+                    letterSpacing: '0.1em', color: T.muted,
+                  }}>
+                    No clients found
+                  </p>
+                </td>
+              </tr>
+            ) : filteredClients.map(c => {
               const isExpanded = expandedRows.includes(c._id);
               return (
                 <React.Fragment key={c._id}>
                   <tr
                     onClick={() => toggleRow(c._id)}
-                    className={`cursor-pointer border-b transition-colors ${isExpanded ? 'bg-indigo-50/30' : 'hover:bg-gray-50'}`}
+                    style={{
+                      cursor: 'pointer',
+                      borderBottom: `1px solid ${T.border}`,
+                      background: isExpanded ? T.dimBg : 'transparent',
+                      transition: 'background 0.2s',
+                    }}
+                    onMouseEnter={e => { if (!isExpanded) e.currentTarget.style.background = 'rgba(0,0,0,0.015)'; }}
+                    onMouseLeave={e => { if (!isExpanded) e.currentTarget.style.background = 'transparent'; }}
                   >
-                    <td className="p-3 text-center text-[10px] text-gray-400">
-                      {isExpanded ? '▼' : '▶'}
+                    <td style={{ padding: '14px 16px', textAlign: 'center', width: 44 }}>
+                      {isExpanded
+                        ? <ChevronDown size={13} style={{ color: T.gold }} />
+                        : <ChevronRight size={13} style={{ color: T.muted }} />}
                     </td>
-                    <td className="p-3 font-bold text-gray-700 uppercase text-sm">{c.companyName}</td>
-                    <td className="p-3 text-sm text-gray-500">
-                      {c.contacts[0]?.name || '---'}
+                    <td style={{
+                      padding: '14px 16px',
+                      fontFamily: jost, fontSize: 12, fontWeight: 500,
+                      letterSpacing: '0.06em', textTransform: 'uppercase',
+                      color: T.text,
+                    }}>
+                      {c.companyName}
+                    </td>
+                    <td style={{
+                      padding: '14px 16px',
+                      fontFamily: jost, fontSize: 12, fontWeight: 300,
+                      color: T.muted,
+                    }}>
+                      {c.contacts[0]?.name || '—'}
                       {c.contacts.length > 1 && (
-                        <span className="ml-2 text-[10px] bg-gray-200 px-1.5 py-0.5 rounded-full">
-                          +{c.contacts.length - 1} more
+                        <span style={{
+                          marginLeft: 8,
+                          fontFamily: jost, fontSize: 9, fontWeight: 400,
+                          letterSpacing: '0.15em', textTransform: 'uppercase',
+                          color: T.gold, border: `1px solid ${T.borderG}`,
+                          padding: '2px 7px',
+                        }}>
+                          +{c.contacts.length - 1}
                         </span>
                       )}
                     </td>
-                    <td className="p-3 text-right">
-                      <button onClick={(e) => handleEdit(c, e)} className="text-indigo-600 font-bold text-[11px] hover:underline mr-4 uppercase">Edit</button>
-                      <button onClick={(e) => handleDelete(c._id, c.companyName, e)} className="text-red-500 font-bold text-[11px] hover:underline uppercase">Delete</button>
+                    <td style={{ padding: '14px 16px', textAlign: 'right' }}>
+                      <button
+                        onClick={e => handleEdit(c, e)}
+                        style={{
+                          background: 'none', border: 'none', cursor: 'pointer',
+                          fontFamily: jost, fontSize: 9, fontWeight: 400,
+                          letterSpacing: '0.2em', textTransform: 'uppercase',
+                          color: T.gold, marginRight: 20,
+                          transition: 'color 0.2s',
+                        }}
+                        onMouseEnter={e => e.currentTarget.style.color = T.gold2}
+                        onMouseLeave={e => e.currentTarget.style.color = T.gold}
+                      >
+                        Edit
+                      </button>
+                      <button
+                        onClick={e => handleDelete(c._id, c.companyName, e)}
+                        style={{
+                          background: 'none', border: 'none', cursor: 'pointer',
+                          fontFamily: jost, fontSize: 9, fontWeight: 400,
+                          letterSpacing: '0.2em', textTransform: 'uppercase',
+                          color: 'rgba(220,38,38,0.6)', transition: 'color 0.2s',
+                        }}
+                        onMouseEnter={e => e.currentTarget.style.color = '#dc2626'}
+                        onMouseLeave={e => e.currentTarget.style.color = 'rgba(220,38,38,0.6)'}
+                      >
+                        Delete
+                      </button>
                     </td>
                   </tr>
 
+                  {/* Expanded contact directory */}
                   {isExpanded && (
-                    <tr className="bg-gray-50/50">
-                      <td colSpan="4" className="p-6 border-b shadow-inner">
-                        <div>
-                          <p className="text-[10px] font-black text-gray-400 uppercase mb-4 tracking-widest">Full Contact Directory</p>
-                          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-                            {c.contacts.map((contact, idx) => (
-                              <div key={idx} className="bg-white p-4 rounded-xl border border-gray-200 shadow-sm flex flex-col gap-1">
-                                <p className="font-bold text-gray-800 text-sm">{contact.name}</p>
-                                <p className="text-xs text-gray-500 mt-1">📞 {contact.phone || 'N/A'}</p>
-                                <p className="text-xs text-gray-500 truncate">✉️ {contact.email || 'N/A'}</p>
-                              </div>
-                            ))}
-                          </div>
+                    <tr>
+                      <td colSpan={4} style={{
+                        padding: '24px 24px 24px 48px',
+                        borderBottom: `1px solid ${T.border}`,
+                        background: T.dimBg,
+                      }}>
+                        <p style={{
+                          fontFamily: jost, fontSize: 9, fontWeight: 400,
+                          letterSpacing: '0.28em', textTransform: 'uppercase',
+                          color: 'rgba(184,151,90,0.6)', marginBottom: 16,
+                        }}>
+                          Full Contact Directory
+                        </p>
+                        <div style={{
+                          display: 'grid',
+                          gridTemplateColumns: 'repeat(auto-fill, minmax(220px, 1fr))',
+                          gap: 12,
+                        }}>
+                          {c.contacts.map((contact, idx) => (
+                            <div key={idx} style={{
+                              background: 'white',
+                              border: `1px solid ${T.border}`,
+                              padding: '16px 18px',
+                              display: 'flex', flexDirection: 'column', gap: 5,
+                            }}>
+                              <p style={{
+                                fontFamily: jost, fontSize: 12, fontWeight: 500,
+                                color: T.text, margin: 0,
+                              }}>
+                                {contact.name}
+                              </p>
+                              <p style={{ fontFamily: jost, fontSize: 11, fontWeight: 300, color: T.muted, margin: 0 }}>
+                                {contact.phone || 'No phone'}
+                              </p>
+                              <p style={{
+                                fontFamily: jost, fontSize: 11, fontWeight: 300,
+                                color: T.muted, margin: 0,
+                                overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                              }}>
+                                {contact.email || 'No email'}
+                              </p>
+                            </div>
+                          ))}
                         </div>
                       </td>
                     </tr>
@@ -248,54 +462,186 @@ const ClientList = () => {
             })}
           </tbody>
         </table>
+
+        {/* Row count footer */}
+        {!isLoading && (
+          <div style={{
+            borderTop: `1px solid ${T.border}`,
+            padding: '10px 18px',
+            fontFamily: jost, fontSize: 10, fontWeight: 300,
+            letterSpacing: '0.12em', color: T.muted,
+            textAlign: 'right',
+          }}>
+            {filteredClients.length} of {clients.length} client{clients.length !== 1 ? 's' : ''}
+          </div>
+        )}
       </div>
 
-      {/* MODAL */}
+      {/* ── Modal ────────────────────────────────────────────────────── */}
       {showModal && (
-        <div className="fixed inset-0 bg-slate-900/70 backdrop-blur-sm flex items-center justify-center p-4 z-50">
-          <div className="bg-white rounded-2xl shadow-2xl p-8 w-full max-w-2xl max-h-[90vh] overflow-y-auto">
-            <div className="flex justify-between items-center mb-6 border-b pb-4">
-              <h2 className="text-2xl font-bold text-gray-800 uppercase tracking-tight">
-                {isEditing ? 'Update Client' : 'New Client Registration'}
-              </h2>
-              <button onClick={() => setShowModal(false)} className="text-gray-400 hover:text-gray-900 text-2xl">✕</button>
-            </div>
-
-            <div className="space-y-6">
+        <div style={{
+          position: 'fixed', inset: 0,
+          background: 'rgba(14,21,32,0.75)',
+          backdropFilter: 'blur(4px)',
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          padding: 24, zIndex: 50,
+        }}>
+          <div style={{
+            background: 'white',
+            border: `1px solid ${T.border}`,
+            padding: '36px 36px 28px',
+            width: '100%', maxWidth: 580,
+            maxHeight: '90vh', overflowY: 'auto',
+          }}>
+            {/* Modal header */}
+            <div style={{
+              display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start',
+              marginBottom: 32, paddingBottom: 20, borderBottom: `1px solid ${T.border}`,
+            }}>
               <div>
-                <label className="text-[10px] font-black text-gray-400 mb-1 block uppercase">Company Name</label>
-                <input
-                  className="w-full border-2 border-gray-100 p-3 rounded-lg focus:border-indigo-500 outline-none font-bold"
-                  value={formData.companyName}
-                  onChange={e => setFormData({ ...formData, companyName: e.target.value })}
-                />
+                <p style={{
+                  fontFamily: jost, fontSize: 9, fontWeight: 400,
+                  letterSpacing: '0.28em', textTransform: 'uppercase',
+                  color: T.muted, marginBottom: 6,
+                }}>
+                  {isEditing ? 'Update Record' : 'New Registration'}
+                </p>
+                <h2 style={{
+                  fontFamily: serif, fontSize: 28, fontWeight: 300,
+                  color: T.navy, margin: 0,
+                }}>
+                  {isEditing ? 'Edit Client' : 'Add Client'}
+                </h2>
+              </div>
+              <button
+                onClick={() => setShowModal(false)}
+                style={{
+                  background: 'none', border: 'none', cursor: 'pointer',
+                  color: T.muted, fontSize: 20, lineHeight: 1, padding: 4,
+                  transition: 'color 0.2s',
+                }}
+                onMouseEnter={e => e.currentTarget.style.color = T.text}
+                onMouseLeave={e => e.currentTarget.style.color = T.muted}
+              >
+                ✕
+              </button>
+            </div>
+
+            {/* Company name */}
+            <div style={{ marginBottom: 24 }}>
+              <label style={{
+                display: 'block', fontFamily: jost, fontSize: 9, fontWeight: 400,
+                letterSpacing: '0.25em', textTransform: 'uppercase',
+                color: T.muted, marginBottom: 8,
+              }}>
+                Company Name
+              </label>
+              <FocusInput
+                value={formData.companyName}
+                onChange={e => setFormData({ ...formData, companyName: e.target.value })}
+                placeholder="Company name"
+              />
+            </div>
+
+            {/* Contacts */}
+            <div style={{ borderTop: `1px solid ${T.border}`, paddingTop: 24 }}>
+              <div style={{
+                display: 'flex', justifyContent: 'space-between',
+                alignItems: 'center', marginBottom: 16,
+              }}>
+                <p style={{
+                  fontFamily: jost, fontSize: 9, fontWeight: 400,
+                  letterSpacing: '0.28em', textTransform: 'uppercase',
+                  color: 'rgba(184,151,90,0.65)', margin: 0,
+                }}>
+                  Points of Contact
+                </p>
+                <button
+                  onClick={handleAddContactRow}
+                  style={{
+                    background: 'none', border: `1px solid ${T.borderG}`,
+                    cursor: 'pointer', padding: '5px 14px',
+                    fontFamily: jost, fontSize: 9, fontWeight: 400,
+                    letterSpacing: '0.2em', textTransform: 'uppercase',
+                    color: T.gold, transition: 'background 0.2s',
+                  }}
+                  onMouseEnter={e => e.currentTarget.style.background = T.dimBg}
+                  onMouseLeave={e => e.currentTarget.style.background = 'none'}
+                >
+                  + Add Person
+                </button>
               </div>
 
-              <div className="pt-4 border-t">
-                <div className="flex justify-between items-center mb-4">
-                  <h3 className="font-black text-indigo-600 text-[11px] uppercase tracking-widest">Points of Contact</h3>
-                  <button onClick={handleAddContactRow} className="bg-indigo-50 text-indigo-700 px-4 py-1 rounded-full text-[10px] font-bold hover:bg-indigo-100">
-                    + ADD PERSON
-                  </button>
-                </div>
-                <div className="space-y-3">
-                  {formData.contacts.map((contact, index) => (
-                    <div key={index} className="flex gap-3 items-center bg-gray-50 p-4 rounded-xl border border-gray-100">
-                      <div className="grid grid-cols-3 gap-3 flex-grow">
-                        <input placeholder="Name" className="border p-2 rounded-md text-xs bg-white" value={contact.name} onChange={e => handleContactChange(index, 'name', e.target.value)} />
-                        <input placeholder="Phone" className="border p-2 rounded-md text-xs bg-white" value={contact.phone} onChange={e => handleContactChange(index, 'phone', e.target.value)} />
-                        <input placeholder="Email" className="border p-2 rounded-md text-xs bg-white" value={contact.email} onChange={e => handleContactChange(index, 'email', e.target.value)} />
-                      </div>
-                      <button onClick={() => handleRemoveContactRow(index)} className="text-red-400 hover:text-red-600 font-bold px-2 text-xl">✕</button>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                {formData.contacts.map((contact, index) => (
+                  <div key={index} style={{
+                    display: 'flex', gap: 10, alignItems: 'center',
+                    padding: '14px 16px',
+                    background: T.offwhite,
+                    border: `1px solid ${T.border}`,
+                  }}>
+                    <div style={{
+                      display: 'grid', gridTemplateColumns: '1fr 1fr 1fr',
+                      gap: 10, flex: 1,
+                    }}>
+                      {['name', 'phone', 'email'].map(field => (
+                        <FocusInput
+                          key={field}
+                          value={contact[field]}
+                          onChange={e => handleContactChange(index, field, e.target.value)}
+                          placeholder={field.charAt(0).toUpperCase() + field.slice(1)}
+                          style={{ fontSize: 12 }}
+                        />
+                      ))}
                     </div>
-                  ))}
-                </div>
+                    <button
+                      onClick={() => handleRemoveContactRow(index)}
+                      style={{
+                        background: 'none', border: 'none', cursor: 'pointer',
+                        color: T.muted, fontSize: 16, lineHeight: 1, flexShrink: 0,
+                        transition: 'color 0.2s',
+                      }}
+                      onMouseEnter={e => e.currentTarget.style.color = '#dc2626'}
+                      onMouseLeave={e => e.currentTarget.style.color = T.muted}
+                    >
+                      ✕
+                    </button>
+                  </div>
+                ))}
               </div>
             </div>
 
-            <div className="flex justify-end gap-4 border-t mt-8 pt-6">
-              <button onClick={() => setShowModal(false)} className="px-6 py-2 text-gray-400 font-bold">Cancel</button>
-              <button onClick={handleSave} className="bg-indigo-600 text-white px-10 py-3 rounded-xl font-bold shadow-lg">
+            {/* Footer actions */}
+            <div style={{
+              display: 'flex', justifyContent: 'flex-end', gap: 14,
+              borderTop: `1px solid ${T.border}`, marginTop: 28, paddingTop: 24,
+            }}>
+              <button
+                onClick={() => setShowModal(false)}
+                style={{
+                  background: 'none', border: 'none', cursor: 'pointer',
+                  fontFamily: jost, fontSize: 10, fontWeight: 400,
+                  letterSpacing: '0.2em', textTransform: 'uppercase',
+                  color: T.muted, padding: '10px 20px',
+                  transition: 'color 0.2s',
+                }}
+                onMouseEnter={e => e.currentTarget.style.color = T.text}
+                onMouseLeave={e => e.currentTarget.style.color = T.muted}
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleSave}
+                style={{
+                  background: T.gold, color: T.navy,
+                  border: 'none', padding: '12px 36px',
+                  fontFamily: jost, fontSize: 10, fontWeight: 500,
+                  letterSpacing: '0.22em', textTransform: 'uppercase',
+                  cursor: 'pointer', transition: 'background 0.25s',
+                }}
+                onMouseEnter={e => e.currentTarget.style.background = T.gold2}
+                onMouseLeave={e => e.currentTarget.style.background = T.gold}
+              >
                 Confirm
               </button>
             </div>

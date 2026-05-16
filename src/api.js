@@ -1,98 +1,211 @@
 /**
- * frontend/src/api.js
+ * src/api.js
  * ─────────────────────────────────────────────────────────────────────────────
- * Authenticated axios instance.
- * Uses getBaseUrl() so it works in both:
- *   - Local dev:   http://localhost:5000/api
- *   - Production:  https://internalportal.marqland.com/api
+ * Authenticated axios instance for the Marqland Studios admin app.
+ * Incorporates base-URL resolution (previously baseurl.js) so only this
+ * file needs to be imported across the codebase.
  *
- * USAGE in any page component:
+ * BASE URL priority order:
+ *  1. REACT_APP_API_URL env var   (set in .env.production / CI)
+ *  2. Same-origin /api             (Cloudflare / nginx reverse-proxy in prod)
+ *  3. http://localhost:5000/api    (local dev fallback)
+ *
+ * Features
+ * ─────────
+ *  • Structured logging on every request / response / error
+ *  • Request timing (ms) logged on response
+ *  • Automatic JWT attach via request interceptor
+ *  • Silent token-refresh on 401 with a single-flight queue
+ *  • Force-logout when refresh fails or no refresh token exists
+ *
+ * USAGE in any component:
  *   import api from '../api';
- *   api.get('/products')        ← no need to add /api, baseURL handles it
- *   api.post('/vendors', data)
- *   api.put('/clients/123', data)
- *   api.delete('/products/456')
+ *   await api.get('/products');
+ *   await api.post('/vendors', payload);
+ *
+ * If you need the raw base URL (e.g. to build a static asset URL):
+ *   import { BASE_URL } from '../api';
+ *   const API_ROOT = BASE_URL.replace('/api', '');
  * ─────────────────────────────────────────────────────────────────────────────
  */
 
 import axios from 'axios';
-import { getBaseUrl } from './baseurl'; // Your existing baseurl.js
+import { createLogger } from './utils/logger';
 
+const log = createLogger('api');
+
+// ─── Base URL resolution ──────────────────────────────────────────────────────
+// Resolved once at module load — stable reference for the lifetime of the page.
+
+const resolveBaseUrl = () => {
+  // 1. Explicit override — highest priority (set in CI or .env.production)
+  if (process.env.REACT_APP_API_URL) {
+    const url = `${process.env.REACT_APP_API_URL}/api`;
+    log.info('Using env-configured API URL', url);
+    return url;
+  }
+
+  // 2. Production: same-origin (Cloudflare / nginx routes /api → backend)
+  if (
+    typeof window !== 'undefined' &&
+    window.location.hostname !== 'localhost' &&
+    window.location.hostname !== '127.0.0.1'
+  ) {
+    const { protocol, hostname } = window.location;
+    const url = `${protocol}//${hostname}/api`;
+    log.info('Using same-origin API URL', url);
+    return url;
+  }
+
+  // 3. Local development fallback
+  const url = 'http://localhost:5000/api';
+  log.debug('Using local dev API URL', url);
+  return url;
+};
+
+/** Fully-qualified API base URL including /api suffix, e.g. "http://localhost:5000/api" */
+export const BASE_URL = resolveBaseUrl();
+
+/**
+ * API root without the /api suffix — use this to build static asset URLs.
+ * e.g. `${API_ROOT}${product.imageUrl}`
+ */
+export const API_ROOT = BASE_URL.replace('/api', '');
+
+/** @deprecated Use BASE_URL directly. Kept for backward compatibility. */
+export const getBaseUrl = () => BASE_URL;
+
+// ── Axios instance ────────────────────────────────────────────────────────────
+// NOTE: Do NOT set a global Content-Type header here.
+// When sending FormData (file uploads), axios must auto-detect the content type
+// and set "multipart/form-data; boundary=--XYZ…" automatically.
+// A hardcoded "application/json" here overrides that and breaks all file uploads.
+// For JSON requests, axios sets Content-Type correctly on its own.
 const api = axios.create({
-  baseURL: getBaseUrl(), // e.g. "http://localhost:5000/api" or "https://internalportal.marqland.com/api"
-  timeout: 30000,
+  baseURL: BASE_URL,
+  timeout: 30_000,
 });
 
-// ── REQUEST INTERCEPTOR: attach JWT token to every request ────────────────────
+// ── Token helpers ─────────────────────────────────────────────────────────────
+const TOKEN_KEY   = 'marqland_token';
+const REFRESH_KEY = 'marqland_refresh';
+const USER_KEY    = 'marqland_user';
+
+const getToken        = ()      => localStorage.getItem(TOKEN_KEY);
+const getRefreshToken = ()      => localStorage.getItem(REFRESH_KEY);
+const setToken        = (token) => localStorage.setItem(TOKEN_KEY, token);
+const clearAuth       = ()      => {
+  localStorage.removeItem(TOKEN_KEY);
+  localStorage.removeItem(REFRESH_KEY);
+  localStorage.removeItem(USER_KEY);
+};
+
+const bearerHeader = (token) => `Bearer ${token}`;
+
+// ── Request interceptor — attach JWT + stamp request start time ───────────────
 api.interceptors.request.use(
   (config) => {
-    const token = localStorage.getItem('marqland_token');
+    config.metadata = { startTime: Date.now() };
+
+    const token = getToken();
     if (token) {
-      config.headers['Authorization'] = `Bearer ${token}`;
+      config.headers['Authorization'] = bearerHeader(token);
     }
+
+    log.debug(`→ ${config.method?.toUpperCase()} ${config.url}`, {
+      params: config.params,
+    });
+
     return config;
   },
-  (error) => Promise.reject(error)
+  (error) => {
+    log.error('Request setup failed', error);
+    return Promise.reject(error);
+  }
 );
 
-// ── RESPONSE INTERCEPTOR: handle expired tokens ───────────────────────────────
+// ── Response interceptor — log timing, handle 401 / refresh ──────────────────
 let isRefreshing = false;
-let failedQueue  = [];
+let failedQueue  = [];    // [{ resolve, reject }]
 
-const processQueue = (error, token = null) => {
-  failedQueue.forEach(({ resolve, reject }) => {
-    if (error) reject(error);
-    else resolve(token);
-  });
+const flushQueue = (error, token = null) => {
+  failedQueue.forEach(({ resolve, reject }) =>
+    error ? reject(error) : resolve(token)
+  );
   failedQueue = [];
 };
 
+const forceLogout = () => {
+  log.warn('Session expired — forcing logout');
+  clearAuth();
+  window.location.href = '/';
+};
+
 api.interceptors.response.use(
-  (response) => response,
+  (response) => {
+    const ms = Date.now() - (response.config.metadata?.startTime ?? Date.now());
+    log.debug(
+      `← ${response.status} ${response.config.method?.toUpperCase()} ${response.config.url} (${ms}ms)`
+    );
+    return response;
+  },
 
   async (error) => {
-    const originalRequest = error.config;
+    const { config: originalRequest, response } = error;
+    const status = response?.status;
+    const ms     = Date.now() - (originalRequest?.metadata?.startTime ?? Date.now());
 
-    if (error.response?.status === 401 && !originalRequest._retry) {
+    log.error(
+      `← ${status ?? 'ERR'} ${originalRequest?.method?.toUpperCase()} ${originalRequest?.url} (${ms}ms)`,
+      error.message
+    );
+
+    // ── 401 → attempt silent token refresh ───────────────────────────────────
+    if (status === 401 && !originalRequest._retry) {
       originalRequest._retry = true;
 
       if (isRefreshing) {
-        // Queue this request while refresh is in progress
+        // Park this request until the in-flight refresh resolves
+        log.debug('Token refresh in progress — queuing request', originalRequest.url);
         return new Promise((resolve, reject) => {
           failedQueue.push({ resolve, reject });
-        }).then((token) => {
-          originalRequest.headers['Authorization'] = `Bearer ${token}`;
+        }).then((newToken) => {
+          originalRequest.headers['Authorization'] = bearerHeader(newToken);
           return api(originalRequest);
         });
       }
 
-      isRefreshing = true;
-      const refreshToken = localStorage.getItem('marqland_refresh');
-
+      const refreshToken = getRefreshToken();
       if (!refreshToken) {
+        log.warn('No refresh token found — logging out');
         forceLogout();
         return Promise.reject(error);
       }
 
+      isRefreshing = true;
+      log.info('Attempting silent token refresh…');
+
       try {
-        // Use plain axios (not the intercepted instance) to avoid infinite loop
-        const { data } = await axios.post(
-          `${getBaseUrl()}/auth/refresh`,
-          { refreshToken }
-        );
+        // Use a plain axios call to avoid triggering this interceptor again
+        const { data } = await axios.post(`${BASE_URL}/auth/refresh`, {
+          refreshToken,
+        });
 
         const newToken = data.accessToken;
-        localStorage.setItem('marqland_token', newToken);
-        api.defaults.headers.common['Authorization'] = `Bearer ${newToken}`;
-        originalRequest.headers['Authorization']     = `Bearer ${newToken}`;
+        setToken(newToken);
+        api.defaults.headers.common['Authorization'] = bearerHeader(newToken);
+        originalRequest.headers['Authorization']     = bearerHeader(newToken);
 
-        processQueue(null, newToken);
+        log.info('Token refreshed successfully');
+        flushQueue(null, newToken);
         return api(originalRequest);
 
       } catch (refreshError) {
-        processQueue(refreshError, null);
+        log.error('Token refresh failed', refreshError.message);
+        flushQueue(refreshError, null);
         forceLogout();
         return Promise.reject(refreshError);
+
       } finally {
         isRefreshing = false;
       }
@@ -101,12 +214,5 @@ api.interceptors.response.use(
     return Promise.reject(error);
   }
 );
-
-const forceLogout = () => {
-  localStorage.removeItem('marqland_token');
-  localStorage.removeItem('marqland_refresh');
-  localStorage.removeItem('marqland_user');
-  window.location.href = '/';
-};
 
 export default api;

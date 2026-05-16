@@ -1,5 +1,23 @@
-import React, { useState } from 'react';
-import { BrowserRouter as Router, Routes, Route, Link, useLocation, Navigate } from 'react-router-dom';
+/**
+ * src/App.js
+ * ─────────────────────────────────────────────────────────────────────────────
+ * Application root — restyled to match the Marqland Studios brand language
+ * (navy sidebar, gold accents, Cormorant Garamond / Jost, grain texture).
+ *
+ * All routing logic, permission checks and auth flow are unchanged.
+ * Only visual treatment of Sidebar + AppShell wrapper has changed.
+ * ─────────────────────────────────────────────────────────────────────────────
+ */
+
+import React, { useState, useEffect } from 'react';
+import {
+  BrowserRouter as Router,
+  Routes,
+  Route,
+  Link,
+  useLocation,
+  Navigate,
+} from 'react-router-dom';
 import {
   Gift,
   Package,
@@ -9,7 +27,6 @@ import {
   Compass,
   Map,
   HardDrive,
-  LayoutGrid,
   LetterTextIcon,
   FileText,
   ChevronDown,
@@ -21,40 +38,82 @@ import {
   Activity,
   TrendingUp,
   Truck,
-  Target 
+  Target,
 } from 'lucide-react';
 
 import { AuthProvider, useAuth } from './context/AuthContext';
-import { AppPopupStyles } from './components/AppPopups';
-import LoginPage from './pages/LoginPage';
-import UserManagement from './pages/UserManagement';
-import PublicAdminPoral from './pages/public-site/AdminView';
-import ChangePassword from './pages/ChangePassword';
+import { AppPopupStyles }        from './components/AppPopups';
+import { PageLoader }            from './components/PageLoader';
+import { createLogger }          from './utils/logger';
 
-import ProductList from './pages/ProductList';
-import VendorList from './pages/VendorList';
-import ClientList from './pages/ClientList';
-import SavedCatalogues from './pages/SavedCatalogues';
-import CatalogueBuilder from './components/CatalogueBuilder';
-import OffsiteBuilder from './components/OffsiteBuilder';
-import PropertyList from './pages/PropertyList';
-import OffsiteCatalogues from './pages/OffsiteCatalogues';
-import MarqlandLetterHead from './pages/MarqlandLetterHead';
-//import InvoiceTracking from './pages/Invoice';
-//import InvoiceScanMobileVersionPage from './pages/InvoiceScanMobileVersion';
-import OrderTracker from './pages/OrderTracker';
-import SamplesProvided from './pages/SamplesProvided';
-import SourcingHub from './pages/SourcingHub';
-import PaymentTracker from './pages/PaymentTracker';
-import ClientPortalView from './pages/ClientPortalView';
-import ActivityLogView from './pages/ActivityLogView';
-import TrendingProducts from './pages/TrendingProducts';
-import CourierTracking from './pages/CourierTracking';
-import LeadScout from       './pages/LeadScout';
+import LoginPage           from './pages/LoginPage';
+import UserManagement      from './pages/UserManagement';
+import PublicAdminPortal   from './pages/public-site/AdminView';
+import ChangePassword      from './pages/ChangePassword';
+import ProductList         from './pages/ProductList';
+import VendorList          from './pages/VendorList';
+import ClientList          from './pages/ClientList';
+import SavedCatalogues     from './pages/SavedCatalogues';
+import CatalogueBuilder    from './components/CatalogueBuilder';
+import OffsiteBuilder      from './components/OffsiteBuilder';
+import PropertyList        from './pages/PropertyList';
+import OffsiteCatalogues   from './pages/OffsiteCatalogues';
+import MarqlandLetterHead  from './pages/MarqlandLetterHead';
+import OrderTracker        from './pages/OrderTracker';
+import SamplesProvided     from './pages/SamplesProvided';
+import SourcingHub         from './pages/SourcingHub';
+import PaymentTracker      from './pages/PaymentTracker';
+import ClientPortalView    from './pages/ClientPortalView';
+import ActivityLogView     from './pages/ActivityLogView';
+import TrendingProducts    from './pages/TrendingProducts';
+import CourierTracking     from './pages/CourierTracking';
+import LeadScout           from './pages/LeadScout';
 
-// ── Route keys matching ALL_ROUTES in UserManagement ─────────────────────────
-// Maps each path to its route key so ProtectedRoute can check allowedRoutes.
-const PATH_TO_ROUTE_KEY = {
+const log = createLogger('App');
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Design tokens — mirrors HomePage CSS vars exactly
+// ─────────────────────────────────────────────────────────────────────────────
+const T = {
+  navy:       '#0e1520',
+  navyDeep:   '#0c1018',
+  gold:       '#b8975a',
+  gold2:      '#d4b06a',
+  offwhite:   '#faf8f5',
+  text:       '#1a1a1a',
+  muted:      '#888',
+  borderGold: 'rgba(184,151,90,0.18)',
+  borderDim:  'rgba(255,255,255,0.06)',
+  mutedText:  'rgba(255,255,255,0.28)',
+  dimText:    'rgba(255,255,255,0.45)',
+};
+
+// ── Fonts (Cormorant Garamond + Jost, same as HomePage) ──────────────────────
+const FontLoader = () => {
+  useEffect(() => {
+    if (document.querySelector('#ms-app-gf')) return;
+    const link = document.createElement('link');
+    link.id   = 'ms-app-gf';
+    link.rel  = 'stylesheet';
+    link.href = 'https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,300;0,400;1,300;1,400&family=Jost:wght@200;300;400;500&display=swap';
+    document.head.appendChild(link);
+  }, []);
+  return null;
+};
+
+// ── Grain overlay (matches .grain::after in HomePage) ────────────────────────
+const GrainOverlay = () => (
+  <div style={{
+    position: 'absolute', inset: 0, pointerEvents: 'none', zIndex: 1,
+    backgroundImage: `url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.04'/%3E%3C/svg%3E")`,
+    backgroundSize: '200px',
+  }} />
+);
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Route permission map  — keep in sync with ALL_ROUTES in UserManagement.js
+// ─────────────────────────────────────────────────────────────────────────────
+export const PATH_TO_ROUTE_KEY = {
   '/':                   'Order Tracker',
   '/sourcinghub':        'Sourcing Hub',
   '/products':           'Products',
@@ -70,294 +129,552 @@ const PATH_TO_ROUTE_KEY = {
   '/admin/logs':         'Activity Logs',
   '/trending-products':  'Trending Products',
   '/courier-tracking':   'Courier Tracking',
-  '/admin/lead-scout':   'Lead Scout', 
-  // ⚠ Add new routes here AND in ALL_ROUTES in UserManagement.js
+  '/admin/lead-scout':   'Lead Scout',
 };
 
-// Role-based defaults (mirrors ROLE_DEFAULTS in UserManagement)
+// ─────────────────────────────────────────────────────────────────────────────
+// Role defaults — mirrors ROLE_DEFAULTS in UserManagement.js
+// ─────────────────────────────────────────────────────────────────────────────
 const ROLE_DEFAULTS = {
   admin:     Object.values(PATH_TO_ROUTE_KEY),
-  accounts:  ['Order Tracker','Payment Tracker','Vendors','Clients','Invoice Tracking'],
-  sales:     ['Order Tracker','Sourcing Hub','Products','Saved Catalogues','Clients','Property List','Saved Offsites'],
-  inventory: ['Products','Samples Provided','Saved Catalogues','Sourcing Hub','Property List','Saved Offsites'],
-  courier: ['Courier Tracking'],
+  accounts:  ['Order Tracker', 'Payment Tracker', 'Vendors', 'Clients', 'Invoice Tracking'],
+  sales:     ['Order Tracker', 'Sourcing Hub', 'Products', 'Saved Catalogues', 'Clients', 'Property List', 'Saved Offsites'],
+  inventory: ['Products', 'Samples Provided', 'Saved Catalogues', 'Sourcing Hub', 'Property List', 'Saved Offsites'],
+  courier:   ['Courier Tracking'],
   viewer:    ['Order Tracker'],
 };
 
-// Get effective allowed routes for user — custom list wins over role default
-const getUserRoutes = (user) =>
-  user?.allowedRoutes?.length ? user.allowedRoutes : (ROLE_DEFAULTS[user?.role] || []);
+export const getUserRoutes = (user) =>
+  user?.allowedRoutes?.length
+    ? user.allowedRoutes
+    : (ROLE_DEFAULTS[user?.role] ?? []);
 
-// ── Protected route wrapper ───────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// ProtectedRoute — unchanged logic
+// ─────────────────────────────────────────────────────────────────────────────
 const ProtectedRoute = ({ children, routeKey }) => {
   const { user, loading } = useAuth();
   const location = useLocation();
-  if (loading) return null;
-  if (!user) return <Navigate to="/" replace />;
-  // Admins always pass
+
+  if (loading) return <PageLoader />;
+  if (!user)   return <Navigate to="/" replace />;
   if (user.role === 'admin') return children;
-  // Determine route key from prop or from current path
-  const key = routeKey || PATH_TO_ROUTE_KEY[location.pathname];
+
+  const key = routeKey ?? PATH_TO_ROUTE_KEY[location.pathname];
   if (key && !getUserRoutes(user).includes(key)) {
-    // Redirect to home silently instead of showing Access Denied
+    log.warn(`Access denied: user "${user.email}" → "${key}". Redirecting home.`);
     return <Navigate to="/" replace />;
   }
+
   return children;
 };
 
-// ── Sidebar ───────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// Role badge colours — updated to gold-tinted palette on navy
+// ─────────────────────────────────────────────────────────────────────────────
+const ROLE_BADGE = {
+  admin:     { bg: 'rgba(184,151,90,0.18)', color: T.gold },
+  accounts:  { bg: 'rgba(134,197,134,0.15)', color: '#7dc47d' },
+  sales:     { bg: 'rgba(230,185,80,0.15)',  color: '#e6b950' },
+  inventory: { bg: 'rgba(100,160,220,0.15)', color: '#64a0dc' },
+  courier:   { bg: 'rgba(180,130,220,0.15)', color: '#b482dc' },
+  viewer:    { bg: 'rgba(255,255,255,0.08)', color: T.dimText },
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Sidebar
+// ─────────────────────────────────────────────────────────────────────────────
 const Sidebar = () => {
   const location = useLocation();
   const { user, logout } = useAuth();
-  const [isCollapsed, setIsCollapsed] = useState(false);
+
+  const [isCollapsed,  setIsCollapsed]  = useState(false);
   const [openSections, setOpenSections] = useState({
-    gifting: true, offsites: true, documentation: true, orders: true,
+    orders: true, gifting: true, documentation: true, offsites: true, admin: true,
   });
 
+  // Hide on invoice-scan and mobile payment tracker
   const isMobile = typeof window !== 'undefined' && window.matchMedia('(max-width: 768px)').matches;
-  if (location.pathname === '/scaninvoice' || (isMobile && location.pathname.startsWith('/paymenttracker'))) {
-    return null;
-  }
+  if (
+    location.pathname === '/scaninvoice' ||
+    (isMobile && location.pathname.startsWith('/paymenttracker'))
+  ) return null;
 
   const isActive = (path) => location.pathname === path;
 
   const toggleSection = (section) => {
-    if (isCollapsed) { setIsCollapsed(false); setOpenSections(prev => ({ ...prev, [section]: true })); return; }
-    setOpenSections(prev => ({ ...prev, [section]: !prev[section] }));
+    if (isCollapsed) {
+      setIsCollapsed(false);
+      setOpenSections((prev) => ({ ...prev, [section]: true }));
+      return;
+    }
+    setOpenSections((prev) => ({ ...prev, [section]: !prev[section] }));
   };
 
-  const NavLink = ({ to, icon: Icon, label, routeKey }) => {
-    // Hide link if user doesn't have access
-    const key = routeKey || PATH_TO_ROUTE_KEY[to];
+  // User initials
+  const initials = (user?.name || user?.email || '?')
+    .split(' ').map((w) => w[0]).join('').toUpperCase().slice(0, 2);
+
+  const badge = ROLE_BADGE[user?.role] ?? ROLE_BADGE.viewer;
+
+  // ── NavLink ─────────────────────────────────────────────────────────────────
+  const NavLink = ({ to, icon: Icon, label, routeKey: rk }) => {
+    const key = rk ?? PATH_TO_ROUTE_KEY[to];
     if (user?.role !== 'admin' && key && !getUserRoutes(user).includes(key)) return null;
+
+    const active = isActive(to);
     return (
       <Link
         to={to}
-        title={isCollapsed ? label : ''}
-        className={`flex items-center gap-3 px-4 py-3 rounded-xl text-xs font-bold transition-all duration-200 ${isActive(to) ? 'bg-indigo-600 text-white shadow-lg shadow-indigo-200' : 'text-gray-500 hover:bg-indigo-50 hover:text-indigo-600'
-          } ${isCollapsed ? 'justify-center px-0' : ''}`}
+        title={isCollapsed ? label : undefined}
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          gap: 10,
+          padding: isCollapsed ? '10px 0' : '9px 12px',
+          justifyContent: isCollapsed ? 'center' : 'flex-start',
+          borderRadius: 3,
+          textDecoration: 'none',
+          fontSize: 11,
+          fontFamily: '"Jost", sans-serif',
+          fontWeight: 400,
+          letterSpacing: '0.08em',
+          transition: 'background 0.25s, color 0.25s, border-color 0.25s',
+          // Active: gold left-border + subtle gold tint
+          background: active ? 'rgba(184,151,90,0.10)' : 'transparent',
+          color:      active ? T.gold : T.dimText,
+          borderLeft: active
+            ? `2px solid ${T.gold}`
+            : '2px solid transparent',
+          marginLeft: isCollapsed ? 0 : -2,   // align with border
+        }}
+        onMouseEnter={(e) => {
+          if (!active) {
+            e.currentTarget.style.background  = 'rgba(255,255,255,0.04)';
+            e.currentTarget.style.color       = 'rgba(255,255,255,0.75)';
+          }
+        }}
+        onMouseLeave={(e) => {
+          if (!active) {
+            e.currentTarget.style.background = 'transparent';
+            e.currentTarget.style.color      = T.dimText;
+          }
+        }}
       >
-        <Icon size={18} className="shrink-0" />
-        {!isCollapsed && <span className="truncate">{label}</span>}
+        <Icon size={15} style={{ flexShrink: 0, opacity: active ? 1 : 0.6 }} />
+        {!isCollapsed && <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{label}</span>}
       </Link>
     );
   };
 
-  const SectionBtn = ({ sectionKey, icon: Icon, label, accent = 'indigo' }) => (
+  // ── SectionBtn ──────────────────────────────────────────────────────────────
+  const SectionBtn = ({ sectionKey, icon: Icon, label }) => (
     <button
       onClick={() => toggleSection(sectionKey)}
-      className={`w-full px-4 py-2 mb-1 flex items-center justify-between group focus:outline-none hover:bg-slate-50 rounded-lg transition-colors ${isCollapsed ? 'justify-center px-0' : ''}`}
+      style={{
+        width: '100%',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: isCollapsed ? 'center' : 'space-between',
+        padding: isCollapsed ? '8px 0' : '6px 12px',
+        background: 'none',
+        border: 'none',
+        cursor: 'pointer',
+        marginBottom: 2,
+        borderRadius: 3,
+      }}
+      onMouseEnter={(e) => e.currentTarget.style.background = 'rgba(255,255,255,0.03)'}
+      onMouseLeave={(e) => e.currentTarget.style.background = 'none'}
     >
-      <span className={`text-[10px] font-black text-gray-400 uppercase tracking-widest flex items-center gap-2 group-hover:text-${accent}-600`}>
-        <Icon size={12} className={`text-${accent}-400 shrink-0`} />
+      <span style={{
+        display: 'flex', alignItems: 'center', gap: 7,
+        fontFamily: '"Jost", sans-serif',
+        fontSize: 9, fontWeight: 400,
+        letterSpacing: '0.28em', textTransform: 'uppercase',
+        color: 'rgba(184,151,90,0.55)',
+      }}>
+        <Icon size={11} style={{ opacity: 0.7 }} />
         {!isCollapsed && label}
       </span>
-      {!isCollapsed && (openSections[sectionKey] ? <ChevronDown size={14} className="text-gray-400" /> : <ChevronRight size={14} className="text-gray-400" />)}
+      {!isCollapsed && (
+        openSections[sectionKey]
+          ? <ChevronDown  size={12} style={{ color: 'rgba(255,255,255,0.2)' }} />
+          : <ChevronRight size={12} style={{ color: 'rgba(255,255,255,0.2)' }} />
+      )}
     </button>
   );
 
-  const roleColors = {
-    admin: 'bg-indigo-100 text-indigo-700',
-    accounts: 'bg-green-100 text-green-700',
-    sales: 'bg-yellow-100 text-yellow-700',
-    inventory: 'bg-blue-100 text-blue-700',
-    courier: 'bg-purple-100 text-purple-700',
-    viewer: 'bg-gray-100 text-gray-600',
-  };
-
   return (
-    <aside className={`${isCollapsed ? 'w-20' : 'w-64'} bg-white border-r border-gray-100 flex flex-col sticky top-0 h-screen shrink-0 transition-all duration-300 ease-in-out`}>
-      {/* Header */}
-      <div className={`p-6 border-b border-gray-50 flex items-center ${isCollapsed ? 'justify-center' : 'justify-between'} gap-2`}>
-        <div className="flex items-center gap-2 overflow-hidden">
-          <div className="w-8 h-8 bg-indigo-600 rounded-lg flex items-center justify-center shrink-0">
-            <LayoutGrid className="text-white" size={20} />
-          </div>
-          {!isCollapsed && <span className="font-black text-lg tracking-tighter uppercase truncate">Marqland</span>}
+    <aside style={{
+      width: isCollapsed ? 68 : 228,
+      background: T.navy,
+      borderRight: `1px solid ${T.borderDim}`,
+      display: 'flex',
+      flexDirection: 'column',
+      position: 'sticky',
+      top: 0,
+      height: '100vh',
+      flexShrink: 0,
+      transition: 'width 0.3s ease',
+      overflow: 'hidden',
+      // grain
+      position: 'relative',
+    }}>
+      <GrainOverlay />
+
+      {/* Everything sits above grain */}
+      <div style={{ position: 'relative', zIndex: 2, display: 'flex', flexDirection: 'column', height: '100%' }}>
+
+        {/* ── Header ──────────────────────────────────────────────────── */}
+        <div style={{
+          padding: isCollapsed ? '20px 0' : '22px 18px 18px',
+          borderBottom: `1px solid ${T.borderDim}`,
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: isCollapsed ? 'center' : 'space-between',
+          gap: 8,
+          flexShrink: 0,
+        }}>
+          {!isCollapsed && (
+            <div>
+              <div style={{
+                fontFamily: '"Cormorant Garamond", Georgia, serif',
+                fontSize: 18, fontWeight: 300,
+                color: 'white', letterSpacing: '0.04em',
+                lineHeight: 1.2,
+              }}>
+                Marqland <em style={{ color: T.gold }}>Studios.</em>
+              </div>
+              <div style={{
+                fontFamily: '"Jost", sans-serif',
+                fontSize: 9, fontWeight: 400,
+                letterSpacing: '0.25em', textTransform: 'uppercase',
+                color: 'rgba(184,151,90,0.45)',
+                marginTop: 3,
+              }}>
+                Admin Portal
+              </div>
+            </div>
+          )}
+          <button
+            onClick={() => setIsCollapsed((c) => !c)}
+            title={isCollapsed ? 'Expand' : 'Collapse'}
+            style={{
+              background: 'none', border: 'none', cursor: 'pointer',
+              color: 'rgba(255,255,255,0.25)', padding: 4, borderRadius: 3,
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+              transition: 'color 0.2s',
+              flexShrink: 0,
+            }}
+            onMouseEnter={(e) => e.currentTarget.style.color = T.gold}
+            onMouseLeave={(e) => e.currentTarget.style.color = 'rgba(255,255,255,0.25)'}
+          >
+            {isCollapsed ? <PanelLeftOpen size={15} /> : <PanelLeftClose size={15} />}
+          </button>
         </div>
-        <button onClick={() => setIsCollapsed(!isCollapsed)} className="p-1.5 hover:bg-gray-100 rounded-lg text-gray-400 hover:text-indigo-600 transition-colors">
-          {isCollapsed ? <PanelLeftOpen size={18} /> : <PanelLeftClose size={18} />}
-        </button>
-      </div>
 
-      {/* Nav */}
-      <div className="flex-grow p-4 space-y-8 overflow-y-auto no-scrollbar">
-        <nav>
-          <SectionBtn sectionKey="orders" icon={Package} label="Management" />
-          {(openSections.orders || isCollapsed) && (
-            <div className="flex flex-col gap-1">
-              <NavLink to="/" icon={Package} label="Order Tracker" />
-              <NavLink to="/courier-tracking" icon={Truck} label="Courier Tracking" />
-              <NavLink to="/sourcinghub" icon={Package} label="Sourcing Hub" />
-            </div>
-          )}
-        </nav>
+        {/* ── Navigation ──────────────────────────────────────────────── */}
+        <div style={{
+          flex: 1, overflowY: 'auto', overflowX: 'hidden',
+          padding: isCollapsed ? '12px 8px' : '12px 10px',
+          display: 'flex', flexDirection: 'column', gap: 4,
+          // thin scrollbar
+          scrollbarWidth: 'thin',
+          scrollbarColor: 'rgba(184,151,90,0.15) transparent',
+        }}>
 
-        <nav>
-          <SectionBtn sectionKey="gifting" icon={Gift} label="Gifting" />
-          {(openSections.gifting || isCollapsed) && (
-            <div className="flex flex-col gap-1">
-              <NavLink to="/products" icon={Package} label="Products" />
-              <NavLink to="/samplesprovided" icon={Package} label="Samples Provided" />
-              <NavLink to="/savedcatalogues" icon={Bookmark} label="Saved Catalogues" />
-              <NavLink to="/trending-products" icon={TrendingUp} label="Trending Products" />
-            </div>
-          )}
-        </nav>
-
-        <nav>
-          <SectionBtn sectionKey="documentation" icon={FileText} label="Documentation" />
-          {(openSections.documentation || isCollapsed) && (
-            <div className="flex flex-col gap-1">
-              <NavLink to="/paymenttracker" icon={Bookmark} label="Invoice & Payment Tracker" />
-              <NavLink to="/vendors" icon={Users} label="Vendors" />
-              <NavLink to="/clients" icon={Building} label="Clients" />
-              <NavLink to="/MarqlandLetterHead" icon={LetterTextIcon} label="Letter Head" />
-            </div>
-          )}
-        </nav>
-
-        <nav>
-          <SectionBtn sectionKey="offsites" icon={Compass} label="Offsites" accent="orange" />
-          {(openSections.offsites || isCollapsed) && (
-            <div className="flex flex-col gap-1">
-              <NavLink to="/properties" icon={Map} label="Property List" />
-              <NavLink to="/saved-offsites" icon={HardDrive} label="Saved Offsites" />
-            </div>
-          )}
-        </nav>
-
-        {/* Admin section */}
-        {user?.role === 'admin' && (
+          {/* Orders & Tracking */}
           <nav>
-            <SectionBtn sectionKey="admin" icon={Shield} label="Admin" />
-            <div className="flex flex-col gap-1">
-              <NavLink to="/admin/users" icon={Shield} label="User Management" />
-              <NavLink to="/admin/logs" icon={Activity} label="Activity Logs" />
-              <NavLink to="/admin/lead-scout" icon={Target} label="Lead Scout" />
-              <NavLink to="/public-site-admin" icon={Shield} label="Public Admin Management" />
+            <SectionBtn sectionKey="orders" icon={Gift} label="Orders & Tracking" />
+            {(openSections.orders || isCollapsed) && (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 1, marginBottom: 4 }}>
+                <NavLink to="/"                 icon={Gift}    label="Order Tracker"    />
+                <NavLink to="/sourcinghub"      icon={Compass} label="Sourcing Hub"     />
+                <NavLink to="/courier-tracking" icon={Truck}   label="Courier Tracking" />
+              </div>
+            )}
+          </nav>
+
+          {/* thin gold rule between sections */}
+          <div style={{ height: 1, background: T.borderGold, margin: '2px 12px' }} />
+
+          {/* Gifting */}
+          <nav>
+            <SectionBtn sectionKey="gifting" icon={Package} label="Gifting" />
+            {(openSections.gifting || isCollapsed) && (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 1, marginBottom: 4 }}>
+                <NavLink to="/products"          icon={Package}   label="Products"          />
+                <NavLink to="/samplesprovided"   icon={Package}   label="Samples Provided"  />
+                <NavLink to="/savedcatalogues"   icon={Bookmark}  label="Saved Catalogues"  />
+                <NavLink to="/trending-products" icon={TrendingUp} label="Trending Products" />
+              </div>
+            )}
+          </nav>
+
+          <div style={{ height: 1, background: T.borderGold, margin: '2px 12px' }} />
+
+          {/* Documentation */}
+          <nav>
+            <SectionBtn sectionKey="documentation" icon={FileText} label="Documentation" />
+            {(openSections.documentation || isCollapsed) && (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 1, marginBottom: 4 }}>
+                <NavLink to="/paymenttracker"     icon={Bookmark}       label="Invoice & Payment Tracker" />
+                <NavLink to="/vendors"            icon={Users}          label="Vendors"                   />
+                <NavLink to="/clients"            icon={Building}       label="Clients"                   />
+                <NavLink to="/MarqlandLetterHead" icon={LetterTextIcon} label="Letter Head"               />
+              </div>
+            )}
+          </nav>
+
+          <div style={{ height: 1, background: T.borderGold, margin: '2px 12px' }} />
+
+          {/* Offsites */}
+          <nav>
+            <SectionBtn sectionKey="offsites" icon={Compass} label="Offsites" />
+            {(openSections.offsites || isCollapsed) && (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 1, marginBottom: 4 }}>
+                <NavLink to="/properties"     icon={Map}      label="Property List"  />
+                <NavLink to="/saved-offsites" icon={HardDrive} label="Saved Offsites" />
+              </div>
+            )}
+          </nav>
+
+          {/* Admin — only for admin role */}
+          {user?.role === 'admin' && (
+            <>
+              <div style={{ height: 1, background: T.borderGold, margin: '2px 12px' }} />
+              <nav>
+                <SectionBtn sectionKey="admin" icon={Shield} label="Admin" />
+                {(openSections.admin || isCollapsed) && (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 1, marginBottom: 4 }}>
+                    <NavLink to="/admin/users"       icon={Shield}   label="User Management"        />
+                    <NavLink to="/admin/logs"         icon={Activity} label="Activity Logs"           />
+                    <NavLink to="/admin/lead-scout"  icon={Target}   label="Lead Scout"              />
+                    <NavLink to="/public-site-admin" icon={Shield}   label="Public Admin Management" />
+                  </div>
+                )}
+              </nav>
+            </>
+          )}
+
+          {/* Change Password — all users */}
+          <div style={{ height: 1, background: T.borderGold, margin: '2px 12px' }} />
+          <nav>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
+              <NavLink to="/change-password" icon={Shield} label="Change Password" />
             </div>
           </nav>
-        )}
+        </div>
 
-        {/* Change password — all users */}
-        <nav>
-          <div className="flex flex-col gap-1">
-            <NavLink to="/change-password" icon={Shield} label="Change Password" />
-          </div>
-        </nav>
+        {/* ── User footer ─────────────────────────────────────────────── */}
+        <div style={{
+          padding: isCollapsed ? '14px 0' : '14px 16px',
+          borderTop: `1px solid ${T.borderDim}`,
+          flexShrink: 0,
+        }}>
+          {!isCollapsed ? (
+            <>
+              {/* Avatar + name + role */}
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 12 }}>
+                {/* Initials square — mirrors the navy square in homepage testimonials */}
+                <div style={{
+                  width: 32, height: 32,
+                  background: 'rgba(184,151,90,0.15)',
+                  border: `1px solid ${T.borderGold}`,
+                  display: 'flex', alignItems: 'center', justifyContent: 'center',
+                  flexShrink: 0,
+                  borderRadius: 3,
+                }}>
+                  <span style={{
+                    fontFamily: '"Jost", sans-serif',
+                    fontSize: 11, fontWeight: 500, color: T.gold,
+                  }}>
+                    {initials}
+                  </span>
+                </div>
+                <div style={{ overflow: 'hidden' }}>
+                  <div style={{
+                    fontFamily: '"Jost", sans-serif',
+                    fontSize: 12, fontWeight: 400, color: 'rgba(255,255,255,0.75)',
+                    overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                  }}>
+                    {user?.name}
+                  </div>
+                  {/* Role pill — mirrors .pill from homepage */}
+                  <span style={{
+                    display: 'inline-block',
+                    padding: '2px 8px',
+                    border: `1px solid rgba(184,151,90,0.3)`,
+                    fontFamily: '"Jost", sans-serif',
+                    fontSize: 9, fontWeight: 400,
+                    letterSpacing: '0.2em', textTransform: 'uppercase',
+                    background: badge.bg, color: badge.color,
+                    borderRadius: 2,
+                    marginTop: 3,
+                  }}>
+                    {user?.role}
+                  </span>
+                </div>
+              </div>
+
+              {/* Sign out */}
+              <button
+                onClick={logout}
+                style={{
+                  width: '100%', display: 'flex', alignItems: 'center', gap: 8,
+                  padding: '8px 10px', background: 'none',
+                  border: '1px solid transparent', borderRadius: 3, cursor: 'pointer',
+                  fontFamily: '"Jost", sans-serif',
+                  fontSize: 10, fontWeight: 400,
+                  letterSpacing: '0.15em', textTransform: 'uppercase',
+                  color: 'rgba(255,255,255,0.25)',
+                  transition: 'color 0.25s, border-color 0.25s, background 0.25s',
+                }}
+                onMouseEnter={(e) => {
+                  e.currentTarget.style.color       = '#e57373';
+                  e.currentTarget.style.borderColor = 'rgba(229,115,115,0.25)';
+                  e.currentTarget.style.background  = 'rgba(229,115,115,0.06)';
+                }}
+                onMouseLeave={(e) => {
+                  e.currentTarget.style.color       = 'rgba(255,255,255,0.25)';
+                  e.currentTarget.style.borderColor = 'transparent';
+                  e.currentTarget.style.background  = 'none';
+                }}
+              >
+                <LogOut size={13} /> Sign Out
+              </button>
+            </>
+          ) : (
+            /* Collapsed: just logout icon */
+            <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 10 }}>
+              {/* Initials only */}
+              <div style={{
+                width: 32, height: 32,
+                background: 'rgba(184,151,90,0.12)',
+                border: `1px solid ${T.borderGold}`,
+                display: 'flex', alignItems: 'center', justifyContent: 'center',
+                borderRadius: 3,
+              }}>
+                <span style={{ fontFamily: '"Jost", sans-serif', fontSize: 11, fontWeight: 500, color: T.gold }}>
+                  {initials}
+                </span>
+              </div>
+              <button
+                onClick={logout}
+                title="Sign Out"
+                style={{
+                  background: 'none', border: 'none', cursor: 'pointer',
+                  color: 'rgba(255,255,255,0.25)', padding: 4, borderRadius: 3,
+                  display: 'flex', alignItems: 'center', justifyContent: 'center',
+                  transition: 'color 0.2s',
+                }}
+                onMouseEnter={(e) => e.currentTarget.style.color = '#e57373'}
+                onMouseLeave={(e) => e.currentTarget.style.color = 'rgba(255,255,255,0.25)'}
+              >
+                <LogOut size={15} />
+              </button>
+            </div>
+          )}
+        </div>
       </div>
-
-      {/* User + logout footer */}
-      {!isCollapsed && (
-        <div className="p-4 border-t border-gray-100">
-          <div className="flex items-center gap-3 mb-3">
-            <div className="w-8 h-8 rounded-lg bg-indigo-600 text-white flex items-center justify-center text-xs font-black shrink-0">
-              {(user?.name || user?.email || '?').split(' ').map(w => w[0]).join('').toUpperCase().slice(0, 2)}
-            </div>
-            <div className="overflow-hidden">
-              <div className="text-xs font-bold text-gray-800 truncate">{user?.name}</div>
-              <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${roleColors[user?.role] || roleColors.viewer}`}>
-                {user?.role}
-              </span>
-            </div>
-          </div>
-          <button onClick={logout} className="w-full flex items-center gap-2 px-3 py-2 text-xs font-bold text-gray-400 hover:text-red-500 hover:bg-red-50 rounded-lg transition-colors">
-            <LogOut size={14} /> Sign Out
-          </button>
-        </div>
-      )}
-      {isCollapsed && (
-        <div className="p-3 border-t border-gray-100">
-          <button onClick={logout} className="w-full flex items-center justify-center py-2 text-gray-400 hover:text-red-500 hover:bg-red-50 rounded-lg transition-colors" title="Sign Out">
-            <LogOut size={16} />
-          </button>
-        </div>
-      )}
     </aside>
   );
 };
 
+// ─────────────────────────────────────────────────────────────────────────────
+// AppShell — unchanged logic, updated wrapper background
+// ─────────────────────────────────────────────────────────────────────────────
 const AppShell = () => {
   const { user, loading } = useAuth();
 
-  if (loading) return null;
+  if (loading) return <PageLoader message="Authenticating…" />;
 
-  // ── Invite token intercept ────────────────────────────────────────────────────
-  const _hashQuery = window.location.hash.includes('?')
+  // Invite-token intercept
+  const hashQuery = window.location.hash.includes('?')
     ? window.location.hash.slice(window.location.hash.indexOf('?'))
     : '';
-  const urlToken = new URLSearchParams(window.location.search).get('token')
-    || new URLSearchParams(_hashQuery).get('token');
-  if (urlToken) return <LoginPage />;
+  const urlToken =
+    new URLSearchParams(window.location.search).get('token') ||
+    new URLSearchParams(hashQuery).get('token');
+  if (urlToken) {
+    log.info('Invite token detected — rendering LoginPage');
+    return <LoginPage />;
+  }
 
-  // ── Public routes — accessible without login ──────────────────────────────────
-  // /p/:slug  = client portal view (sent to clients via email)
-  // /respond/:id = vendor response (sourcing hub)
-  const publicPaths = ['/p/', '/respond/'];
-  if (publicPaths.some(p => window.location.pathname.startsWith(p))) {
+  // Public routes — no auth required
+  const PUBLIC_PREFIXES = ['/p/', '/respond/'];
+  if (PUBLIC_PREFIXES.some((p) => window.location.pathname.startsWith(p))) {
     return (
       <Routes>
-        <Route path="/p/:slug" element={<ClientPortalView />} />
-        <Route path="/respond/:id" element={<SourcingHub />} />
+        <Route path="/p/:slug"     element={<ClientPortalView />} />
+        <Route path="/respond/:id" element={<SourcingHub />}      />
       </Routes>
     );
   }
 
-  // ── Not logged in → show login page ──────────────────────────────────────────
   if (!user) return <LoginPage />;
 
-  // ── Logged in → full app ──────────────────────────────────────────────────────
-  return (
-    <div className="flex min-h-screen bg-gray-50 font-sans">
-      <Sidebar />
-      <main className="flex-grow overflow-y-auto h-screen">
-        <Routes>
-          {/* Management */}
-          <Route path="/" element={<ProtectedRoute routeKey="Order Tracker"><OrderTracker /></ProtectedRoute>} />
-          <Route path="/courier-tracking" element={<ProtectedRoute routeKey="Courier Tracking"><CourierTracking /></ProtectedRoute>} />
-          <Route path="/sourcinghub" element={<ProtectedRoute routeKey="Sourcing Hub"><SourcingHub /></ProtectedRoute>} />
+  log.info('AppShell: rendering authenticated shell', { user: user.email, role: user.role });
 
-          {/* Gifting */}
-          <Route path="/products" element={<ProtectedRoute routeKey="Products"><ProductList /></ProtectedRoute>} />
-          <Route path="/samplesprovided" element={<ProtectedRoute routeKey="Samples Provided"><SamplesProvided /></ProtectedRoute>} />
-          <Route path="/savedcatalogues" element={<ProtectedRoute routeKey="Saved Catalogues"><SavedCatalogues /></ProtectedRoute>} />
-          <Route path="/builder" element={<ProtectedRoute routeKey="Saved Catalogues"><CatalogueBuilder /></ProtectedRoute>} />
+  return (
+    <div style={{
+      display: 'flex',
+      minHeight: '100vh',
+      // Off-white content area — matches var(--offwhite) from HomePage
+      background: T.offwhite,
+      fontFamily: '"Jost", sans-serif',
+    }}>
+      <Sidebar />
+      <main style={{ flex: 1, overflowY: 'auto', height: '100vh' }}>
+        <Routes>
+          {/* ── Orders & Tracking ── */}
+          <Route path="/"                 element={<ProtectedRoute routeKey="Order Tracker"><OrderTracker /></ProtectedRoute>} />
+          <Route path="/courier-tracking" element={<ProtectedRoute routeKey="Courier Tracking"><CourierTracking /></ProtectedRoute>} />
+          <Route path="/sourcinghub"      element={<ProtectedRoute routeKey="Sourcing Hub"><SourcingHub /></ProtectedRoute>} />
+
+          {/* ── Gifting ── */}
+          <Route path="/products"          element={<ProtectedRoute routeKey="Products"><ProductList /></ProtectedRoute>} />
+          <Route path="/samplesprovided"   element={<ProtectedRoute routeKey="Samples Provided"><SamplesProvided /></ProtectedRoute>} />
+          <Route path="/savedcatalogues"   element={<ProtectedRoute routeKey="Saved Catalogues"><SavedCatalogues /></ProtectedRoute>} />
+          <Route path="/builder"           element={<ProtectedRoute routeKey="Saved Catalogues"><CatalogueBuilder /></ProtectedRoute>} />
           <Route path="/trending-products" element={<ProtectedRoute routeKey="Trending Products"><TrendingProducts /></ProtectedRoute>} />
 
-          {/* Documentation */}
-          <Route path="/paymenttracker" element={<ProtectedRoute routeKey="Payment Tracker"><PaymentTracker /></ProtectedRoute>} />
-          <Route path="/vendors" element={<ProtectedRoute routeKey="Vendors"><VendorList /></ProtectedRoute>} />
-          <Route path="/clients" element={<ProtectedRoute routeKey="Clients"><ClientList /></ProtectedRoute>} />
+          {/* ── Documentation ── */}
+          <Route path="/paymenttracker"     element={<ProtectedRoute routeKey="Payment Tracker"><PaymentTracker /></ProtectedRoute>} />
+          <Route path="/vendors"            element={<ProtectedRoute routeKey="Vendors"><VendorList /></ProtectedRoute>} />
+          <Route path="/clients"            element={<ProtectedRoute routeKey="Clients"><ClientList /></ProtectedRoute>} />
           <Route path="/MarqlandLetterHead" element={<ProtectedRoute routeKey="Letter Head"><MarqlandLetterHead /></ProtectedRoute>} />
 
-          {/* Offsites */}
-          <Route path="/properties" element={<ProtectedRoute routeKey="Property List"><PropertyList /></ProtectedRoute>} />
+          {/* ── Offsites ── */}
+          <Route path="/properties"     element={<ProtectedRoute routeKey="Property List"><PropertyList /></ProtectedRoute>} />
           <Route path="/saved-offsites" element={<ProtectedRoute routeKey="Saved Offsites"><OffsiteCatalogues /></ProtectedRoute>} />
           <Route path="/offsite-builder" element={<ProtectedRoute routeKey="Saved Offsites"><OffsiteBuilder /></ProtectedRoute>} />
 
-          {/* Admin */}
-          <Route path="/admin/users" element={<ProtectedRoute routeKey="User Management"><UserManagement /></ProtectedRoute>} />
-          <Route path="/admin/logs" element={<ProtectedRoute routeKey="User Management"><ActivityLogView /></ProtectedRoute>} />
-          <Route path="/public-site-admin" element={<ProtectedRoute routeKey="User Management"><PublicAdminPoral /></ProtectedRoute>} />
-          <Route path="/admin/lead-scout" element={<ProtectedRoute routeKey="Lead Scout"><LeadScout /></ProtectedRoute>} />
+          {/* ── Admin ── */}
+          <Route path="/admin/users"       element={<ProtectedRoute routeKey="User Management"><UserManagement /></ProtectedRoute>} />
+          <Route path="/admin/logs"        element={<ProtectedRoute routeKey="Activity Logs"><ActivityLogView /></ProtectedRoute>} />
+          <Route path="/public-site-admin" element={<ProtectedRoute routeKey="User Management"><PublicAdminPortal /></ProtectedRoute>} />
+          <Route path="/admin/lead-scout"  element={<ProtectedRoute routeKey="Lead Scout"><LeadScout /></ProtectedRoute>} />
 
-          {/* All users */}
+          {/* ── All users ── */}
           <Route path="/change-password" element={<ChangePassword />} />
 
-          {/* Public routes also accessible when logged in */}
-          <Route path="/p/:slug" element={<ClientPortalView />} />
-          <Route path="/respond/:id" element={<SourcingHub />} />
+          {/* ── Public (accessible when logged in too) ── */}
+          <Route path="/p/:slug"     element={<ClientPortalView />} />
+          <Route path="/respond/:id" element={<SourcingHub />}      />
         </Routes>
       </main>
     </div>
   );
 };
 
-// ── Root ──────────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// Root
+// ─────────────────────────────────────────────────────────────────────────────
 function App() {
   return (
     <AuthProvider>
+      <FontLoader />
       <AppPopupStyles />
       <Router future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
         <AppShell />

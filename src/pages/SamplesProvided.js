@@ -1,54 +1,165 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react';
 import api from '../api';
-import { 
-  Plus, Trash2, Truck, Search, Calendar, Hash, Package, 
-  Camera, X, Check, AlertCircle, ChevronRight, User, 
-  FileText, Archive, Filter, Eye, Edit3, Image as ImageIcon,
-  ShieldAlert, ClipboardEdit, Paperclip, Info, Clock, AlertTriangle,
-  CheckCircle2, Upload, Download, File, ExternalLink,BriefcaseBusiness
+import { createLogger } from '../utils/logger';
+import {
+  Plus, Trash2, Search, Calendar, Hash, Package,
+  Camera, X, CheckCircle2, User, AlertTriangle,
+  ClipboardEdit, Upload, Download, File, ExternalLink,
+  BriefcaseBusiness, Eye, Edit3, ShieldAlert,
+  Image as ImageIcon,
 } from 'lucide-react';
 
-/*
-const getBaseUrl = () => {
-  const { hostname } = window.location;
-  const host = (hostname === 'localhost' || hostname === '127.0.0.1') 
-    ? 'localhost' 
-    : hostname;
-  return `http://${host}:5000/api`;
+const log = createLogger('SamplesProvided');
+
+// ── Design tokens ─────────────────────────────────────────────────────────────
+const T = {
+  navy:    '#0e1520',
+  gold:    '#b8975a',
+  gold2:   '#d4b06a',
+  offwhite:'#faf8f5',
+  text:    '#1a1a1a',
+  muted:   '#888',
+  border:  'rgba(0,0,0,0.07)',
+  borderG: 'rgba(184,151,90,0.18)',
+  dimBg:   'rgba(184,151,90,0.04)',
+  indigo:  '#4f46e5',
+  red:     '#dc2626',
+  green:   '#16a34a',
+  amber:   '#d97706',
 };
-*/
 
+const jost  = '"Jost", sans-serif';
+const serif = '"Cormorant Garamond", Georgia, serif';
+
+// ── Shared input style ────────────────────────────────────────────────────────
+const inputStyle = (focused) => ({
+  width: '100%',
+  padding: '10px 14px',
+  background: 'white',
+  border: `1px solid ${focused ? T.gold : T.border}`,
+  borderRadius: 3,
+  fontFamily: jost,
+  fontSize: 13,
+  fontWeight: 300,
+  color: T.text,
+  outline: 'none',
+  boxSizing: 'border-box',
+  transition: 'border-color 0.2s',
+});
+
+const FocusInput = ({ value, onChange, placeholder, type = 'text', disabled = false, style: extra = {} }) => {
+  const [focused, setFocused] = useState(false);
+  return (
+    <input
+      type={type}
+      value={value}
+      onChange={onChange}
+      placeholder={placeholder}
+      disabled={disabled}
+      onFocus={() => setFocused(true)}
+      onBlur={() => setFocused(false)}
+      style={{ ...inputStyle(focused), ...extra }}
+    />
+  );
+};
+
+// ── ItemFileDrop ──────────────────────────────────────────────────────────────
+const ItemFileDrop = ({ item, onFileSelect, disabled, toBase64 }) => {
+  const [isDragging, setIsDragging] = useState(false);
+  const inputRef = useRef(null);
+
+  const handleDrop = async (e) => {
+    e.preventDefault();
+    if (disabled) return;
+    setIsDragging(false);
+    const file = e.dataTransfer.files[0];
+    if (file) {
+      const base64 = await toBase64(file);
+      onFileSelect(base64);
+    }
+  };
+
+  return (
+    <div
+      onClick={() => !disabled && inputRef.current.click()}
+      onDragOver={(e) => { e.preventDefault(); setIsDragging(true); }}
+      onDragLeave={() => setIsDragging(false)}
+      onDrop={handleDrop}
+      style={{
+        width: 52,
+        height: 52,
+        flexShrink: 0,
+        borderRadius: 4,
+        border: `2px dashed ${isDragging ? T.indigo : T.border}`,
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        cursor: disabled ? 'default' : 'pointer',
+        overflow: 'hidden',
+        transition: 'border-color 0.2s',
+        background: isDragging ? 'rgba(79,70,229,0.04)' : 'transparent',
+      }}
+    >
+      <input
+        ref={inputRef}
+        type="file"
+        hidden
+        onChange={async (e) => {
+          const file = e.target.files[0];
+          if (file) {
+            const base64 = await toBase64(file);
+            onFileSelect(base64);
+          }
+        }}
+      />
+      {item.image ? (
+        <img src={item.image} style={{ width: '100%', height: '100%', objectFit: 'cover' }} alt="Item" />
+      ) : (
+        <Camera size={18} style={{ color: T.muted }} />
+      )}
+    </div>
+  );
+};
+
+// ── SamplesProvided ───────────────────────────────────────────────────────────
 const SamplesProvided = () => {
-  const [challans, setChallans] = useState([]);
-  const [searchTerm, setSearchTerm] = useState('');
-  const [clientFilter, setClientFilter] = useState('');
-  const [dateFilter, setDateFilter] = useState('all'); 
-  const [activeTab, setActiveTab] = useState('open');
-  const [showModal, setShowModal] = useState(false);
+
+  // ── State ──────────────────────────────────────────────────────────────────
+  const [challans,          setChallans]          = useState([]);
+  const [searchTerm,        setSearchTerm]        = useState('');
+  const [clientFilter,      setClientFilter]      = useState('');
+  const [dateFilter,        setDateFilter]        = useState('all');
+  const [activeTab,         setActiveTab]         = useState('open');
+  const [showModal,         setShowModal]         = useState(false);
   const [showSettleConfirm, setShowSettleConfirm] = useState(false);
-  const [modalMode, setModalMode] = useState('edit'); 
-  const [currentChallan, setCurrentChallan] = useState(null);
-  const [settleReason, setSettleReason] = useState('');
-  const [targetSettleId, setTargetSettleId] = useState(null);
-  const [loading, setLoading] = useState(false);
+  const [modalMode,         setModalMode]         = useState('edit');
+  const [currentChallan,   setCurrentChallan]    = useState(null);
+  const [settleReason,      setSettleReason]      = useState('');
+  const [targetSettleId,    setTargetSettleId]    = useState(null);
+  const [loading,           setLoading]           = useState(false);
+  const [searchFocused,     setSearchFocused]     = useState(false);
 
+  // ── Bootstrap ──────────────────────────────────────────────────────────────
+  useEffect(() => { fetchChallans(); }, []);
 
-  useEffect(() => {
-    fetchChallans();
-  }, []);
-
+  // ── API helpers ────────────────────────────────────────────────────────────
   const fetchChallans = async () => {
+    log.debug('Fetching challans…');
     try {
       const res = await api.get('/challans');
+      log.info('Challans loaded', { count: res.data.length });
       setChallans(res.data);
     } catch (err) {
-      console.error("Fetch error:", err);
+      log.error('Failed to fetch challans', err.message);
     }
   };
 
   const handleSave = async () => {
     if (!currentChallan.challanNumber || !currentChallan.clientName) return;
     setLoading(true);
+    log.info(currentChallan._id ? 'Updating challan' : 'Creating challan', {
+      challanNumber: currentChallan.challanNumber,
+    });
     try {
       if (currentChallan._id) {
         await api.put(`/challans/${currentChallan._id}`, currentChallan);
@@ -58,42 +169,43 @@ const SamplesProvided = () => {
       fetchChallans();
       setShowModal(false);
     } catch (err) {
-      console.error("Save error:", err);
+      log.error('Save failed', err.message);
     } finally {
       setLoading(false);
     }
   };
 
   const initiateSettle = (challan) => {
-    const hasPending = challan.samples.some(s => s.qtyMissing > 0);
+    log.debug('Initiating settle', { id: challan._id });
     setTargetSettleId(challan._id);
     setSettleReason('');
     setShowSettleConfirm(true);
   };
 
   const handleSettleConfirm = async () => {
+    log.info('Settling challan', { id: targetSettleId });
     try {
       const challan = challans.find(c => c._id === targetSettleId);
-      // Apply the reason to all samples with missing items
       const updatedSamples = challan.samples.map(s => ({
         ...s,
-        writeOffRemarks: s.qtyMissing > 0 ? settleReason : s.writeOffRemarks
+        writeOffRemarks: s.qtyMissing > 0 ? settleReason : s.writeOffRemarks,
       }));
-  
-      await api.put(`/challans/${targetSettleId}`, { 
+      await api.put(`/challans/${targetSettleId}`, {
         status: 'settled',
         settledAt: new Date(),
         samples: updatedSamples,
-        dcAttachments: challan.dcAttachments
+        dcAttachments: challan.dcAttachments,
       });
       fetchChallans();
       setShowSettleConfirm(false);
     } catch (err) {
-      console.error("Settle error:", err);
+      log.error('Settle failed', err.message);
     }
   };
 
+  // ── Modal openers ──────────────────────────────────────────────────────────
   const openAddModal = () => {
+    log.debug('Opening add modal');
     setModalMode('edit');
     setCurrentChallan({
       challanNumber: `CH-${Date.now().toString().slice(-6)}`,
@@ -103,31 +215,34 @@ const SamplesProvided = () => {
       date: new Date().toISOString().split('T')[0],
       samples: [],
       dcAttachments: [],
-      status: 'open'
+      status: 'open',
     });
     setShowModal(true);
   };
 
   const openEditModal = (challan) => {
+    log.debug('Opening edit modal', { id: challan._id });
     setModalMode('edit');
     setCurrentChallan({ ...challan });
     setShowModal(true);
   };
 
   const openViewModal = (challan) => {
+    log.debug('Opening view modal', { id: challan._id });
     setModalMode('view');
     setCurrentChallan({ ...challan });
     setShowModal(true);
   };
 
+  // ── Derived data ───────────────────────────────────────────────────────────
   const filteredChallans = useMemo(() => {
     return challans.filter(c => {
-      const matchesTab = c.status === activeTab;
-      const matchesSearch = 
+      const matchesTab    = c.status === activeTab;
+      const matchesSearch =
         c.challanNumber.toLowerCase().includes(searchTerm.toLowerCase()) ||
         c.clientName.toLowerCase().includes(searchTerm.toLowerCase());
       const matchesClient = clientFilter === '' || c.clientName === clientFilter;
-      
+
       let matchesDate = true;
       if (dateFilter === 'older') {
         const oneMonthAgo = new Date();
@@ -140,52 +255,24 @@ const SamplesProvided = () => {
 
   const clients = useMemo(() => [...new Set(challans.map(c => c.clientName))], [challans]);
 
-  const toBase64 = file => new Promise((resolve, reject) => {
+  // ── Utilities ──────────────────────────────────────────────────────────────
+  const toBase64 = (file) => new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.readAsDataURL(file);
-    reader.onload = () => resolve(reader.result);
-    reader.onerror = error => reject(error);
+    reader.onload  = () => resolve(reader.result);
+    reader.onerror = (error) => reject(error);
   });
 
-  const handleDCUpload = async (e) => {
-    const files = Array.from(e.target.files);
-    const newAttachments = await Promise.all(files.map(async file => ({
-      name: file.name,
-      type: file.type,
-      size: (file.size / 1024).toFixed(1) + ' KB',
-      data: await toBase64(file)
-    })));
-    
-    setCurrentChallan(prev => ({
-      ...prev,
-      dcAttachments: [...(prev.dcAttachments || []), ...newAttachments]
-    }));
-  };
-
-  const removeItem = (id) => {
-    setCurrentChallan(prev => ({
-      ...prev,
-      samples: prev.samples.filter(s => s.id !== id)
-    }));
-  };
-
-  const updateItem = (id, field, value) => {
-    setCurrentChallan(prev => ({
-      ...prev,
-      samples: prev.samples.map(s => s.id === id ? { ...s, [field]: value } : s)
-    }));
-  };
-
   const isOlderThanMonth = (dateString) => {
-    const date = new Date(dateString);
     const oneMonthAgo = new Date();
     oneMonthAgo.setMonth(oneMonthAgo.getMonth() - 1);
-    return date < oneMonthAgo;
+    return new Date(dateString) < oneMonthAgo;
   };
 
   const downloadFile = (file) => {
+    log.debug('Downloading file', { name: file.name });
     const link = document.createElement('a');
-    link.href = file.data;
+    link.href     = file.data;
     link.download = file.name;
     document.body.appendChild(link);
     link.click();
@@ -193,465 +280,847 @@ const SamplesProvided = () => {
   };
 
   const viewFile = (file) => {
+    log.debug('Viewing file', { name: file.name });
     const win = window.open();
-    win.document.write(`<iframe src="${file.data}" frameborder="0" style="border:0; top:0px; left:0px; bottom:0px; right:0px; width:100%; height:100%;" allowfullscreen></iframe>`);
-  };
-
-  const ItemFileDrop = ({ item, onFileSelect, disabled }) => {
-    const [isDragging, setIsDragging] = useState(false);
-    const inputRef = useRef(null);
-
-    const handleDrop = async (e) => {
-      e.preventDefault();
-      if (disabled) return;
-      setIsDragging(false);
-      const file = e.dataTransfer.files[0];
-      if (file) {
-        const base64 = await toBase64(file);
-        onFileSelect(base64);
-      }
-    };
-
-    return (
-      <div 
-        onClick={() => !disabled && inputRef.current.click()}
-        onDragOver={(e) => { e.preventDefault(); setIsDragging(true); }}
-        onDragLeave={() => setIsDragging(false)}
-        onDrop={handleDrop}
-        className={`w-14 h-14 rounded-xl border-2 border-dashed flex items-center justify-center cursor-pointer transition-all overflow-hidden shrink-0 ${
-          isDragging ? 'border-indigo-500 bg-indigo-50' : 'border-slate-200 hover:border-indigo-300'
-        } ${disabled ? 'cursor-default' : ''}`}
-      >
-        <input 
-          ref={inputRef}
-          type="file" 
-          hidden 
-          onChange={async (e) => {
-            const file = e.target.files[0];
-            if (file) {
-              const base64 = await toBase64(file);
-              onFileSelect(base64);
-            }
-          }}
-        />
-        {item.image ? (
-          <img src={item.image} className="w-full h-full object-cover" alt="Item" />
-        ) : (
-          <Camera size={18} className="text-slate-400" />
-        )}
-      </div>
+    win.document.write(
+      `<iframe src="${file.data}" frameborder="0" style="border:0;top:0;left:0;bottom:0;right:0;width:100%;height:100%;" allowfullscreen></iframe>`
     );
   };
 
+  // ── Sample item helpers ────────────────────────────────────────────────────
+  const removeItem = (id) => {
+    setCurrentChallan(prev => ({
+      ...prev,
+      samples: prev.samples.filter(s => s.id !== id),
+    }));
+  };
+
+  const updateItem = (id, field, value) => {
+    setCurrentChallan(prev => ({
+      ...prev,
+      samples: prev.samples.map(s => s.id === id ? { ...s, [field]: value } : s),
+    }));
+  };
+
+  const handleDCUpload = async (e) => {
+    const files = Array.from(e.target.files);
+    log.debug('Uploading DC attachments', { count: files.length });
+    const newAttachments = await Promise.all(files.map(async (file) => ({
+      name: file.name,
+      type: file.type,
+      size: (file.size / 1024).toFixed(1) + ' KB',
+      data: await toBase64(file),
+    })));
+    setCurrentChallan(prev => ({
+      ...prev,
+      dcAttachments: [...(prev.dcAttachments || []), ...newAttachments],
+    }));
+  };
+
+  // ── Render ─────────────────────────────────────────────────────────────────
   return (
-    <div className="min-h-screen bg-[#F8FAFC] text-slate-900 font-sans p-4 md:p-8">
-      <div className="max-w-7xl mx-auto">
-        
-        {/* Header */}
-        <div className="flex flex-col md:flex-row md:items-center justify-between gap-6 mb-10">
-          <div>
-            <h1 className="text-3xl font-black tracking-tight text-slate-900 flex items-center gap-3">
-              <div className="p-3 bg-indigo-600 rounded-2xl shadow-lg shadow-indigo-100">
-                <Package className="text-white" size={28} />
-              </div>
-              Samples Provided
-            </h1>
-            <p className="text-slate-500 mt-2 font-medium">Asset Management & Tracking</p>
+    <div style={{ minHeight: '100vh', background: T.offwhite, fontFamily: jost, padding: '56px 48px' }}>
+
+      {/* ── Page header ──────────────────────────────────────────────────── */}
+      <div style={{ marginBottom: 40 }}>
+        <div style={{ width: 32, height: 1, background: T.gold, marginBottom: 20 }} />
+        <p style={{
+          fontSize: 9, fontWeight: 400, letterSpacing: '0.3em',
+          textTransform: 'uppercase', color: T.muted, marginBottom: 10,
+        }}>
+          Asset Management
+        </p>
+        <h1 style={{
+          fontFamily: serif, fontSize: 40, fontWeight: 300,
+          color: T.navy, lineHeight: 1.05, margin: '0 0 24px',
+        }}>
+          Samples <em style={{ color: T.gold }}>Provided.</em>
+        </h1>
+
+        {/* Controls row */}
+        <div style={{ display: 'flex', gap: 14, flexWrap: 'wrap', alignItems: 'center' }}>
+
+          {/* Search */}
+          <div style={{ position: 'relative', flex: '1 1 260px', maxWidth: 420 }}>
+            <Search size={13} style={{
+              position: 'absolute', left: 13, top: '50%',
+              transform: 'translateY(-50%)', color: T.muted, pointerEvents: 'none',
+            }} />
+            <input
+              type="text"
+              placeholder="ID or Client Name…"
+              value={searchTerm}
+              onChange={e => setSearchTerm(e.target.value)}
+              onFocus={() => setSearchFocused(true)}
+              onBlur={() => setSearchFocused(false)}
+              style={{
+                width: '100%', padding: '10px 36px 10px 36px',
+                background: 'white',
+                border: `1px solid ${searchFocused ? T.gold : T.border}`,
+                borderRadius: 3,
+                fontFamily: jost, fontSize: 12, fontWeight: 300,
+                color: T.text, outline: 'none',
+                boxSizing: 'border-box', transition: 'border-color 0.2s',
+              }}
+            />
+            {searchTerm && (
+              <button
+                onClick={() => setSearchTerm('')}
+                style={{
+                  position: 'absolute', right: 12, top: '50%',
+                  transform: 'translateY(-50%)', background: 'none',
+                  border: 'none', cursor: 'pointer', color: T.muted,
+                  display: 'flex', padding: 0,
+                }}
+              >✕</button>
+            )}
           </div>
-          
-          <button 
-            onClick={openAddModal}
-            className="flex items-center justify-center gap-3 bg-indigo-600 hover:bg-indigo-700 text-white px-8 py-4 rounded-[1.5rem] font-bold text-sm shadow-xl shadow-indigo-100 transition-all active:scale-95"
+
+          {/* Client filter */}
+          <select
+            value={clientFilter}
+            onChange={e => setClientFilter(e.target.value)}
+            style={{
+              padding: '10px 14px', background: 'white',
+              border: `1px solid ${T.border}`, borderRadius: 3,
+              fontFamily: jost, fontSize: 12, fontWeight: 300,
+              color: T.text, outline: 'none', cursor: 'pointer',
+            }}
           >
-            <Plus size={20} strokeWidth={3} />
-            Create Manifest
+            <option value="">All Clients</option>
+            {clients.map(c => <option key={c} value={c}>{c}</option>)}
+          </select>
+
+          {/* Date filter (open tab only) */}
+          {activeTab === 'open' && (
+            <select
+              value={dateFilter}
+              onChange={e => setDateFilter(e.target.value)}
+              style={{
+                padding: '10px 14px', background: 'white',
+                border: `1px solid ${T.border}`, borderRadius: 3,
+                fontFamily: jost, fontSize: 12, fontWeight: 300,
+                color: T.text, outline: 'none', cursor: 'pointer',
+              }}
+            >
+              <option value="all">All Dates</option>
+              <option value="older">Older than 30 Days</option>
+            </select>
+          )}
+
+          {/* Create manifest */}
+          <button
+            onClick={openAddModal}
+            style={{
+              display: 'inline-flex', alignItems: 'center', gap: 8,
+              background: T.gold, color: T.navy,
+              border: 'none', padding: '11px 28px',
+              fontFamily: jost, fontSize: 10, fontWeight: 500,
+              letterSpacing: '0.22em', textTransform: 'uppercase',
+              cursor: 'pointer', transition: 'background 0.25s', flexShrink: 0,
+            }}
+            onMouseEnter={e => e.currentTarget.style.background = T.gold2}
+            onMouseLeave={e => e.currentTarget.style.background = T.gold}
+          >
+            <Plus size={14} strokeWidth={2.5} /> Create Manifest
           </button>
         </div>
-
-        {/* Tab Selection */}
-        <div className="bg-white rounded-[2rem] p-4 shadow-sm border border-slate-100 mb-8">
-          <div className="flex flex-col lg:flex-row gap-6">
-            <div className="flex p-1.5 bg-slate-100 rounded-2xl w-fit">
-              {['open', 'settled', 'archived'].map(tab => (
-                <button
-                  key={tab}
-                  onClick={() => setActiveTab(tab)}
-                  className={`px-8 py-3 rounded-xl text-xs font-black uppercase tracking-widest transition-all ${
-                    activeTab === tab 
-                    ? 'bg-white text-indigo-600 shadow-sm' 
-                    : 'text-slate-500 hover:text-slate-700'
-                  }`}
-                >
-                  {tab}
-                </button>
-              ))}
-            </div>
-
-            <div className="flex flex-1 flex-wrap gap-4">
-              <div className="relative flex-1 min-w-[240px]">
-                <Search className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400" size={18} />
-                <input 
-                  type="text"
-                  placeholder="ID or Client Name..."
-                  className="w-full pl-12 pr-4 py-3.5 bg-slate-50 border-transparent rounded-2xl focus:bg-white focus:ring-2 focus:ring-indigo-100 transition-all text-sm outline-none font-medium"
-                  value={searchTerm}
-                  onChange={(e) => setSearchTerm(e.target.value)}
-                />
-              </div>
-
-              <select 
-                className="px-6 py-3.5 bg-slate-50 border-transparent rounded-2xl text-sm font-bold text-slate-600 outline-none"
-                value={clientFilter}
-                onChange={(e) => setClientFilter(e.target.value)}
-              >
-                <option value="">All Clients</option>
-                {clients.map(c => <option key={c} value={c}>{c}</option>)}
-              </select>
-
-              {activeTab === 'open' && (
-                <select 
-                  className="px-6 py-3.5 bg-slate-50 border-transparent rounded-2xl text-sm font-bold text-slate-600 outline-none"
-                  value={dateFilter}
-                  onChange={(e) => setDateFilter(e.target.value)}
-                >
-                  <option value="all">All Dates</option>
-                  <option value="older">Older than 30 Days</option>
-                </select>
-              )}
-            </div>
-          </div>
-        </div>
-
-        {/* Data List */}
-        <div className="grid grid-cols-1 gap-4">
-          {filteredChallans.map(challan => {
-                        // Logic to calculate totals for the current challan row
-            const totals = (challan.samples || []).reduce((acc, s) => ({
-              sent: acc.sent + (Number(s.qtySent) || 0),
-              received: acc.received + (Number(s.qtyReturned) || 0),
-              pending: acc.pending + Math.max(0, (Number(s.qtySent) || 0) - (Number(s.qtyReturned) || 0))
-            }), { sent: 0, received: 0, pending: 0 });
-            return(
-            <div 
-              key={challan._id}
-              className={`group bg-white p-5 rounded-[2rem] border transition-all hover:shadow-xl flex flex-col md:flex-row md:items-center justify-between gap-6 ${
-                activeTab === 'open' && isOlderThanMonth(challan.date) 
-                ? 'border-red-200 bg-red-50/10' 
-                : 'border-slate-100'
-              }`}
-            >
-              <div className="flex items-center gap-5">
-                <div className="p-4 bg-slate-50 rounded-2xl group-hover:bg-indigo-50">
-                  <Hash className="text-slate-400 group-hover:text-indigo-500" size={20} />
-                </div>
-                <div>
-                  <div className="flex items-center gap-2 mb-1">
-                    <span className="text-sm font-black text-slate-900">{challan.challanNumber}</span>
-                    {activeTab === 'open' && isOlderThanMonth(challan.date) && (
-                      <span className="px-2 py-0.5 bg-red-100 text-red-600 text-[10px] font-black uppercase rounded-md flex items-center gap-1">
-                        Overdue
-                      </span>
-                    )}
-                  </div>
-                  <div className="flex items-center gap-4 text-xs font-bold text-slate-400">
-                    <span className="flex items-center gap-1.5"><BriefcaseBusiness size={14}/> {challan.clientName}</span>
-                     <span className="flex items-center gap-1.5"><User size={14}/>{challan.orderedBy}</span>
-                    <span className="flex items-center gap-1.5"><Calendar size={14}/> {new Date(challan.date).toLocaleDateString()}</span>
-                  </div>
-                </div>
-              </div>
-              
-
-                
-              <div className="flex items-center gap-8">
-                                              {/* Desktop Grid Columns for Quantities */}
-                <div className="flex-1 grid grid-cols-3 gap-4 max-w-md">
-                  <div className="text-center">
-                    <div className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1">Qty Sent</div>
-                    <div className="text-sm font-black text-slate-700">{totals.sent}</div>
-                  </div>
-                  <div className="text-center">
-                    <div className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1">Received</div>
-                    <div className="text-sm font-black text-green-600">{totals.received}</div>
-                  </div>
-                  <div className="text-center border-l border-slate-100">
-                    <div className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1">Pending</div>
-                    <div className={`text-sm font-black ${totals.pending > 0 ? 'text-red-500' : 'text-slate-400'}`}>{totals.pending}</div>
-                  </div>
-                </div>
-                
-                <div className="flex items-center gap-2">
-                  <button onClick={() => openViewModal(challan)} className="p-3 text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 rounded-xl transition-all">
-                    <Eye size={20} />
-                  </button>
-                  
-                  {activeTab === 'open' && (
-                    <>
-                      <button onClick={() => openEditModal(challan)} className="p-3 text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 rounded-xl transition-all">
-                        <Edit3 size={20} />
-                      </button>
-                      <button 
-                        onClick={() => initiateSettle(challan)}
-                        className="flex items-center gap-2 px-5 py-3 bg-green-50 text-green-600 hover:bg-green-100 rounded-xl text-xs font-black uppercase tracking-widest transition-all"
-                      >
-                        <CheckCircle2 size={16} />
-                        Settle
-                      </button>
-                    </>
-                  )}
-                </div>
-              </div>
-            </div>
-            );
-          })}
-        </div>
-
-        {/* Manifest Modal */}
-        {showModal && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/40 backdrop-blur-sm">
-            <div className="bg-white w-full max-w-5xl max-h-[90vh] rounded-[2.5rem] shadow-2xl flex flex-col overflow-hidden">
-              <div className="p-8 border-b border-slate-100 flex items-center justify-between bg-slate-50/30">
-                <div className="flex items-center gap-4">
-                  <div className="p-3 bg-white rounded-2xl shadow-sm">
-                    <ClipboardEdit className="text-indigo-600" size={24} />
-                  </div>
-                  <div>
-                    <h2 className="text-xl font-black text-slate-900">Manifest: {currentChallan.challanNumber}</h2>
-                    <p className="text-xs font-bold text-slate-400 uppercase tracking-widest mt-1">{activeTab} Record</p>
-                  </div>
-                </div>
-                <button onClick={() => setShowModal(false)} className="p-2 hover:bg-slate-100 rounded-full transition-colors">
-                  <X size={24} className="text-slate-400" />
-                </button>
-              </div>
-
-              <div className="flex-1 overflow-y-auto p-8 custom-scrollbar">
-                <div className="grid grid-cols-1 lg:grid-cols-3 gap-10">
-                  <div className="lg:col-span-1 space-y-8">
-                    <section>
-                      <h3 className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-4">Details</h3>
-                      <div className="space-y-4">
-                        <input 
-                          placeholder="Client Name"
-                          disabled={modalMode === 'view'}
-                          className="w-full px-4 py-3.5 bg-slate-50 border-transparent rounded-2xl text-sm font-bold focus:bg-white focus:ring-2 focus:ring-indigo-100 transition-all outline-none"
-                          value={currentChallan.clientName}
-                          onChange={(e) => setCurrentChallan(prev => ({ ...prev, clientName: e.target.value }))}
-                        />
-                        <input 
-                          placeholder="Ordered By"
-                          disabled={modalMode === 'view'}
-                          className="w-full px-4 py-3.5 bg-slate-50 border-transparent rounded-2xl text-sm font-bold focus:bg-white focus:ring-2 focus:ring-indigo-100 transition-all outline-none"
-                          value={currentChallan.orderedBy || ''}
-                          onChange={(e) => setCurrentChallan(prev => ({ ...prev, orderedBy: e.target.value }))}
-                        />
-                        <input 
-                          type="date"
-                          disabled={modalMode === 'view'}
-                          className="w-full px-4 py-3.5 bg-slate-50 border-transparent rounded-2xl text-sm font-bold focus:bg-white focus:ring-2 focus:ring-indigo-100 transition-all outline-none"
-                          value={currentChallan.date?.split('T')[0]}
-                          onChange={(e) => setCurrentChallan(prev => ({ ...prev, date: e.target.value }))}
-                        />
-                      </div>
-                    </section>
-
-                    <section>
-                      <h3 className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-4">DC Attachments</h3>
-                      <div className="space-y-3">
-                        {modalMode !== 'view' && (
-                          <label className="flex flex-col items-center justify-center w-full h-24 bg-slate-50 border-2 border-dashed border-slate-200 rounded-3xl cursor-pointer hover:bg-slate-100 transition-all">
-                            <Upload className="text-slate-400 mb-1" size={20} />
-                            <p className="text-[10px] font-black text-slate-500 uppercase">Drop or Click</p>
-                            <input type="file" multiple className="hidden" onChange={handleDCUpload} accept="image/*,.pdf" />
-                          </label>
-                        )}
-                        <div className="space-y-2">
-                          {currentChallan.dcAttachments?.map((file, idx) => (
-                            <div key={idx} className="flex items-center gap-3 bg-slate-50 p-3 rounded-2xl border border-slate-100">
-                              {file.type.includes('pdf') ? <File className="text-red-400" size={16}/> : <ImageIcon className="text-indigo-400" size={16}/>}
-                              <div className="flex-1 min-w-0">
-                                <p className="text-[11px] font-black text-slate-700 truncate">{file.name}</p>
-                                <p className="text-[9px] font-bold text-slate-400">{file.size}</p>
-                              </div>
-                              <div className="flex items-center gap-1">
-                                <button onClick={() => viewFile(file)} className="p-1.5 text-slate-400 hover:text-indigo-600 transition-colors" title="View"><ExternalLink size={14}/></button>
-                                <button onClick={() => downloadFile(file)} className="p-1.5 text-slate-400 hover:text-indigo-600 transition-colors" title="Download"><Download size={14}/></button>
-                                {modalMode !== 'view' && (
-                                  <button 
-                                    onClick={() => setCurrentChallan(prev => ({ ...prev, dcAttachments: prev.dcAttachments.filter((_, i) => i !== idx) }))}
-                                    className="p-1.5 text-slate-300 hover:text-red-500 transition-colors"
-                                  ><X size={14} /></button>
-                                )}
-                              </div>
-                            </div>
-                          ))}
-                        </div>
-                      </div>
-                    </section>
-                  </div>
-
-                  <div className="lg:col-span-2">
-                    <div className="flex items-center justify-between mb-6">
-                      <h3 className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Item Table</h3>
-                      {modalMode !== 'view' && (
-                        <button 
-                          onClick={() => setCurrentChallan(prev => ({
-                            ...prev,
-                            samples: [...prev.samples, { id: Date.now(), name: '', qtySent: 1, qtyReturned: 0, qtyMissing: 0, image: '', writeOffRemarks: '' }]
-                          }))}
-                          className="bg-indigo-50 text-indigo-600 px-4 py-2 rounded-xl text-[10px] font-black uppercase"
-                        >Add Item</button>
-                      )}
-                    </div>
-
-                    <div className="overflow-x-auto">
-                      <table className="w-full text-left">
-                        <thead>
-                          <tr className="border-b border-slate-100">
-                            <th className="pb-4 text-[10px] font-black text-slate-400 uppercase tracking-widest">Item Description</th>
-                            <th className="pb-4 text-[10px] font-black text-slate-400 uppercase tracking-widest text-center">Quantity Sent</th>
-                            <th className="pb-4 text-[10px] font-black text-slate-400 uppercase tracking-widest text-center">Quantity Received</th>
-                            <th className="pb-4 text-[10px] font-black text-slate-400 uppercase tracking-widest text-center">Quantity Pending</th>
-                            {modalMode !== 'view' && <th className="pb-4 w-10"></th>}
-                          </tr>
-                        </thead>
-                        <tbody className="divide-y divide-slate-50">
-                          {currentChallan.samples.map((item) => (
-                            <React.Fragment key={item.id}>
-                              <tr className="group">
-                                <td className="py-4">
-                                  <div className="flex items-center gap-4">
-                                    <ItemFileDrop item={item} disabled={modalMode === 'view'} onFileSelect={(data) => updateItem(item.id, 'image', data)} />
-                                    <input 
-                                      placeholder="Name..."
-                                      disabled={modalMode === 'view'}
-                                      className="bg-transparent border-none font-bold text-slate-700 text-sm outline-none w-full"
-                                      value={item.name}
-                                      onChange={(e) => updateItem(item.id, 'name', e.target.value)}
-                                    />
-                                  </div>
-                                </td>
-                                <td className="py-4 text-center">
-                                  <input 
-                                    type="number"
-                                    disabled={modalMode === 'view'}
-                                    className="w-16 bg-slate-50 border-none rounded-lg p-2 text-center text-sm font-bold text-slate-600"
-                                    value={item.qtySent}
-                                    onChange={(e) => {
-                                      const s = parseInt(e.target.value) || 0;
-                                      updateItem(item.id, 'qtySent', s);
-                                      updateItem(item.id, 'qtyMissing', Math.max(0, s - item.qtyReturned));
-                                    }}
-                                  />
-                                </td>
-                                <td className="py-4 text-center">
-                                  <input 
-                                    type="number"
-                                    disabled={modalMode === 'view'}
-                                    className="w-16 bg-green-50 border-none rounded-lg p-2 text-center text-sm font-bold text-green-600"
-                                    value={item.qtyReturned}
-                                    onChange={(e) => {
-                                      const r = parseInt(e.target.value) || 0;
-                                      updateItem(item.id, 'qtyReturned', r);
-                                      updateItem(item.id, 'qtyMissing', Math.max(0, item.qtySent - r));
-                                    }}
-                                  />
-                                </td>
-                                <td className="py-4 text-center">
-                                  <span className={`text-sm font-black ${item.qtyMissing > 0 ? 'text-red-500' : 'text-slate-300'}`}>
-                                    {item.qtyMissing}
-                                  </span>
-                                </td>
-                                {modalMode !== 'view' && (
-                                  <td className="py-4 text-right">
-                                    <button onClick={() => removeItem(item.id)} className="p-2 text-slate-300 hover:text-red-500 transition-colors">
-                                      <Trash2 size={16} />
-                                    </button>
-                                  </td>
-                                )}
-                              </tr>
-                              {/* Display Write-off Reason in View Mode if exists */}
-                              {item.writeOffRemarks && (modalMode === 'view' || activeTab !== 'open') && (
-                                <tr>
-                                  <td colSpan={5} className="pb-4 pt-0">
-                                    <div className="flex items-center gap-2 bg-amber-50 text-amber-700 p-2 rounded-xl text-[10px] font-bold">
-                                      <AlertTriangle size={12}/> Write-off Reason: {item.writeOffRemarks}
-                                    </div>
-                                  </td>
-                                </tr>
-                              )}
-                            </React.Fragment>
-                          ))}
-                        </tbody>
-                      </table>
-                    </div>
-                  </div>
-                </div>
-              </div>
-
-              <div className="p-8 border-t flex flex-col md:flex-row justify-between items-center gap-4 bg-slate-50/50">
-                <div className="text-slate-400 text-[10px] font-bold uppercase flex items-center gap-2">
-                  <ShieldAlert size={14} className="text-indigo-400" /> Digital audit trail active
-                </div>
-                <div className="flex gap-4 w-full md:w-auto">
-                  <button onClick={() => setShowModal(false)} className="flex-1 px-8 py-4 text-slate-400 font-black text-[10px] uppercase">
-                    {modalMode === 'view' ? 'Close' : 'Discard'}
-                  </button>
-                  {modalMode === 'edit' && (
-                    <button onClick={handleSave} disabled={loading} className="flex-1 px-14 py-4 bg-indigo-600 text-white rounded-2xl font-black text-[10px] uppercase">
-                      {loading ? 'Saving...' : 'Confirm Save'}
-                    </button>
-                  )}
-                </div>
-              </div>
-            </div>
-          </div>
-        )}
-
-        {/* Settle Confirmation Popup */}
-        {showSettleConfirm && (
-          <div className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm">
-            <div className="bg-white w-full max-w-md p-8 rounded-[2.5rem] shadow-2xl animate-in fade-in zoom-in duration-200">
-              <div className="text-center mb-6">
-                <div className="inline-flex p-4 bg-green-50 text-green-600 rounded-full mb-4">
-                  <CheckCircle2 size={32} />
-                </div>
-                <h3 className="text-xl font-black text-slate-900">Settle Manifest</h3>
-                <p className="text-sm text-slate-500 mt-2 font-medium">Are you sure you want to finalize this record?</p>
-              </div>
-
-              {challans.find(c => c._id === targetSettleId)?.samples.some(s => s.qtyMissing > 0) && (
-                <div className="mb-6 space-y-2">
-                  <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest block ml-1">Write-off Reason (Pending Items Exist)</label>
-                  <textarea 
-                    autoFocus
-                    placeholder="Enter reason for missing items..."
-                    className="w-full p-4 bg-slate-50 border-none rounded-2xl text-sm font-medium focus:ring-2 focus:ring-amber-200 outline-none h-24 resize-none"
-                    value={settleReason}
-                    onChange={(e) => setSettleReason(e.target.value)}
-                  />
-                </div>
-              )}
-
-              <div className="grid grid-cols-2 gap-4">
-                <button 
-                  onClick={() => setShowSettleConfirm(false)}
-                  className="py-4 text-slate-400 font-black text-[10px] uppercase tracking-widest"
-                >Cancel</button>
-                <button 
-                  onClick={handleSettleConfirm}
-                  className="py-4 bg-indigo-600 text-white rounded-2xl font-black text-[10px] uppercase tracking-widest shadow-lg shadow-indigo-100"
-                >Yes, Settle</button>
-              </div>
-            </div>
-          </div>
-        )}
       </div>
 
-      <style>{`
-        .custom-scrollbar::-webkit-scrollbar { width: 4px; }
-        .custom-scrollbar::-webkit-scrollbar-thumb { background: #e2e8f0; border-radius: 10px; }
-      `}</style>
+      {/* ── Tab bar ──────────────────────────────────────────────────────── */}
+      <div style={{
+        display: 'flex', gap: 0,
+        borderBottom: `1px solid ${T.border}`,
+        marginBottom: 24,
+      }}>
+        {['open', 'settled', 'archived'].map(tab => (
+          <button
+            key={tab}
+            onClick={() => setActiveTab(tab)}
+            style={{
+              background: 'none', border: 'none', cursor: 'pointer',
+              padding: '10px 24px',
+              fontFamily: jost, fontSize: 9, fontWeight: 400,
+              letterSpacing: '0.25em', textTransform: 'uppercase',
+              color: activeTab === tab ? T.gold : T.muted,
+              borderBottom: `2px solid ${activeTab === tab ? T.gold : 'transparent'}`,
+              marginBottom: -1,
+              transition: 'color 0.2s, border-color 0.2s',
+            }}
+          >
+            {tab}
+          </button>
+        ))}
+      </div>
+
+      {/* ── Challan list ─────────────────────────────────────────────────── */}
+      <div style={{ background: 'white', border: `1px solid ${T.border}`, overflow: 'hidden' }}>
+        <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+          <thead>
+            <tr style={{ borderBottom: `1px solid ${T.border}`, background: T.offwhite }}>
+              {['Manifest ID', 'Client / Ordered By', 'Date', 'Qty Sent', 'Received', 'Pending', 'Actions'].map((col, i) => (
+                <th
+                  key={col}
+                  style={{
+                    padding: '12px 16px',
+                    textAlign: i >= 3 && i <= 5 ? 'center' : i === 6 ? 'right' : 'left',
+                    fontFamily: jost, fontSize: 9, fontWeight: 400,
+                    letterSpacing: '0.25em', textTransform: 'uppercase', color: T.muted,
+                  }}
+                >
+                  {col}
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {filteredChallans.length === 0 ? (
+              <tr>
+                <td colSpan={7} style={{ padding: '64px 0', textAlign: 'center' }}>
+                  <Package size={28} style={{ color: 'rgba(0,0,0,0.12)', margin: '0 auto 12px', display: 'block' }} />
+                  <p style={{ fontFamily: jost, fontSize: 12, fontWeight: 300, letterSpacing: '0.1em', color: T.muted }}>
+                    No records found
+                  </p>
+                </td>
+              </tr>
+            ) : filteredChallans.map(challan => {
+              const totals = {
+                sent:     challan.samples.reduce((acc, s) => acc + (s.qtySent     || 0), 0),
+                received: challan.samples.reduce((acc, s) => acc + (s.qtyReturned || 0), 0),
+                pending:  challan.samples.reduce((acc, s) => acc + (s.qtyMissing  || 0), 0),
+              };
+              const overdue = activeTab === 'open' && isOlderThanMonth(challan.date);
+
+              return (
+                <tr
+                  key={challan._id}
+                  style={{
+                    borderBottom: `1px solid ${T.border}`,
+                    background: overdue ? 'rgba(220,38,38,0.02)' : 'transparent',
+                    transition: 'background 0.2s',
+                  }}
+                  onMouseEnter={e => e.currentTarget.style.background = overdue ? 'rgba(220,38,38,0.04)' : 'rgba(0,0,0,0.015)'}
+                  onMouseLeave={e => e.currentTarget.style.background = overdue ? 'rgba(220,38,38,0.02)' : 'transparent'}
+                >
+                  {/* Manifest ID + overdue badge */}
+                  <td style={{ padding: '14px 16px' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                      <Hash size={13} style={{ color: T.muted, flexShrink: 0 }} />
+                      <span style={{
+                        fontFamily: jost, fontSize: 12, fontWeight: 500,
+                        letterSpacing: '0.06em', color: T.text,
+                      }}>
+                        {challan.challanNumber}
+                      </span>
+                      {overdue && (
+                        <span style={{
+                          fontFamily: jost, fontSize: 8, fontWeight: 500,
+                          letterSpacing: '0.18em', textTransform: 'uppercase',
+                          color: T.red, border: `1px solid rgba(220,38,38,0.3)`,
+                          padding: '2px 7px',
+                        }}>
+                          Overdue
+                        </span>
+                      )}
+                    </div>
+                  </td>
+
+                  {/* Client / ordered by */}
+                  <td style={{ padding: '14px 16px' }}>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
+                      <span style={{ fontFamily: jost, fontSize: 12, fontWeight: 500, color: T.text }}>
+                        {challan.clientName}
+                      </span>
+                      {challan.orderedBy && (
+                        <span style={{ fontFamily: jost, fontSize: 11, fontWeight: 300, color: T.muted }}>
+                          {challan.orderedBy}
+                        </span>
+                      )}
+                    </div>
+                  </td>
+
+                  {/* Date */}
+                  <td style={{ padding: '14px 16px', fontFamily: jost, fontSize: 12, fontWeight: 300, color: T.muted }}>
+                    {new Date(challan.date).toLocaleDateString()}
+                  </td>
+
+                  {/* Qty sent */}
+                  <td style={{ padding: '14px 16px', textAlign: 'center', fontFamily: jost, fontSize: 12, fontWeight: 500, color: T.text }}>
+                    {totals.sent}
+                  </td>
+
+                  {/* Received */}
+                  <td style={{ padding: '14px 16px', textAlign: 'center', fontFamily: jost, fontSize: 12, fontWeight: 500, color: T.green }}>
+                    {totals.received}
+                  </td>
+
+                  {/* Pending */}
+                  <td style={{ padding: '14px 16px', textAlign: 'center', fontFamily: jost, fontSize: 12, fontWeight: 500, color: totals.pending > 0 ? T.red : T.muted }}>
+                    {totals.pending}
+                  </td>
+
+                  {/* Actions */}
+                  <td style={{ padding: '14px 16px', textAlign: 'right', whiteSpace: 'nowrap' }}>
+                    <button
+                      onClick={() => openViewModal(challan)}
+                      style={{
+                        background: 'none', border: 'none', cursor: 'pointer',
+                        fontFamily: jost, fontSize: 9, fontWeight: 400,
+                        letterSpacing: '0.2em', textTransform: 'uppercase',
+                        color: T.muted, marginRight: 16, transition: 'color 0.2s',
+                      }}
+                      onMouseEnter={e => e.currentTarget.style.color = T.gold}
+                      onMouseLeave={e => e.currentTarget.style.color = T.muted}
+                    >
+                      View
+                    </button>
+
+                    {activeTab === 'open' && (
+                      <>
+                        <button
+                          onClick={() => openEditModal(challan)}
+                          style={{
+                            background: 'none', border: 'none', cursor: 'pointer',
+                            fontFamily: jost, fontSize: 9, fontWeight: 400,
+                            letterSpacing: '0.2em', textTransform: 'uppercase',
+                            color: T.gold, marginRight: 16, transition: 'color 0.2s',
+                          }}
+                          onMouseEnter={e => e.currentTarget.style.color = T.gold2}
+                          onMouseLeave={e => e.currentTarget.style.color = T.gold}
+                        >
+                          Edit
+                        </button>
+                        <button
+                          onClick={() => initiateSettle(challan)}
+                          style={{
+                            background: 'none',
+                            border: `1px solid rgba(22,163,74,0.3)`,
+                            cursor: 'pointer',
+                            padding: '4px 14px',
+                            fontFamily: jost, fontSize: 9, fontWeight: 400,
+                            letterSpacing: '0.2em', textTransform: 'uppercase',
+                            color: T.green, transition: 'background 0.2s, border-color 0.2s',
+                          }}
+                          onMouseEnter={e => { e.currentTarget.style.background = 'rgba(22,163,74,0.06)'; e.currentTarget.style.borderColor = T.green; }}
+                          onMouseLeave={e => { e.currentTarget.style.background = 'none'; e.currentTarget.style.borderColor = 'rgba(22,163,74,0.3)'; }}
+                        >
+                          Settle
+                        </button>
+                      </>
+                    )}
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+
+        {/* Row count footer */}
+        <div style={{
+          borderTop: `1px solid ${T.border}`,
+          padding: '10px 18px',
+          fontFamily: jost, fontSize: 10, fontWeight: 300,
+          letterSpacing: '0.12em', color: T.muted, textAlign: 'right',
+        }}>
+          {filteredChallans.length} of {challans.length} manifest{challans.length !== 1 ? 's' : ''}
+        </div>
+      </div>
+
+      {/* ── Manifest Modal ────────────────────────────────────────────────── */}
+      {showModal && currentChallan && (
+        <div style={{
+          position: 'fixed', inset: 0,
+          background: 'rgba(14,21,32,0.75)',
+          backdropFilter: 'blur(4px)',
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          padding: 24, zIndex: 50,
+        }}>
+          <div style={{
+            background: 'white',
+            border: `1px solid ${T.border}`,
+            width: '100%', maxWidth: 900,
+            maxHeight: '90vh', display: 'flex', flexDirection: 'column',
+            overflow: 'hidden',
+          }}>
+
+            {/* Modal header */}
+            <div style={{
+              display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start',
+              padding: '28px 32px', borderBottom: `1px solid ${T.border}`,
+              background: T.offwhite,
+            }}>
+              <div>
+                <p style={{
+                  fontFamily: jost, fontSize: 9, fontWeight: 400,
+                  letterSpacing: '0.28em', textTransform: 'uppercase',
+                  color: T.muted, marginBottom: 6,
+                }}>
+                  {modalMode === 'view' ? 'Viewing Record' : currentChallan._id ? 'Update Record' : 'New Manifest'}
+                </p>
+                <h2 style={{
+                  fontFamily: serif, fontSize: 28, fontWeight: 300,
+                  color: T.navy, margin: 0,
+                }}>
+                  Manifest: {currentChallan.challanNumber}
+                </h2>
+              </div>
+              <button
+                onClick={() => setShowModal(false)}
+                style={{
+                  background: 'none', border: 'none', cursor: 'pointer',
+                  color: T.muted, fontSize: 20, lineHeight: 1, padding: 4,
+                  transition: 'color 0.2s',
+                }}
+                onMouseEnter={e => e.currentTarget.style.color = T.text}
+                onMouseLeave={e => e.currentTarget.style.color = T.muted}
+              >
+                ✕
+              </button>
+            </div>
+
+            {/* Modal body */}
+            <div style={{ flex: 1, overflowY: 'auto', padding: '28px 32px' }}>
+              <div style={{ display: 'grid', gridTemplateColumns: '240px 1fr', gap: 40 }}>
+
+                {/* ── Left column: Details + Attachments ─────────────────── */}
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 32 }}>
+
+                  {/* Details section */}
+                  <section>
+                    <p style={{
+                      fontFamily: jost, fontSize: 9, fontWeight: 400,
+                      letterSpacing: '0.28em', textTransform: 'uppercase',
+                      color: 'rgba(184,151,90,0.65)', marginBottom: 14,
+                    }}>
+                      Details
+                    </p>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                      <FocusInput
+                        value={currentChallan.clientName}
+                        onChange={e => setCurrentChallan(prev => ({ ...prev, clientName: e.target.value }))}
+                        placeholder="Client Name"
+                        disabled={modalMode === 'view'}
+                      />
+                      <FocusInput
+                        value={currentChallan.orderedBy || ''}
+                        onChange={e => setCurrentChallan(prev => ({ ...prev, orderedBy: e.target.value }))}
+                        placeholder="Ordered By"
+                        disabled={modalMode === 'view'}
+                      />
+                      <FocusInput
+                        type="date"
+                        value={currentChallan.date?.split('T')[0]}
+                        onChange={e => setCurrentChallan(prev => ({ ...prev, date: e.target.value }))}
+                        disabled={modalMode === 'view'}
+                      />
+                    </div>
+                  </section>
+
+                  {/* DC Attachments section */}
+                  <section>
+                    <p style={{
+                      fontFamily: jost, fontSize: 9, fontWeight: 400,
+                      letterSpacing: '0.28em', textTransform: 'uppercase',
+                      color: 'rgba(184,151,90,0.65)', marginBottom: 14,
+                    }}>
+                      DC Attachments
+                    </p>
+
+                    {modalMode !== 'view' && (
+                      <label style={{
+                        display: 'flex', flexDirection: 'column',
+                        alignItems: 'center', justifyContent: 'center',
+                        height: 80,
+                        border: `2px dashed ${T.border}`,
+                        cursor: 'pointer', marginBottom: 10,
+                        transition: 'border-color 0.2s',
+                      }}
+                        onMouseEnter={e => e.currentTarget.style.borderColor = T.gold}
+                        onMouseLeave={e => e.currentTarget.style.borderColor = T.border}
+                      >
+                        <Upload size={18} style={{ color: T.muted, marginBottom: 4 }} />
+                        <p style={{
+                          fontFamily: jost, fontSize: 9, fontWeight: 400,
+                          letterSpacing: '0.2em', textTransform: 'uppercase', color: T.muted,
+                        }}>
+                          Drop or Click
+                        </p>
+                        <input type="file" multiple hidden onChange={handleDCUpload} accept="image/*,.pdf" />
+                      </label>
+                    )}
+
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                      {currentChallan.dcAttachments?.map((file, idx) => (
+                        <div key={idx} style={{
+                          display: 'flex', alignItems: 'center', gap: 10,
+                          padding: '10px 12px',
+                          background: T.offwhite, border: `1px solid ${T.border}`,
+                        }}>
+                          {file.type.includes('pdf')
+                            ? <File size={14} style={{ color: T.red, flexShrink: 0 }} />
+                            : <ImageIcon size={14} style={{ color: T.indigo, flexShrink: 0 }} />
+                          }
+                          <div style={{ flex: 1, minWidth: 0 }}>
+                            <p style={{
+                              fontFamily: jost, fontSize: 11, fontWeight: 500,
+                              color: T.text, margin: 0,
+                              overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                            }}>
+                              {file.name}
+                            </p>
+                            <p style={{ fontFamily: jost, fontSize: 9, fontWeight: 300, color: T.muted, margin: 0 }}>
+                              {file.size}
+                            </p>
+                          </div>
+                          <div style={{ display: 'flex', gap: 4 }}>
+                            <button onClick={() => viewFile(file)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: T.muted, transition: 'color 0.2s' }}
+                              onMouseEnter={e => e.currentTarget.style.color = T.gold}
+                              onMouseLeave={e => e.currentTarget.style.color = T.muted}
+                            ><ExternalLink size={13} /></button>
+                            <button onClick={() => downloadFile(file)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: T.muted, transition: 'color 0.2s' }}
+                              onMouseEnter={e => e.currentTarget.style.color = T.gold}
+                              onMouseLeave={e => e.currentTarget.style.color = T.muted}
+                            ><Download size={13} /></button>
+                            {modalMode !== 'view' && (
+                              <button
+                                onClick={() => setCurrentChallan(prev => ({
+                                  ...prev,
+                                  dcAttachments: prev.dcAttachments.filter((_, i) => i !== idx),
+                                }))}
+                                style={{ background: 'none', border: 'none', cursor: 'pointer', color: T.muted, transition: 'color 0.2s' }}
+                                onMouseEnter={e => e.currentTarget.style.color = T.red}
+                                onMouseLeave={e => e.currentTarget.style.color = T.muted}
+                              ><X size={13} /></button>
+                            )}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </section>
+                </div>
+
+                {/* ── Right column: Item Table ────────────────────────────── */}
+                <div>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 }}>
+                    <p style={{
+                      fontFamily: jost, fontSize: 9, fontWeight: 400,
+                      letterSpacing: '0.28em', textTransform: 'uppercase',
+                      color: 'rgba(184,151,90,0.65)', margin: 0,
+                    }}>
+                      Item Table
+                    </p>
+                    {modalMode !== 'view' && (
+                      <button
+                        onClick={() => setCurrentChallan(prev => ({
+                          ...prev,
+                          samples: [...prev.samples, {
+                            id: Date.now(), name: '', qtySent: 1,
+                            qtyReturned: 0, qtyMissing: 0, image: '', writeOffRemarks: '',
+                          }],
+                        }))}
+                        style={{
+                          background: 'none',
+                          border: `1px solid ${T.borderG}`,
+                          cursor: 'pointer', padding: '5px 14px',
+                          fontFamily: jost, fontSize: 9, fontWeight: 400,
+                          letterSpacing: '0.2em', textTransform: 'uppercase',
+                          color: T.gold, transition: 'background 0.2s',
+                        }}
+                        onMouseEnter={e => e.currentTarget.style.background = T.dimBg}
+                        onMouseLeave={e => e.currentTarget.style.background = 'none'}
+                      >
+                        + Add Item
+                      </button>
+                    )}
+                  </div>
+
+                  <div style={{ overflowX: 'auto' }}>
+                    <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+                      <thead>
+                        <tr style={{ borderBottom: `1px solid ${T.border}` }}>
+                          {['Item Description', 'Qty Sent', 'Qty Received', 'Qty Pending', ...(modalMode !== 'view' ? [''] : [])].map((col, i) => (
+                            <th
+                              key={i}
+                              style={{
+                                padding: '10px 12px',
+                                textAlign: i > 0 && i < 4 ? 'center' : 'left',
+                                fontFamily: jost, fontSize: 9, fontWeight: 400,
+                                letterSpacing: '0.25em', textTransform: 'uppercase', color: T.muted,
+                              }}
+                            >
+                              {col}
+                            </th>
+                          ))}
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {currentChallan.samples.map((item) => (
+                          <React.Fragment key={item.id}>
+                            <tr style={{ borderBottom: `1px solid ${T.border}` }}>
+
+                              {/* Item description + image */}
+                              <td style={{ padding: '12px' }}>
+                                <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+                                  <ItemFileDrop
+                                    item={item}
+                                    disabled={modalMode === 'view'}
+                                    toBase64={toBase64}
+                                    onFileSelect={(data) => updateItem(item.id, 'image', data)}
+                                  />
+                                  <input
+                                    placeholder="Name…"
+                                    disabled={modalMode === 'view'}
+                                    value={item.name}
+                                    onChange={e => updateItem(item.id, 'name', e.target.value)}
+                                    style={{
+                                      background: 'transparent', border: 'none',
+                                      fontFamily: jost, fontSize: 13, fontWeight: 500,
+                                      color: T.text, outline: 'none', width: '100%',
+                                    }}
+                                  />
+                                </div>
+                              </td>
+
+                              {/* Qty sent */}
+                              <td style={{ padding: '12px', textAlign: 'center' }}>
+                                <input
+                                  type="number"
+                                  disabled={modalMode === 'view'}
+                                  value={item.qtySent}
+                                  onChange={e => {
+                                    const s = parseInt(e.target.value) || 0;
+                                    updateItem(item.id, 'qtySent', s);
+                                    updateItem(item.id, 'qtyMissing', Math.max(0, s - item.qtyReturned));
+                                  }}
+                                  style={{
+                                    width: 56, padding: '6px', textAlign: 'center',
+                                    background: T.offwhite, border: `1px solid ${T.border}`,
+                                    borderRadius: 2,
+                                    fontFamily: jost, fontSize: 12, fontWeight: 500,
+                                    color: T.text, outline: 'none',
+                                  }}
+                                />
+                              </td>
+
+                              {/* Qty received */}
+                              <td style={{ padding: '12px', textAlign: 'center' }}>
+                                <input
+                                  type="number"
+                                  disabled={modalMode === 'view'}
+                                  value={item.qtyReturned}
+                                  onChange={e => {
+                                    const r = parseInt(e.target.value) || 0;
+                                    updateItem(item.id, 'qtyReturned', r);
+                                    updateItem(item.id, 'qtyMissing', Math.max(0, item.qtySent - r));
+                                  }}
+                                  style={{
+                                    width: 56, padding: '6px', textAlign: 'center',
+                                    background: 'rgba(22,163,74,0.06)', border: `1px solid rgba(22,163,74,0.2)`,
+                                    borderRadius: 2,
+                                    fontFamily: jost, fontSize: 12, fontWeight: 500,
+                                    color: T.green, outline: 'none',
+                                  }}
+                                />
+                              </td>
+
+                              {/* Qty pending */}
+                              <td style={{ padding: '12px', textAlign: 'center' }}>
+                                <span style={{
+                                  fontFamily: jost, fontSize: 12, fontWeight: 500,
+                                  color: item.qtyMissing > 0 ? T.red : T.muted,
+                                }}>
+                                  {item.qtyMissing}
+                                </span>
+                              </td>
+
+                              {/* Delete action */}
+                              {modalMode !== 'view' && (
+                                <td style={{ padding: '12px', textAlign: 'right' }}>
+                                  <button
+                                    onClick={() => removeItem(item.id)}
+                                    style={{
+                                      background: 'none', border: 'none', cursor: 'pointer',
+                                      color: T.muted, transition: 'color 0.2s',
+                                    }}
+                                    onMouseEnter={e => e.currentTarget.style.color = T.red}
+                                    onMouseLeave={e => e.currentTarget.style.color = T.muted}
+                                  >
+                                    <Trash2 size={15} />
+                                  </button>
+                                </td>
+                              )}
+                            </tr>
+
+                            {/* Write-off remark row */}
+                            {item.writeOffRemarks && (modalMode === 'view' || activeTab !== 'open') && (
+                              <tr>
+                                <td colSpan={5} style={{ paddingBottom: 10, paddingLeft: 12 }}>
+                                  <div style={{
+                                    display: 'flex', alignItems: 'center', gap: 6,
+                                    padding: '6px 10px',
+                                    background: 'rgba(217,119,6,0.06)',
+                                    border: `1px solid rgba(217,119,6,0.18)`,
+                                    fontFamily: jost, fontSize: 10, fontWeight: 400,
+                                    color: T.amber,
+                                  }}>
+                                    <AlertTriangle size={11} /> Write-off Reason: {item.writeOffRemarks}
+                                  </div>
+                                </td>
+                              </tr>
+                            )}
+                          </React.Fragment>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {/* Modal footer */}
+            <div style={{
+              display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+              padding: '20px 32px', borderTop: `1px solid ${T.border}`,
+              background: T.offwhite,
+            }}>
+              <div style={{
+                display: 'flex', alignItems: 'center', gap: 6,
+                fontFamily: jost, fontSize: 9, fontWeight: 400,
+                letterSpacing: '0.2em', textTransform: 'uppercase', color: T.muted,
+              }}>
+                <ShieldAlert size={12} style={{ color: T.gold }} /> Digital audit trail active
+              </div>
+              <div style={{ display: 'flex', gap: 14 }}>
+                <button
+                  onClick={() => setShowModal(false)}
+                  style={{
+                    background: 'none', border: 'none', cursor: 'pointer',
+                    fontFamily: jost, fontSize: 10, fontWeight: 400,
+                    letterSpacing: '0.2em', textTransform: 'uppercase',
+                    color: T.muted, padding: '10px 20px', transition: 'color 0.2s',
+                  }}
+                  onMouseEnter={e => e.currentTarget.style.color = T.text}
+                  onMouseLeave={e => e.currentTarget.style.color = T.muted}
+                >
+                  {modalMode === 'view' ? 'Close' : 'Discard'}
+                </button>
+                {modalMode === 'edit' && (
+                  <button
+                    onClick={handleSave}
+                    disabled={loading}
+                    style={{
+                      background: T.gold, color: T.navy,
+                      border: 'none', padding: '12px 36px',
+                      fontFamily: jost, fontSize: 10, fontWeight: 500,
+                      letterSpacing: '0.22em', textTransform: 'uppercase',
+                      cursor: loading ? 'not-allowed' : 'pointer',
+                      opacity: loading ? 0.7 : 1,
+                      transition: 'background 0.25s',
+                    }}
+                    onMouseEnter={e => { if (!loading) e.currentTarget.style.background = T.gold2; }}
+                    onMouseLeave={e => { if (!loading) e.currentTarget.style.background = T.gold; }}
+                  >
+                    {loading ? 'Saving…' : 'Confirm Save'}
+                  </button>
+                )}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── Settle Confirmation Modal ─────────────────────────────────────── */}
+      {showSettleConfirm && (
+        <div style={{
+          position: 'fixed', inset: 0,
+          background: 'rgba(14,21,32,0.75)',
+          backdropFilter: 'blur(4px)',
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          padding: 24, zIndex: 60,
+        }}>
+          <div style={{
+            background: 'white',
+            border: `1px solid ${T.border}`,
+            padding: '36px 36px 28px',
+            width: '100%', maxWidth: 460,
+          }}>
+            <div style={{ textAlign: 'center', marginBottom: 24 }}>
+              <div style={{
+                display: 'inline-flex', padding: 14,
+                background: 'rgba(22,163,74,0.08)',
+                marginBottom: 16,
+              }}>
+                <CheckCircle2 size={28} style={{ color: T.green }} />
+              </div>
+              <h3 style={{
+                fontFamily: serif, fontSize: 26, fontWeight: 300,
+                color: T.navy, margin: '0 0 8px',
+              }}>
+                Settle Manifest
+              </h3>
+              <p style={{ fontFamily: jost, fontSize: 12, fontWeight: 300, color: T.muted, margin: 0 }}>
+                Are you sure you want to finalize this record?
+              </p>
+            </div>
+
+            {challans.find(c => c._id === targetSettleId)?.samples.some(s => s.qtyMissing > 0) && (
+              <div style={{ marginBottom: 20 }}>
+                <label style={{
+                  display: 'block', fontFamily: jost, fontSize: 9, fontWeight: 400,
+                  letterSpacing: '0.25em', textTransform: 'uppercase',
+                  color: T.muted, marginBottom: 8,
+                }}>
+                  Write-off Reason (Pending Items Exist)
+                </label>
+                <textarea
+                  autoFocus
+                  placeholder="Enter reason for missing items…"
+                  value={settleReason}
+                  onChange={e => setSettleReason(e.target.value)}
+                  style={{
+                    width: '100%', padding: '12px 14px',
+                    background: T.offwhite, border: `1px solid ${T.border}`,
+                    borderRadius: 2,
+                    fontFamily: jost, fontSize: 13, fontWeight: 300,
+                    color: T.text, outline: 'none', resize: 'none',
+                    height: 88, boxSizing: 'border-box',
+                  }}
+                />
+              </div>
+            )}
+
+            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 14, borderTop: `1px solid ${T.border}`, paddingTop: 20 }}>
+              <button
+                onClick={() => setShowSettleConfirm(false)}
+                style={{
+                  background: 'none', border: 'none', cursor: 'pointer',
+                  fontFamily: jost, fontSize: 10, fontWeight: 400,
+                  letterSpacing: '0.2em', textTransform: 'uppercase',
+                  color: T.muted, padding: '10px 20px', transition: 'color 0.2s',
+                }}
+                onMouseEnter={e => e.currentTarget.style.color = T.text}
+                onMouseLeave={e => e.currentTarget.style.color = T.muted}
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleSettleConfirm}
+                style={{
+                  background: T.gold, color: T.navy,
+                  border: 'none', padding: '12px 36px',
+                  fontFamily: jost, fontSize: 10, fontWeight: 500,
+                  letterSpacing: '0.22em', textTransform: 'uppercase',
+                  cursor: 'pointer', transition: 'background 0.25s',
+                }}
+                onMouseEnter={e => e.currentTarget.style.background = T.gold2}
+                onMouseLeave={e => e.currentTarget.style.background = T.gold}
+              >
+                Yes, Settle
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

@@ -1,8 +1,8 @@
 {
-  "name": "Application for Marqland Studios Employees",
+  "name": "marqlandstudios-admin",
   "version": "1.0.0",
+  "description": "Application-for-Marqland-Studios-Employees",
   "private": true,
-  "proxy": "http://localhost:5000",
   "dependencies": {
     "@napi-rs/canvas": "^0.1.99",
     "archiver": "^7.0.1",
