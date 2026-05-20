@@ -1,8 +1,7 @@
 import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
+import { API_ROOT } from '../api';
 
 const AuthContext = createContext(null);
-
-const API = process.env.REACT_APP_API_URL || '';
 
 export const AuthProvider = ({ children }) => {
   const [user, setUser] = useState(null);
@@ -21,7 +20,7 @@ export const AuthProvider = ({ children }) => {
     }
 
     // Then fetch fresh data from server to pick up any allowedRoutes changes
-    fetch(`${API}/api/auth/me`, {
+    fetch(`${API_ROOT}/api/auth/me`, {
       headers: { Authorization: `Bearer ${token}` },
     })
       .then(res => res.ok ? res.json() : null)
@@ -40,7 +39,7 @@ export const AuthProvider = ({ children }) => {
     let token = localStorage.getItem('marqland_token');
 
     const makeRequest = async (t) => {
-      return fetch(`${API}${url}`, {
+      return fetch(`${API_ROOT}${url}`, {
         ...options,
         headers: {
           'Content-Type': 'application/json',
@@ -57,7 +56,7 @@ export const AuthProvider = ({ children }) => {
       const refreshToken = localStorage.getItem('marqland_refresh');
       if (refreshToken) {
         try {
-          const refreshRes = await fetch(`${API}/api/auth/refresh`, {
+          const refreshRes = await fetch(`${API_ROOT}/api/auth/refresh`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ refreshToken }),
@@ -84,7 +83,7 @@ export const AuthProvider = ({ children }) => {
 
   // ── Login ─────────────────────────────────────────────────────────────────
   const login = async (email, password) => {
-    const res = await fetch(`${API}/api/auth/login`, {
+    const res = await fetch(`${API_ROOT}/api/auth/login`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ email, password }),
@@ -105,7 +104,7 @@ export const AuthProvider = ({ children }) => {
     try {
       const token = localStorage.getItem('marqland_token');
       if (token) {
-        await fetch(`${API}/api/auth/logout`, {
+        await fetch(`${API_ROOT}/api/auth/logout`, {
           method: 'POST',
           headers: { Authorization: `Bearer ${token}` },
         });
@@ -160,7 +159,7 @@ export const AuthProvider = ({ children }) => {
     const token = localStorage.getItem('marqland_token');
     if (!token) return;
     try {
-      const res = await fetch(`${API}/api/auth/me`, {
+      const res = await fetch(`${API_ROOT}/api/auth/me`, {
         headers: { Authorization: `Bearer ${token}` },
       });
       if (res.ok) {

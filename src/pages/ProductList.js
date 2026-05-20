@@ -21,13 +21,10 @@ import {
 import usePortalItems from '../hooks/usePortalItems';
 import ProductImageGallery from './ProductImageGallery';
 import { usePopup } from '../components/AppPopups';
-import { getBaseUrl } from '../baseurl';
+import { API_ROOT } from '../api';
 
 // ─── Logger ──────────────────────────────────────────────────────────────────
 const log = createLogger('ProductList');
-
-// ─── API root (strip /api suffix so we can reference static assets) ──────────
-const API_ROOT = getBaseUrl().replace('/api', '');
 
 // ─── Design tokens (mirrors ClientList) ──────────────────────────────────────
 const T = {
@@ -453,7 +450,11 @@ const ProductList = () => {
   const { addToPortal, PortalModal } = usePortalItems('product');
 
   //const getAssetUrl = (p) => p;
-  const getAssetUrl = (p) => (p ? `${API_ROOT}${p}` : '');
+  const getAssetUrl = (p) => {
+    if (!p) return '';
+    if (p.startsWith('http')) return p;   // R2 / OneDrive — already absolute
+    return `${API_ROOT}${p}`;             // legacy local /uploads/ path
+  };
 
   // ─── Data fetching ──────────────────────────────────────────────────────────
   const fetchData = useCallback(async () => {

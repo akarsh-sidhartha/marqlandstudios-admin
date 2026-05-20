@@ -189,10 +189,8 @@ const InvitePanel = ({ onClose, onInviteSent }) => {
     try {
       const res = await authFetch('/api/auth/invites');
       const data = await res.json();
-      console.log('✅ Pending invites fetched:', data);
       setPendingInvites(data);
     } catch (e) {
-      console.error('❌ Failed to fetch invites:', e);
     } finally {
       setLoadingInvites(false);
     }
@@ -204,13 +202,11 @@ const InvitePanel = ({ onClose, onInviteSent }) => {
     setSending(true);
     setResult(null);
     try {
-      console.log('🔵 Sending invite to:', inviteEmail.trim());
       const res = await authFetch('/api/auth/invite', {
         method: 'POST',
         body: JSON.stringify({ email: inviteEmail.trim() }),
       });
       const data = await res.json();
-      console.log('✅ Invite sent response:', res.status, data);
       
       if (!res.ok) throw new Error(data.message);
       setResult({ type: 'success', message: data.message });
@@ -218,7 +214,6 @@ const InvitePanel = ({ onClose, onInviteSent }) => {
       await fetchInvites();
       onInviteSent?.();
     } catch (err) {
-      console.error('🔴 Send invite error:', err);
       setResult({ type: 'error', message: err.message });
     } finally {
       setSending(false);
@@ -227,12 +222,9 @@ const InvitePanel = ({ onClose, onInviteSent }) => {
 
   const revokeInvite = async (id) => {
     try {
-      console.log('🔵 Revoking invite:', id);
       await authFetch(`/api/auth/invites/${id}`, { method: 'DELETE' });
-      console.log('✅ Invite revoked');
       await fetchInvites();
     } catch (e) {
-      console.error('❌ Revoke invite error:', e);
     }
   };
 
@@ -419,16 +411,8 @@ const UserManagement = () => {
     try {
       const res = await authFetch('/api/auth/users');
       const data = await res.json();
-      /*
-      console.log('✅ Users fetched successfully:', data);
-      console.log(`   Total users: ${data.length}`);
-      data.forEach(u => {
-        console.log(`   - ${u.name} (${u.email}) - Status: ${u.status}, Role: ${u.role}`);
-      });
-      */
       setUsers(data);
     } catch (e) {
-      console.error('❌ Error fetching users:', e);
       alert('Failed to load users: ' + e.message);
     } finally {
       setLoading(false);
@@ -440,16 +424,13 @@ const UserManagement = () => {
   const doAction = async (userId, path, body = {}) => {
     setActionLoading(userId + path);
     try {
-      console.log(`🔵 Performing action: ${path} on user ${userId}`, body);
       const res = await authFetch(`/api/auth/users/${userId}/${path}`, {
         method: 'PATCH',
         body: JSON.stringify(body),
       });
       const data = await res.json();
-      console.log(`✅ Action ${path} completed:`, data);
       await fetchUsers();
     } catch (e) {
-      console.error(`❌ Action ${path} failed:`, e);
       alert('Action failed: ' + e.message);
     } finally {
       setActionLoading(null);
@@ -460,12 +441,9 @@ const UserManagement = () => {
     if (!window.confirm(`Permanently delete ${name}?`)) return;
     setActionLoading(userId + 'delete');
     try {
-      console.log('🔵 Deleting user:', userId, name);
       const res = await authFetch(`/api/auth/users/${userId}`, { method: 'DELETE' });
-      console.log('✅ User deleted');
       await fetchUsers();
     } catch (e) {
-      console.error('❌ Delete user error:', e);
       alert('Delete failed: ' + e.message);
     } finally {
       setActionLoading(null);
@@ -476,11 +454,10 @@ const UserManagement = () => {
   const sendResetEmail = async (email, name) => {
     if (!window.confirm(`Send a password reset email to ${name} (${email})?`)) return;
     try {
-      const res = await authFetch('/api/auth/forgot-password', {
+      await authFetch('/api/auth/forgot-password', {
         method: 'POST',
         body: JSON.stringify({ email }),
       });
-      const data = await res.json();
       alert(`✅ Reset email sent to ${email}. The link expires in 1 hour.`);
     } catch (e) {
       alert('Failed to send reset email: ' + e.message);

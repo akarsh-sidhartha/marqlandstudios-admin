@@ -1,31 +1,38 @@
 /**
  * src/api.js
  * ─────────────────────────────────────────────────────────────────────────────
- * Authenticated axios instance for the Marqland Studios admin app.
- * Incorporates base-URL resolution (previously baseurl.js) so only this
- * file needs to be imported across the codebase.
+ * Single source of truth for all API communication in the Marqland Studios
+ * admin app. Replaces both the old api.js and baseurl.js — import everything
+ * you need from here.
  *
  * BASE URL priority order:
- *  1. REACT_APP_API_URL env var   (set in .env.production / CI)
- *  2. Same-origin /api             (Cloudflare / nginx reverse-proxy in prod)
- *  3. http://localhost:5000/api    (local dev fallback)
+ *  1. REACT_APP_API_URL env var   (set in .env / .env.production)
+ *     → dev:  REACT_APP_API_URL=http://localhost:5000
+ *     → prod: REACT_APP_API_URL=https://api.marqlandstudios.com
+ *  2. Same-origin /api             (Cloudflare / nginx reverse-proxy fallback)
+ *  3. http://localhost:5000/api    (last-resort local dev fallback)
+ *
+ * Named exports
+ * ─────────────
+ *  BASE_URL   — fully-qualified API base including /api suffix
+ *               e.g. "http://localhost:5000/api"
+ *  API_ROOT   — server root without /api suffix
+ *               e.g. "http://localhost:5000"  — use to build static asset URLs
+ *  getBaseUrl — @deprecated, kept for backward compat
+ *
+ * Default export
+ * ──────────────
+ *  api        — authenticated axios instance; use for all API calls
+ *               api.get('/products')
+ *               api.post('/vendors', payload)
  *
  * Features
  * ─────────
  *  • Structured logging on every request / response / error
- *  • Request timing (ms) logged on response
+ *  • Request timing (ms) logged on each response
  *  • Automatic JWT attach via request interceptor
  *  • Silent token-refresh on 401 with a single-flight queue
  *  • Force-logout when refresh fails or no refresh token exists
- *
- * USAGE in any component:
- *   import api from '../api';
- *   await api.get('/products');
- *   await api.post('/vendors', payload);
- *
- * If you need the raw base URL (e.g. to build a static asset URL):
- *   import { BASE_URL } from '../api';
- *   const API_ROOT = BASE_URL.replace('/api', '');
  * ─────────────────────────────────────────────────────────────────────────────
  */
 
@@ -38,7 +45,7 @@ const log = createLogger('api');
 // Resolved once at module load — stable reference for the lifetime of the page.
 
 const resolveBaseUrl = () => {
-  // 1. Explicit override — highest priority (set in CI or .env.production)
+  // 1. Explicit env override — works for both dev and prod via .env
   if (process.env.REACT_APP_API_URL) {
     const url = `${process.env.REACT_APP_API_URL}/api`;
     log.info('Using env-configured API URL', url);
@@ -57,36 +64,37 @@ const resolveBaseUrl = () => {
     return url;
   }
 
-  // 3. Local development fallback
+  // 3. Last-resort local dev fallback (should rarely be needed given .env)
   const url = 'http://localhost:5000/api';
   log.debug('Using local dev API URL', url);
   return url;
 };
 
-/** Fully-qualified API base URL including /api suffix, e.g. "http://localhost:5000/api" */
+/** Fully-qualified API base URL including /api suffix. */
 export const BASE_URL = resolveBaseUrl();
 
 /**
- * API root without the /api suffix — use this to build static asset URLs.
- * e.g. `${API_ROOT}${product.imageUrl}`
+ * Server root without the /api suffix.
+ * Use this to build static asset URLs, e.g. `${API_ROOT}${product.imageUrl}`
+ * Note: after the R2 migration, imageUrl fields will be full https:// URLs
+ * and won't need this prefix.
  */
 export const API_ROOT = BASE_URL.replace('/api', '');
 
 /** @deprecated Use BASE_URL directly. Kept for backward compatibility. */
 export const getBaseUrl = () => BASE_URL;
 
-// ── Axios instance ────────────────────────────────────────────────────────────
+// ─── Axios instance ───────────────────────────────────────────────────────────
 // NOTE: Do NOT set a global Content-Type header here.
 // When sending FormData (file uploads), axios must auto-detect the content type
 // and set "multipart/form-data; boundary=--XYZ…" automatically.
 // A hardcoded "application/json" here overrides that and breaks all file uploads.
-// For JSON requests, axios sets Content-Type correctly on its own.
 const api = axios.create({
   baseURL: BASE_URL,
   timeout: 30_000,
 });
 
-// ── Token helpers ─────────────────────────────────────────────────────────────
+// ─── Token helpers ────────────────────────────────────────────────────────────
 const TOKEN_KEY   = 'marqland_token';
 const REFRESH_KEY = 'marqland_refresh';
 const USER_KEY    = 'marqland_user';
@@ -102,7 +110,7 @@ const clearAuth       = ()      => {
 
 const bearerHeader = (token) => `Bearer ${token}`;
 
-// ── Request interceptor — attach JWT + stamp request start time ───────────────
+// ─── Request interceptor — attach JWT + stamp request start time ──────────────
 api.interceptors.request.use(
   (config) => {
     config.metadata = { startTime: Date.now() };
@@ -124,9 +132,9 @@ api.interceptors.request.use(
   }
 );
 
-// ── Response interceptor — log timing, handle 401 / refresh ──────────────────
+// ─── Response interceptor — log timing, handle 401 / refresh ─────────────────
 let isRefreshing = false;
-let failedQueue  = [];    // [{ resolve, reject }]
+let failedQueue  = [];   // [{ resolve, reject }]
 
 const flushQueue = (error, token = null) => {
   failedQueue.forEach(({ resolve, reject }) =>
@@ -186,7 +194,7 @@ api.interceptors.response.use(
       log.info('Attempting silent token refresh…');
 
       try {
-        // Use a plain axios call to avoid triggering this interceptor again
+        // Plain axios call to avoid re-triggering this interceptor
         const { data } = await axios.post(`${BASE_URL}/auth/refresh`, {
           refreshToken,
         });

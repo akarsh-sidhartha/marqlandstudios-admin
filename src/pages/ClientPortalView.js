@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { useParams } from 'react-router-dom';
 import { initNotifications, requestNotifPermission, pushNotif, subscribeToPortalPush } from '../utils/portalNotifications';
 import { createLogger } from '../utils/logger';
+import { BASE_URL } from '../api';
 
 // ─── Logger ───────────────────────────────────────────────────────────────────
 const log = createLogger('ClientPortalView');
@@ -591,7 +592,7 @@ const ClientPortalView = () => {
       // Persist to DB so shortlist survives page refresh
       const ids = Array.from(s);
       log.debug('Updating shortlist', { itemId: id, total: ids.length });
-      fetch(`/api/portal/public/${slug}/shortlist`, {
+      fetch(`${BASE_URL}/portal/public/${slug}/shortlist`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ ids }),
@@ -604,7 +605,7 @@ const ClientPortalView = () => {
     initNotifications(); // register SW, no permission prompt yet
     load();
     log.info('Portal view mounted', { slug });
-    fetch(`/api/portal/public/${slug}/view`,{method:'POST'}).catch(err =>
+    fetch(`${BASE_URL}/portal/public/${slug}/view`,{method:'POST'}).catch(err =>
       log.warn('View count increment failed', err.message)
     );
     pollTimer.current = setInterval(()=>load(true), 12000);
@@ -620,7 +621,7 @@ const ClientPortalView = () => {
   useEffect(()=>{
     if(tab!=='shipments'||shipmentsLoaded||!portal?.orderId) return;
     log.info('Fetching shipments', { slug });
-    fetch(`/api/portal/public/${slug}/shipments`)
+    fetch(`${BASE_URL}/portal/public/${slug}/shipments`)
       .then(r=>{ if(!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })
       .then(data=>{ const arr=Array.isArray(data)?data:[]; log.info('Shipments loaded',{count:arr.length}); setShipments(arr); setShipmentsLoaded(true); })
       .catch(err=>{ log.error('Shipments fetch failed', err.message); setShipmentsLoaded(true); });
@@ -629,7 +630,7 @@ const ClientPortalView = () => {
   const load = async (silent=false) => {
     if (!silent) log.debug('Loading portal', { slug });
     try{
-      const res = await fetch(`/api/portal/public/${slug}`);
+      const res = await fetch(`${BASE_URL}/portal/public/${slug}`);
       if(!res.ok) throw new Error((await res.json()).message);
       const data = await res.json();
       if(silent && prevMsgCount.current>0){
@@ -670,7 +671,7 @@ const ClientPortalView = () => {
       const fd=new FormData();
       fd.append('text',msg.trim()); fd.append('senderName',sender);
       files.forEach(f=>fd.append('files',f));
-      const r=await fetch(`/api/portal/public/${slug}/message`,{method:'POST',body:fd});
+      const r=await fetch(`${BASE_URL}/portal/public/${slug}/message`,{method:'POST',body:fd});
       if(!r.ok){ const e=await r.json().catch(()=>({})); throw new Error(e.message||'Send failed'); }
       log.info('Message sent successfully');
       setMsg(''); setFiles([]);

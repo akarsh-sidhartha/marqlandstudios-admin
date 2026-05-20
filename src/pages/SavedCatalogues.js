@@ -8,25 +8,6 @@ const SavedCatalogues = () => {
   const [error, setError] = useState(null);
   const [searchTerm, setSearchTerm] = useState('');
 
-  /*
-  const getBaseUrl = () => {
-    const { hostname } = window.location;
-    // If we are on localhost, use localhost. 
-    // Otherwise, use the IP address currently in the browser's address bar.
-    const host = (hostname === 'localhost' || hostname === '127.0.0.1') 
-      ? 'localhost' 
-      : hostname;
-    return `http://${host}:5000/api`;
-  };
-*/
-
-  /* const getApiUrl = () => {
-    const hostname = window.location.hostname || 'localhost';
-    return `http://${hostname}:5000/api/catalogues`;
-  }; 
-
-  const API_BASE_URL = getApiUrl();
-*/
   const fetchCatalogues = useCallback(async (retries = 3, delay = 1000) => {
     try {
       setLoading(true);

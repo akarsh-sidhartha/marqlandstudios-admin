@@ -5,6 +5,7 @@ import {
   MapPin, Calendar, ExternalLink, Linkedin, Newspaper,
   BrainCircuit, Database, ChevronDown, ChevronUp
 } from 'lucide-react';
+import api from '../api';
 
 // ─── Source badge config ────────────────────────────────────────────────────
 const SOURCE_META = {
@@ -14,24 +15,17 @@ const SOURCE_META = {
 };
 
 // ─── API helpers (call our own backend — keys stay server-side) ────────────
-const api = {
+// Uses the shared authenticated axios instance from api.js so requests
+// carry the JWT and respect the REACT_APP_API_URL env var.
+const scoutApi = {
   claude: (type, query) =>
-    fetch('/api/lead-scout/gemini', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ type, query }),
-    }).then(r => r.json()),
+    api.post('/lead-scout/gemini', { type, query }).then(r => r.data),
 
   yourstory: (query) =>
-    fetch(`/api/lead-scout/yourstory?q=${encodeURIComponent(query)}&limit=8`)
-      .then(r => r.json()),
+    api.get(`/lead-scout/yourstory?q=${encodeURIComponent(query)}&limit=8`).then(r => r.data),
 
   apollo: (type, query, page = 1) =>
-    fetch('/api/lead-scout/apollo', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ type, query, page }),
-    }).then(r => r.json()),
+    api.post('/lead-scout/apollo', { type, query, page }).then(r => r.data),
 };
 
 // ─── Badges ─────────────────────────────────────────────────────────────────
@@ -394,10 +388,10 @@ const LeadScout = () => {
 
     // ── Fire all 3 sources in parallel ──────────────────────────────────────
     const [claudeResult, yourstoryResult, apolloResult] = await Promise.allSettled([
-      api.claude(activeTab, q),
+      scoutApi.claude(activeTab, q),
       // YourStory only makes sense for founders (startup news)
-      activeTab === 'founders' ? api.yourstory(q || 'startup India') : Promise.resolve({ items: [] }),
-      api.apollo(activeTab, q),
+      activeTab === 'founders' ? scoutApi.yourstory(q || 'startup India') : Promise.resolve({ items: [] }),
+      scoutApi.apollo(activeTab, q),
     ]);
 
     // ── Process Claude ───────────────────────────────────────────────────────

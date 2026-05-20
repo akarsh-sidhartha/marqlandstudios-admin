@@ -13,7 +13,7 @@
  */
 
 import React, { useState, useEffect, useCallback } from 'react';
-import api from '../api';
+import api, { API_ROOT } from '../api';
 import {
   X, Search, Download, Trash2, Star, Video, Link2, Loader2,
   CheckSquare, Square, RefreshCw, ExternalLink, Play, Image, ChevronLeft, ChevronRight, Upload, Plus
@@ -75,8 +75,8 @@ const SearchResultCard = ({ img, selected, onToggle }) => (
 );
 
 /** Saved gallery image card */
-const GalleryCard = ({ url, index, isPrimary, onSetPrimary, onDelete, baseUrl }) => {
-  const fullUrl = url.startsWith('http') ? url : `${baseUrl}${url}`;
+const GalleryCard = ({ url, index, isPrimary, onSetPrimary, onDelete }) => {
+  const fullUrl = url.startsWith('http') ? url : `${API_ROOT}${url}`;
   return (
     <div className="relative rounded-xl overflow-hidden border border-gray-100 group" style={{ aspectRatio: '1/1' }}>
       <img src={fullUrl} alt="" className="w-full h-full object-cover" />
@@ -112,9 +112,6 @@ const GalleryCard = ({ url, index, isPrimary, onSetPrimary, onDelete, baseUrl })
 
 // ── Main Component ────────────────────────────────────────────────────────────
 const ProductImageGallery = ({ product, onClose, onSaved }) => {
-  const baseUrl = typeof window !== 'undefined'
-    ? window.location.origin.replace(':3000', ':5000') // dev: adjust for your backend port
-    : '';
 
   // ── Tab state ──
   const [tab, setTab] = useState('gallery'); // 'gallery' | 'search' | 'video'
@@ -350,10 +347,10 @@ const ProductImageGallery = ({ product, onClose, onSaved }) => {
                       <div
                         className="relative rounded-xl overflow-hidden border-2 border-amber-300 cursor-pointer flex-shrink-0"
                         style={{ width: 120, height: 120 }}
-                        onClick={() => setLightbox(primaryUrl.startsWith('http') ? primaryUrl : `${baseUrl}${primaryUrl}`)}
+                        onClick={() => setLightbox(primaryUrl.startsWith('http') ? primaryUrl : `${API_ROOT}${primaryUrl}`)}
                       >
                         <img
-                          src={primaryUrl.startsWith('http') ? primaryUrl : `${baseUrl}${primaryUrl}`}
+                          src={primaryUrl.startsWith('http') ? primaryUrl : `${API_ROOT}${primaryUrl}`}
                           alt="Primary"
                           className="w-full h-full object-cover"
                         />
@@ -423,7 +420,6 @@ const ProductImageGallery = ({ product, onClose, onSaved }) => {
                           url={url}
                           index={idx}
                           isPrimary={false}
-                          baseUrl={baseUrl}
                           onSetPrimary={() => handleSetPrimary(idx)}
                           onDelete={() => handleDeleteGalleryImage(idx)}
                         />

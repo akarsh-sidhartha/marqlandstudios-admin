@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import api from '../api';
 import { FileText, Search, Trash2, Calendar, Loader2, ChevronRight, AlertCircle, RefreshCw } from 'lucide-react';
 
-const App = () => {
+const OffsiteCatalogues = () => {
   const [catalogues, setCatalogues] = useState([]);
   const [loading, setLoading]       = useState(true);
   const [error, setError]           = useState(null);
@@ -177,4 +177,4 @@ const App = () => {
   );
 };
 
-export default App;
+export default OffsiteCatalogues;
