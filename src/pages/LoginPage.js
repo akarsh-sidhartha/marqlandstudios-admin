@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { useAuth } from '../context/AuthContext';
+import { BASE_URL } from '../api';
 
 // ── Reusable input field with optional eye toggle for passwords ───────────────
 const Field = ({ label, type = 'text', value, onChange, placeholder, required, disabled }) => {
@@ -129,7 +130,7 @@ const LoginPage = () => {
     const verify = async () => {
       try {
         console.log('🔵 Verifying invite token:', inviteToken);
-        const res  = await fetch(`/api/auth/invite/verify?token=${inviteToken}`);
+        const res  = await fetch(`${BASE_URL}/auth/invite/verify?token=${inviteToken}`);
         const data = await res.json();
         console.log('✅ Invite verification response:', res.status, data);
         
@@ -164,7 +165,7 @@ const LoginPage = () => {
     if (password.length < 8)  return setError('Password must be at least 8 characters.');
     setLoading(true);
     try {
-      const res  = await fetch('/api/auth/register', {
+      const res  = await fetch(`${BASE_URL}/auth/register`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ name, email, password }),
@@ -187,7 +188,7 @@ const LoginPage = () => {
     setLoading(true);
     try {
       console.log('🔵 Submitting invite registration:', { token: inviteToken, name });
-      const res  = await fetch('/api/auth/invite/register', {
+      const res  = await fetch(`${BASE_URL}/auth/invite/register`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ token: inviteToken, name, password }),
@@ -208,7 +209,7 @@ const LoginPage = () => {
   const handleForgot = async (e) => {
     e.preventDefault(); setError(''); setLoading(true);
     try {
-      const res  = await fetch('/api/auth/forgot-password', {
+      const res  = await fetch(`${BASE_URL}/auth/forgot-password`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ email: forgotEmail }),
@@ -227,7 +228,7 @@ const LoginPage = () => {
     if (resetNewPass !== resetConfirm) return setError('Passwords do not match.');
     setLoading(true);
     try {
-      const res  = await fetch('/api/auth/reset-password', {
+      const res  = await fetch(`${BASE_URL}/auth/reset-password`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ token: resetToken, newPassword: resetNewPass }),
