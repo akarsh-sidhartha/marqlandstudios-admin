@@ -1,7 +1,24 @@
+/**
+ * src/components/OrderTracker.js
+ * ─────────────────────────────────────────────────────────────────────────────
+ * Order Management — full lifecycle tracker.
+ *
+ * Tabs:   Inquiries  →  Ongoing  →  Completed (grouped by FY / Month)
+ * Portals: auto-created on inquiry save; client portal email dispatched
+ *          after client/contact DB lookup (create | add-contact flows).
+ * Notifications: browser push via portalNotifications; unread badge polling
+ *                every 15 s.
+ *
+ * Visual language: mirrors ClientList.js — navy/gold/offwhite palette,
+ *                  Jost + Cormorant Garamond typography, razor-thin borders.
+ * ─────────────────────────────────────────────────────────────────────────────
+ */
+
 import React, { useState, useEffect, useMemo, useRef } from 'react';
 import api from '../api';
 import ClientPortalEditor from './ClientPortalEditor';
 import { initNotifications, requestNotifPermission, pushNotif } from '../utils/portalNotifications';
+import { createLogger } from '../utils/logger';
 import CreatableSelect from 'react-select/creatable';
 import {
   Plus, ArrowRight, CheckCircle, Clock, FileText, Image as ImageIcon,
@@ -11,7 +28,16 @@ import {
 } from 'lucide-react';
 import { usePopup } from '../components/AppPopups';
 
-const CC_EMAIL = 'info@marqland.com';
+// ─────────────────────────────────────────────────────────────────────────────
+// Logger
+// ─────────────────────────────────────────────────────────────────────────────
+const log = createLogger('OrderTracker');
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Constants
+// ─────────────────────────────────────────────────────────────────────────────
+const CC_EMAIL              = 'info@marqland.com';
+const UNREAD_POLL_INTERVAL  = 15_000; // ms
 
 // ── Public client-facing domain ───────────────────────────────────────────────
 // Portal links sent to clients must always point to the public website, not to
@@ -20,200 +46,424 @@ const CC_EMAIL = 'info@marqland.com';
 const CLIENT_BASE_URL = import.meta.env.VITE_CLIENT_URL?.replace(/\/$/, '') || 'https://www.marqlandstudios.com';
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Inline form: CREATE a brand-new client + contact
-// Pre-fills companyName and contactName from the order form so user only needs
-// to add phone + email, then click save.
+// Design tokens — mirrors ClientList.js
+// ─────────────────────────────────────────────────────────────────────────────
+const T = {
+  navy:    '#0e1520',
+  gold:    '#b8975a',
+  gold2:   '#d4b06a',
+  offwhite:'#faf8f5',
+  text:    '#1a1a1a',
+  muted:   '#888',
+  border:  'rgba(0,0,0,0.07)',
+  borderG: 'rgba(184,151,90,0.18)',
+  dimBg:   'rgba(184,151,90,0.04)',
+  danger:  '#dc2626',
+  indigo:  '#4f46e5',
+  emerald: '#059669',
+};
+
+const jost  = '"Jost", sans-serif';
+const serif = '"Cormorant Garamond", Georgia, serif';
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Shipment status colour map
+// ─────────────────────────────────────────────────────────────────────────────
+const SHIPMENT_STATUS_STYLES = {
+  'Pending':          { bg: '#f1f5f9', color: '#64748b' },
+  'Booked':           { bg: '#eff6ff', color: '#2563eb' },
+  'In Transit':       { bg: '#fffbeb', color: '#b45309' },
+  'Out for Delivery': { bg: '#fff7ed', color: '#ea580c' },
+  'Delivered':        { bg: '#ecfdf5', color: '#059669' },
+  'Completed':        { bg: '#ecfdf5', color: '#059669' },
+  'Returned':         { bg: '#fef2f2', color: '#ef4444' },
+  'Exception':        { bg: '#fef2f2', color: '#ef4444' },
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Shared micro-components
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** Hairline gold accent used in section headers (mirrors ClientList) */
+const GoldRule = () => (
+  <div style={{ width: 32, height: 1, background: T.gold, marginBottom: 20 }} />
+);
+
+/** Label above a form field */
+const FieldLabel = ({ children }) => (
+  <p style={{
+    fontFamily: jost, fontSize: 9, fontWeight: 400,
+    letterSpacing: '0.25em', textTransform: 'uppercase',
+    color: T.muted, marginBottom: 6, margin: '0 0 6px',
+  }}>
+    {children}
+  </p>
+);
+
+/** Focused-border input — exactly as in ClientList */
+const FocusInput = ({ value, onChange, placeholder, readOnly = false, style: extra = {} }) => {
+  const [focused, setFocused] = useState(false);
+  return (
+    <input
+      value={value}
+      onChange={onChange}
+      placeholder={placeholder}
+      readOnly={readOnly}
+      onFocus={() => setFocused(true)}
+      onBlur={() => setFocused(false)}
+      style={{
+        width: '100%', padding: '10px 14px',
+        background: readOnly ? T.offwhite : 'white',
+        border: `1px solid ${focused ? T.gold : T.border}`,
+        borderRadius: 3,
+        fontFamily: jost, fontSize: 13, fontWeight: 300,
+        color: T.text, outline: 'none',
+        boxSizing: 'border-box',
+        transition: 'border-color 0.2s',
+        ...extra,
+      }}
+    />
+  );
+};
+
+/** Gold CTA button */
+const GoldBtn = ({ onClick, disabled, children, style: extra = {} }) => (
+  <button
+    onClick={onClick}
+    disabled={disabled}
+    style={{
+      background: disabled ? '#e2e8f0' : T.gold,
+      color: disabled ? '#94a3b8' : T.navy,
+      border: 'none', cursor: disabled ? 'not-allowed' : 'pointer',
+      padding: '12px 32px',
+      fontFamily: jost, fontSize: 10, fontWeight: 500,
+      letterSpacing: '0.22em', textTransform: 'uppercase',
+      transition: 'background 0.25s',
+      ...extra,
+    }}
+    onMouseEnter={e => { if (!disabled) e.currentTarget.style.background = T.gold2; }}
+    onMouseLeave={e => { if (!disabled) e.currentTarget.style.background = T.gold; }}
+  >
+    {children}
+  </button>
+);
+
+/** Ghost / muted text button */
+const GhostBtn = ({ onClick, children, style: extra = {} }) => (
+  <button
+    onClick={onClick}
+    style={{
+      background: 'none', border: 'none', cursor: 'pointer',
+      fontFamily: jost, fontSize: 10, fontWeight: 400,
+      letterSpacing: '0.2em', textTransform: 'uppercase',
+      color: T.muted, transition: 'color 0.2s',
+      padding: '10px 20px',
+      ...extra,
+    }}
+    onMouseEnter={e => e.currentTarget.style.color = T.text}
+    onMouseLeave={e => e.currentTarget.style.color = T.muted}
+  >
+    {children}
+  </button>
+);
+
+/** Inline spinning loader */
+const Spinner = ({ size = 16 }) => (
+  <Loader2 size={size} style={{ animation: 'spin 1s linear infinite' }} />
+);
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ClientCreateInlineForm
+// Pre-fills company + contact from the order so the user only needs
+// phone + email before saving.
 // ─────────────────────────────────────────────────────────────────────────────
 function ClientCreateInlineForm({ clientName, contactName, onCreated, onSkip, showToast }) {
-  const [saving, setSaving] = React.useState(false);
-  const [form, setForm] = React.useState({
+  const [saving, setSaving] = useState(false);
+  const [form, setForm] = useState({
     companyName: clientName || '',
     contacts: [{ name: contactName || '', phone: '', email: '' }],
   });
-  const sc = (i, f, v) => {
-    const c = [...form.contacts]; c[i] = { ...c[i], [f]: v };
-    setForm(p => ({ ...p, contacts: c }));
+
+  const setContact = (field, value) => {
+    setForm(prev => ({
+      ...prev,
+      contacts: [{ ...prev.contacts[0], [field]: value }],
+    }));
   };
-  const doSave = async () => {
+
+  const handleSave = async () => {
     if (!form.companyName.trim()) { showToast('error', 'Company name is required'); return; }
+    log.info('Creating new client inline', { companyName: form.companyName });
     setSaving(true);
     try {
       const res = await api.post('/clients', form);
+      log.info('Client created', { id: res.data._id });
       onCreated(res.data);
-    } catch (e) { showToast('error', 'Failed: ' + (e.response?.data?.message || e.message)); }
-    finally { setSaving(false); }
+    } catch (err) {
+      log.error('Client create failed', err.message);
+      showToast('error', 'Failed: ' + (err.response?.data?.message || err.message));
+    } finally {
+      setSaving(false);
+    }
   };
+
   return (
-    <div className="px-6 py-5 space-y-4">
-      <p className="text-sm text-slate-500">
-        Fill in the contact details so we can send the portal link by email.
+    <div style={{ padding: '28px 32px' }}>
+      <p style={{ fontFamily: jost, fontSize: 12, fontWeight: 300, color: T.muted, marginBottom: 20 }}>
+        Fill in contact details so we can send the portal link by email.
       </p>
-      <div>
-        <label className="text-[10px] font-black text-slate-400 uppercase block mb-1">Company Name</label>
-        <input className="w-full border-2 border-slate-100 rounded-xl p-3 text-sm font-bold focus:border-indigo-400 outline-none"
-          value={form.companyName} onChange={e => setForm(p => ({ ...p, companyName: e.target.value }))} />
+
+      {/* Company name */}
+      <div style={{ marginBottom: 16 }}>
+        <FieldLabel>Company Name</FieldLabel>
+        <FocusInput
+          value={form.companyName}
+          onChange={e => setForm(prev => ({ ...prev, companyName: e.target.value }))}
+          placeholder="Company name"
+        />
       </div>
-      <div>
-        <label className="text-[10px] font-black text-slate-400 uppercase block mb-1">Primary Contact</label>
-        <div className="bg-slate-50 rounded-xl p-3 space-y-2">
-          <input className="w-full border border-slate-200 rounded-lg p-2 text-sm bg-white focus:border-indigo-400 outline-none"
+
+      {/* Primary contact */}
+      <div style={{ marginBottom: 24 }}>
+        <FieldLabel>Primary Contact</FieldLabel>
+        <div style={{
+          background: T.offwhite, border: `1px solid ${T.border}`,
+          padding: '14px 16px', display: 'flex', flexDirection: 'column', gap: 10,
+        }}>
+          <FocusInput
+            value={form.contacts[0].name}
+            onChange={e => setContact('name', e.target.value)}
             placeholder="Contact name"
-            value={form.contacts[0].name} onChange={e => sc(0, 'name', e.target.value)} />
-          <div className="grid grid-cols-2 gap-2">
-            <input className="border border-slate-200 rounded-lg p-2 text-sm bg-white focus:border-indigo-400 outline-none"
+          />
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+            <FocusInput
+              value={form.contacts[0].phone}
+              onChange={e => setContact('phone', e.target.value)}
               placeholder="Phone"
-              value={form.contacts[0].phone} onChange={e => sc(0, 'phone', e.target.value)} />
-            <input className="border border-slate-200 rounded-lg p-2 text-sm bg-white focus:border-indigo-400 outline-none"
+              style={{ fontSize: 12 }}
+            />
+            <FocusInput
+              value={form.contacts[0].email}
+              onChange={e => setContact('email', e.target.value)}
               placeholder="Email (for portal link)"
-              value={form.contacts[0].email} onChange={e => sc(0, 'email', e.target.value)} />
+              style={{ fontSize: 12 }}
+            />
           </div>
         </div>
       </div>
-      <div className="flex justify-between items-center pt-1 border-t border-slate-100">
-        <button onClick={onSkip} className="text-slate-400 font-bold text-sm hover:text-slate-600">
-          Skip — save without email
-        </button>
-        <button onClick={doSave} disabled={saving || !form.companyName.trim()}
-          className="px-6 py-2.5 bg-indigo-600 text-white rounded-xl font-black text-sm hover:bg-indigo-700 disabled:opacity-40 transition flex items-center gap-2">
-          {saving && <span className="w-3 h-3 border-2 border-white border-t-transparent rounded-full animate-spin inline-block" />}
-          Create Client & Send Email
-        </button>
+
+      <div style={{
+        display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+        borderTop: `1px solid ${T.border}`, paddingTop: 20,
+      }}>
+        <GhostBtn onClick={onSkip}>Skip — save without email</GhostBtn>
+        <GoldBtn onClick={handleSave} disabled={saving || !form.companyName.trim()}>
+          {saving ? 'Saving…' : 'Create Client & Send Email'}
+        </GoldBtn>
       </div>
     </div>
   );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Inline form: ADD a contact to an EXISTING client
+// ContactAddInlineForm
+// Adds a new contact to an existing client record.
 // ─────────────────────────────────────────────────────────────────────────────
 function ContactAddInlineForm({ clientId, companyName, contactName, onAdded, onSkip, showToast }) {
-  const [saving, setSaving] = React.useState(false);
-  const [form, setForm] = React.useState({ name: contactName || '', phone: '', email: '' });
+  const [saving, setSaving] = useState(false);
+  const [form, setForm] = useState({ name: contactName || '', phone: '', email: '' });
 
-  const doSave = async () => {
+  const handleSave = async () => {
     if (!form.name.trim()) { showToast('error', 'Contact name is required'); return; }
+    log.info('Adding contact to existing client', { clientId, contactName: form.name });
     setSaving(true);
     try {
       const res = await api.patch(`/clients/${clientId}/add-contact`, form);
+      log.info('Contact added', { clientId });
       onAdded(res.data);
-    } catch (e) { showToast('error', 'Failed: ' + (e.response?.data?.message || e.message)); }
-    finally { setSaving(false); }
+    } catch (err) {
+      log.error('Contact add failed', err.message);
+      showToast('error', 'Failed: ' + (err.response?.data?.message || err.message));
+    } finally {
+      setSaving(false);
+    }
   };
+
   return (
-    <div className="px-6 py-5 space-y-4">
-      <p className="text-sm text-slate-500">
-        <strong>{companyName}</strong> is in the database but <strong>"{contactName}"</strong> isn't
+    <div style={{ padding: '28px 32px' }}>
+      <p style={{ fontFamily: jost, fontSize: 12, fontWeight: 300, color: T.muted, marginBottom: 20 }}>
+        <strong>{companyName}</strong> is in the database but <strong>"{contactName}"</strong> is not
         listed as a contact yet. Add their details to send the portal link.
       </p>
-      <div className="bg-slate-50 rounded-xl p-3 space-y-2">
-        <input className="w-full border border-slate-200 rounded-lg p-2 text-sm bg-white focus:border-indigo-400 outline-none"
+
+      <div style={{
+        background: T.offwhite, border: `1px solid ${T.border}`,
+        padding: '14px 16px', display: 'flex', flexDirection: 'column', gap: 10,
+        marginBottom: 24,
+      }}>
+        <FocusInput
+          value={form.name}
+          onChange={e => setForm(prev => ({ ...prev, name: e.target.value }))}
           placeholder="Contact name"
-          value={form.name} onChange={e => setForm(p => ({ ...p, name: e.target.value }))} />
-        <div className="grid grid-cols-2 gap-2">
-          <input className="border border-slate-200 rounded-lg p-2 text-sm bg-white focus:border-indigo-400 outline-none"
+        />
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+          <FocusInput
+            value={form.phone}
+            onChange={e => setForm(prev => ({ ...prev, phone: e.target.value }))}
             placeholder="Phone"
-            value={form.phone} onChange={e => setForm(p => ({ ...p, phone: e.target.value }))} />
-          <input className="border border-slate-200 rounded-lg p-2 text-sm bg-white focus:border-indigo-400 outline-none"
+            style={{ fontSize: 12 }}
+          />
+          <FocusInput
+            value={form.email}
+            onChange={e => setForm(prev => ({ ...prev, email: e.target.value }))}
             placeholder="Email (for portal link)"
-            value={form.email} onChange={e => setForm(p => ({ ...p, email: e.target.value }))} />
+            style={{ fontSize: 12 }}
+          />
         </div>
       </div>
-      <div className="flex justify-between items-center pt-1 border-t border-slate-100">
-        <button onClick={onSkip} className="text-slate-400 font-bold text-sm hover:text-slate-600">
-          Skip — save without email
-        </button>
-        <button onClick={doSave} disabled={saving || !form.name.trim()}
-          className="px-6 py-2.5 bg-indigo-600 text-white rounded-xl font-black text-sm hover:bg-indigo-700 disabled:opacity-40 transition flex items-center gap-2">
-          {saving && <span className="w-3 h-3 border-2 border-white border-t-transparent rounded-full animate-spin inline-block" />}
-          Add Contact & Send Email
-        </button>
+
+      <div style={{
+        display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+        borderTop: `1px solid ${T.border}`, paddingTop: 20,
+      }}>
+        <GhostBtn onClick={onSkip}>Skip — save without email</GhostBtn>
+        <GoldBtn onClick={handleSave} disabled={saving || !form.name.trim()}>
+          {saving ? 'Saving…' : 'Add Contact & Send Email'}
+        </GoldBtn>
       </div>
     </div>
   );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// LINKED SHIPMENTS PANEL
-// Shown inside the Edit Order modal for product orders only.
-// Fetches all shipments linked to this orderId and renders them as a compact
-// read-only list. No editing here — full management is in Courier Tracking.
+// LinkedShipmentsPanel
+// Read-only shipments list shown inside the Edit Order drawer.
+// Full management lives in Courier Tracking.
 // ─────────────────────────────────────────────────────────────────────────────
-const STATUS_COLORS_OT = {
-  'Pending':           'bg-slate-100 text-slate-500',
-  'Booked':            'bg-blue-50 text-blue-600',
-  'In Transit':        'bg-amber-50 text-amber-700',
-  'Out for Delivery':  'bg-orange-50 text-orange-600',
-  'Delivered':         'bg-emerald-50 text-emerald-700',
-  'Completed':         'bg-emerald-50 text-emerald-700',
-  'Returned':          'bg-red-50 text-red-500',
-  'Exception':         'bg-red-50 text-red-500',
-};
-
 const LinkedShipmentsPanel = ({ orderId }) => {
-  const [shipments, setShipments] = React.useState([]);
-  const [loading, setLoading]     = React.useState(true);
+  const [shipments, setShipments] = useState([]);
+  const [loading, setLoading]     = useState(true);
 
-  React.useEffect(() => {
+  useEffect(() => {
     if (!orderId) return;
+    log.debug('Fetching linked shipments', { orderId });
     api.get(`/shipments?orderId=${orderId}`)
-      .then(res => setShipments(Array.isArray(res.data) ? res.data : []))
-      .catch(() => setShipments([]))
+      .then(res => {
+        const data = Array.isArray(res.data) ? res.data : [];
+        log.info('Shipments loaded', { orderId, count: data.length });
+        setShipments(data);
+      })
+      .catch(err => {
+        log.warn('Failed to load shipments', err.message);
+        setShipments([]);
+      })
       .finally(() => setLoading(false));
   }, [orderId]);
 
+  const thStyle = {
+    padding: '10px 14px', textAlign: 'left',
+    fontFamily: jost, fontSize: 9, fontWeight: 400,
+    letterSpacing: '0.22em', textTransform: 'uppercase', color: T.muted,
+    borderBottom: `1px solid ${T.border}`,
+  };
+
   return (
-    <div className="space-y-2">
-      <div className="flex items-center justify-between px-1">
-        <label className="text-[9px] font-black uppercase text-slate-400">
-          Shipments
-        </label>
+    <div style={{ marginTop: 8 }}>
+      {/* Sub-section header */}
+      <div style={{
+        display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+        marginBottom: 10,
+      }}>
+        <p style={{
+          fontFamily: jost, fontSize: 9, fontWeight: 400,
+          letterSpacing: '0.28em', textTransform: 'uppercase',
+          color: 'rgba(184,151,90,0.65)', margin: 0,
+        }}>
+          Linked Shipments
+        </p>
         {shipments.length > 0 && (
-          <span className="text-[9px] font-black uppercase text-slate-400">
+          <span style={{
+            fontFamily: jost, fontSize: 9, fontWeight: 400,
+            letterSpacing: '0.15em', textTransform: 'uppercase', color: T.muted,
+          }}>
             {shipments.length} shipment{shipments.length !== 1 ? 's' : ''}
           </span>
         )}
       </div>
 
       {loading ? (
-        <div className="flex items-center gap-2 px-4 py-3 bg-slate-50 rounded-xl text-xs text-slate-400 font-bold">
-          <Loader2 size={12} className="animate-spin" /> Loading shipments...
+        <div style={{
+          display: 'flex', alignItems: 'center', gap: 10,
+          padding: '14px 16px', background: T.offwhite, border: `1px solid ${T.border}`,
+          fontFamily: jost, fontSize: 12, fontWeight: 300, color: T.muted,
+        }}>
+          <Spinner size={13} /> Loading shipments…
         </div>
       ) : shipments.length === 0 ? (
-        <div className="px-4 py-3 bg-slate-50 rounded-xl text-xs text-slate-400 font-bold">
+        <div style={{
+          padding: '14px 16px', background: T.offwhite, border: `1px solid ${T.border}`,
+          fontFamily: jost, fontSize: 12, fontWeight: 300, color: T.muted,
+        }}>
           No shipments linked to this order yet.
         </div>
       ) : (
-        <div className="rounded-xl border border-slate-100 overflow-hidden">
-          <table className="w-full">
+        <div style={{ border: `1px solid ${T.border}`, overflow: 'hidden' }}>
+          <table style={{ width: '100%', borderCollapse: 'collapse' }}>
             <thead>
-              <tr className="bg-slate-50 border-b border-slate-100">
+              <tr style={{ background: T.offwhite }}>
                 {['Recipient', 'City', 'Tracking ID', 'Partner', 'Status'].map(h => (
-                  <th key={h} className="px-3 py-2 text-[9px] font-black text-slate-400 uppercase text-left">{h}</th>
+                  <th key={h} style={thStyle}>{h}</th>
                 ))}
               </tr>
             </thead>
             <tbody>
-              {shipments.map((s, i) => (
-                <tr key={s._id} className="border-b border-slate-50 last:border-0 hover:bg-slate-50/60 transition-colors">
-                  <td className="px-3 py-2">
-                    <div className="text-xs font-bold text-slate-700 leading-tight">{s.recipientName}</div>
-                    {s.phone && <div className="text-[10px] text-slate-400">{s.phone}</div>}
-                  </td>
-                  <td className="px-3 py-2 text-xs text-slate-500">{s.city || '—'}</td>
-                  <td className="px-3 py-2">
-                    {s.trackingId
-                      ? <span className="font-mono text-xs font-bold text-indigo-600 bg-indigo-50 px-2 py-0.5 rounded">{s.trackingId}</span>
-                      : <span className="text-slate-300 text-xs">—</span>
-                    }
-                  </td>
-                  <td className="px-3 py-2 text-xs text-slate-500">{s.shippingPartner || '—'}</td>
-                  <td className="px-3 py-2">
-                    <span className={`text-[9px] font-black uppercase px-2 py-1 rounded-full ${STATUS_COLORS_OT[s.status] || 'bg-slate-100 text-slate-500'}`}>
-                      {s.status}
-                    </span>
-                  </td>
-                </tr>
-              ))}
+              {shipments.map((s) => {
+                const statusStyle = SHIPMENT_STATUS_STYLES[s.status] || { bg: '#f1f5f9', color: '#64748b' };
+                return (
+                  <tr key={s._id} style={{ borderBottom: `1px solid ${T.border}` }}>
+                    <td style={{ padding: '12px 14px' }}>
+                      <p style={{ fontFamily: jost, fontSize: 12, fontWeight: 500, color: T.text, margin: '0 0 2px' }}>
+                        {s.recipientName}
+                      </p>
+                      {s.phone && (
+                        <p style={{ fontFamily: jost, fontSize: 11, fontWeight: 300, color: T.muted, margin: 0 }}>
+                          {s.phone}
+                        </p>
+                      )}
+                    </td>
+                    <td style={{ padding: '12px 14px', fontFamily: jost, fontSize: 12, fontWeight: 300, color: T.muted }}>
+                      {s.city || '—'}
+                    </td>
+                    <td style={{ padding: '12px 14px' }}>
+                      {s.trackingId ? (
+                        <span style={{
+                          fontFamily: 'monospace', fontSize: 11, fontWeight: 700,
+                          color: T.indigo, background: 'rgba(79,70,229,0.06)',
+                          padding: '3px 8px', letterSpacing: '0.05em',
+                        }}>
+                          {s.trackingId}
+                        </span>
+                      ) : (
+                        <span style={{ color: T.muted, fontFamily: jost, fontSize: 12 }}>—</span>
+                      )}
+                    </td>
+                    <td style={{ padding: '12px 14px', fontFamily: jost, fontSize: 12, fontWeight: 300, color: T.muted }}>
+                      {s.shippingPartner || '—'}
+                    </td>
+                    <td style={{ padding: '12px 14px' }}>
+                      <span style={{
+                        fontFamily: jost, fontSize: 9, fontWeight: 500,
+                        letterSpacing: '0.18em', textTransform: 'uppercase',
+                        padding: '4px 10px',
+                        background: statusStyle.bg,
+                        color: statusStyle.color,
+                      }}>
+                        {s.status}
+                      </span>
+                    </td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
         </div>
@@ -223,61 +473,421 @@ const LinkedShipmentsPanel = ({ orderId }) => {
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
-// MAIN COMPONENT
+// Helpers
 // ─────────────────────────────────────────────────────────────────────────────
-export default function App() {
-  const [orders, setOrders] = useState([]);
-  const [activeTab, setActiveTab] = useState('inquiry');
-  const [isModalOpen, setIsModalOpen] = useState(false);
-  const [editOrder, setEditOrder] = useState(null);
-  const [loading, setLoading] = useState(false);
-  const [fetchLoading, setFetchLoading] = useState(true);
-  const [expandedFolders, setExpandedFolders] = useState({});
-  const [quotePrompt, setQuotePrompt] = useState(null);
+
+/** Returns the Indian FY string, e.g. "24-25" */
+const getFinancialYear = (dateStr) => {
+  const date   = new Date(dateStr);
+  const year   = date.getFullYear();
+  const month  = date.getMonth(); // 0-indexed; April = 3
+  const fyStart = month >= 3 ? year : year - 1;
+  return `${String(fyStart).slice(-2)}-${String(fyStart + 1).slice(-2)}`;
+};
+
+const getMonthName = (dateStr) =>
+  new Date(dateStr).toLocaleString('default', { month: 'long' });
+
+/** localStorage helpers for unread-message tracking */
+const getSeenCount = (orderId) =>
+  parseInt(localStorage.getItem(`seen_${orderId}`) || '0', 10);
+const setSeenCount = (orderId, n) =>
+  localStorage.setItem(`seen_${orderId}`, String(n));
+
+const getFileIcon = (type) => {
+  if (type?.includes('image'))                          return <FileSpreadsheet size={13} style={{ color: T.gold }} />;
+  if (type?.includes('sheet') || type?.includes('excel')) return <FileSpreadsheet size={13} style={{ color: T.emerald }} />;
+  return <FileText size={13} style={{ color: T.muted }} />;
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// OrderRow
+// ─────────────────────────────────────────────────────────────────────────────
+const OrderRow = ({
+  order, loading, unreadCounts, sentLinks, copiedId,
+  onRowClick, onStartProject, onMarkComplete,
+  onOpenPortalChat, onCopyLink, onDelete,
+}) => {
+  const isCompleted = order.status === 'completed';
+
+  const ordData   = unreadCounts[order._id];
+  const unread    = ordData?.unread || 0;
+  const hasUnread = unread > 0;
+
+  const slug      = order.refNumber?.toLowerCase().replace(/[^a-z0-9]+/g, '-');
+  const portalUrl = `${CLIENT_BASE_URL}/p/${slug}`;
+  const alreadySent = sentLinks[order._id];
+  const justCopied  = copiedId === order._id;
+
+  const rowHoverStyle = { transition: 'background 0.2s', cursor: 'pointer' };
+
+  return (
+    <tr
+      onClick={() => onRowClick(order)}
+      style={rowHoverStyle}
+      onMouseEnter={e => e.currentTarget.style.background = 'rgba(0,0,0,0.015)'}
+      onMouseLeave={e => e.currentTarget.style.background = 'transparent'}
+    >
+      {/* ── Identifiers ── */}
+      <td style={{ padding: '16px 20px', borderBottom: `1px solid ${T.border}` }}>
+        {isCompleted ? (
+          order.invoiceNumber && (
+            <span style={{
+              fontFamily: jost, fontSize: 9, fontWeight: 500,
+              letterSpacing: '0.2em', textTransform: 'uppercase',
+              background: T.emerald, color: 'white',
+              padding: '4px 10px', display: 'inline-flex', alignItems: 'center', gap: 5,
+            }}>
+              <Receipt size={10} /> {order.invoiceNumber}
+            </span>
+          )
+        ) : (
+          order.refNumber ? (
+            <span style={{
+              fontFamily: jost, fontSize: 9, fontWeight: 500,
+              letterSpacing: '0.2em', textTransform: 'uppercase',
+              background: T.gold, color: 'white',
+              padding: '4px 10px',
+            }}>
+              {order.refNumber}
+            </span>
+          ) : (
+            <span style={{
+              fontFamily: jost, fontSize: 9, fontWeight: 400,
+              letterSpacing: '0.15em', color: T.muted,
+              background: T.offwhite, border: `1px solid ${T.border}`,
+              padding: '4px 10px',
+            }}>
+              #{order._id.slice(-6)}
+            </span>
+          )
+        )}
+      </td>
+
+      {/* ── Project ── */}
+      <td style={{ padding: '16px 20px', borderBottom: `1px solid ${T.border}` }}>
+        <div style={{ display: 'flex', alignItems: 'flex-start', gap: 10 }}>
+          <div style={{
+            marginTop: 2, padding: 6,
+            background: order.orderType === 'offsite' ? 'rgba(249,115,22,0.08)' : 'rgba(79,70,229,0.08)',
+            color: order.orderType === 'offsite' ? '#f97316' : T.indigo,
+            flexShrink: 0,
+          }}>
+            {order.orderType === 'offsite' ? <MapPin size={12} /> : <Package size={12} />}
+          </div>
+          <div>
+            <p style={{ fontFamily: jost, fontSize: 13, fontWeight: 500, color: T.text, margin: '0 0 3px' }}>
+              {order.title}
+            </p>
+            <p style={{ fontFamily: jost, fontSize: 13, fontWeight: 400, color: T.muted, margin: '0 0 1px' }}>
+              {order.clientName}
+            </p>
+            <p style={{ fontFamily: jost, fontSize: 13, fontWeight: 300, color: T.muted, margin: 0 }}>
+              Attn: {order.orderPlacedBy || 'N/A'}
+            </p>
+          </div>
+        </div>
+      </td>
+
+      {/* ── Description ── */}
+      <td style={{ padding: '16px 20px', maxWidth: 260, borderBottom: `1px solid ${T.border}` }}>
+        <div
+          style={{
+            fontFamily: jost, fontSize: 15, fontWeight: 300, color: T.muted,
+            overflow: 'hidden', display: '-webkit-box', WebkitLineClamp: 2,
+            WebkitBoxOrient: 'vertical', fontStyle: 'italic',
+            pointerEvents: 'none',
+          }}
+          dangerouslySetInnerHTML={{
+            __html: order.description?.replace(/<img[^>]*>/g, '[Image]') || '—',
+          }}
+        />
+      </td>
+
+      {/* ── Files ── */}
+      <td style={{ padding: '16px 20px', borderBottom: `1px solid ${T.border}` }}>
+        {order.attachments?.length > 0 && (
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+            {order.attachments.map((file, idx) => (
+              <a
+                key={idx}
+                href={file.webUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                onClick={e => e.stopPropagation()}
+                style={{
+                  display: 'inline-flex', alignItems: 'center', gap: 6,
+                  padding: '4px 10px',
+                  background: 'rgba(79,70,229,0.05)',
+                  border: `1px solid rgba(79,70,229,0.12)`,
+                  color: T.indigo,
+                  fontFamily: jost, fontSize: 10, fontWeight: 400,
+                  letterSpacing: '0.08em', textDecoration: 'none',
+                  maxWidth: 140, overflow: 'hidden',
+                }}
+              >
+                <FileText size={11} />
+                <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                  {file.name}
+                </span>
+                <Download
+                  size={12}
+                  style={{ flexShrink: 0, cursor: 'pointer' }}
+                  onClick={e => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    const url = file.downloadUrl || file['@microsoft.graph.downloadUrl'] || file.webUrl;
+                    const link = document.createElement('a');
+                    link.href = url;
+                    link.setAttribute('download', file.name);
+                    document.body.appendChild(link);
+                    link.click();
+                    document.body.removeChild(link);
+                  }}
+                />
+              </a>
+            ))}
+          </div>
+        )}
+      </td>
+
+      {/* ── Actions ── */}
+      <td style={{ padding: '16px 20px', textAlign: 'right', borderBottom: `1px solid ${T.border}` }}>
+        <div style={{ display: 'flex', justifyContent: 'flex-end', alignItems: 'center', gap: 4 }}>
+
+          {/* Start Project */}
+          {order.status === 'inquiry' && (
+            <button
+              disabled={loading}
+              onClick={e => { e.stopPropagation(); onStartProject(order); }}
+              style={{
+                fontFamily: jost, fontSize: 9, fontWeight: 500,
+                letterSpacing: '0.18em', textTransform: 'uppercase',
+                padding: '6px 14px',
+                background: loading ? T.offwhite : 'rgba(184,151,90,0.1)',
+                border: `1px solid ${loading ? T.border : T.borderG}`,
+                color: loading ? T.muted : T.gold,
+                cursor: loading ? 'not-allowed' : 'pointer',
+                transition: 'all 0.2s',
+              }}
+            >
+              {loading ? '…' : 'Start Project'}
+            </button>
+          )}
+
+          {/* Mark Complete */}
+          {order.status === 'ongoing' && (
+            <button
+              disabled={loading}
+              onClick={e => { e.stopPropagation(); onMarkComplete(order); }}
+              title="Mark complete"
+              style={{
+                background: 'none', border: 'none', cursor: loading ? 'not-allowed' : 'pointer',
+                color: loading ? '#d1d5db' : T.emerald, padding: 6, display: 'flex',
+              }}
+            >
+              <CheckCircle size={17} />
+            </button>
+          )}
+
+          {/* Portal chat */}
+          {!isCompleted && (
+            <button
+              onClick={e => { e.stopPropagation(); onOpenPortalChat(order, ordData); }}
+              title={hasUnread ? `${unread} new client message${unread !== 1 ? 's' : ''}` : 'Open portal chat'}
+              style={{
+                position: 'relative', background: 'none', border: 'none',
+                cursor: 'pointer', padding: 6, display: 'flex',
+                color: hasUnread ? '#7c3aed' : T.muted,
+                transition: 'color 0.2s',
+              }}
+            >
+              <Link2 size={15} />
+              {hasUnread && (
+                <span style={{
+                  position: 'absolute', top: -2, right: -2,
+                  minWidth: 15, height: 15,
+                  background: '#ef4444', color: 'white',
+                  fontSize: 8, fontFamily: jost, fontWeight: 700,
+                  borderRadius: '50%', display: 'flex', alignItems: 'center',
+                  justifyContent: 'center', padding: '0 3px',
+                }}>
+                  {unread > 9 ? '9+' : unread}
+                </span>
+              )}
+            </button>
+          )}
+
+          {/* Copy/Send portal link */}
+          {!isCompleted && (
+            alreadySent ? (
+              <div style={{ position: 'relative' }} className="group">
+                <button
+                  disabled
+                  style={{
+                    background: 'none', border: 'none', padding: 6,
+                    color: '#d1d5db', cursor: 'not-allowed', display: 'flex',
+                  }}
+                  title="Link already sent"
+                >
+                  <Send size={15} />
+                </button>
+                {/* Hover tooltip */}
+                <div style={{
+                  position: 'absolute', right: 0, top: 32,
+                  background: T.navy, color: 'white',
+                  padding: '10px 14px', zIndex: 50,
+                  minWidth: 160, display: 'none',
+                }}
+                  className="group-hover:!block"
+                >
+                  <p style={{ fontFamily: jost, fontSize: 9, letterSpacing: '0.2em', color: '#94a3b8', margin: '0 0 8px', textTransform: 'uppercase' }}>
+                    Link sent
+                  </p>
+                  <button
+                    onClick={e => { e.stopPropagation(); onCopyLink(order, portalUrl); }}
+                    style={{
+                      background: 'none', border: 'none', cursor: 'pointer',
+                      fontFamily: jost, fontSize: 10, color: '#a5b4fc',
+                      display: 'flex', alignItems: 'center', gap: 6,
+                    }}
+                  >
+                    {justCopied ? <CheckCircle size={11} /> : <Copy size={11} />}
+                    {justCopied ? 'Copied!' : 'Copy link again'}
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <button
+                onClick={e => { e.stopPropagation(); onCopyLink(order, portalUrl); }}
+                title="Copy & send client link"
+                style={{
+                  background: 'none', border: 'none', cursor: 'pointer',
+                  padding: 6, display: 'flex', color: justCopied ? T.emerald : T.muted,
+                  transition: 'color 0.2s',
+                }}
+              >
+                {justCopied ? <CheckCircle size={15} /> : <Send size={15} />}
+              </button>
+            )
+          )}
+
+          {/* Delete */}
+          {!isCompleted && (
+            <button
+              disabled={loading}
+              onClick={e => { e.stopPropagation(); onDelete(order); }}
+              style={{
+                background: 'none', border: 'none', padding: 6, display: 'flex',
+                cursor: loading ? 'not-allowed' : 'pointer',
+                color: loading ? '#e2e8f0' : 'rgba(220,38,38,0.5)',
+                transition: 'color 0.2s',
+              }}
+              onMouseEnter={e => { if (!loading) e.currentTarget.style.color = '#dc2626'; }}
+              onMouseLeave={e => { if (!loading) e.currentTarget.style.color = 'rgba(220,38,38,0.5)'; }}
+            >
+              <Trash2 size={17} />
+            </button>
+          )}
+        </div>
+      </td>
+    </tr>
+  );
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MAIN COMPONENT — OrderTracker
+// ─────────────────────────────────────────────────────────────────────────────
+export default function OrderTracker() {
+
+  // ── State ─────────────────────────────────────────────────────────────────
+  const [orders,           setOrders]           = useState([]);
+  const [activeTab,        setActiveTab]        = useState('inquiry');
+  const [isModalOpen,      setIsModalOpen]      = useState(false);
+  const [editOrder,        setEditOrder]        = useState(null);
+  const [loading,          setLoading]          = useState(false);
+  const [fetchLoading,     setFetchLoading]     = useState(true);
+  const [expandedFolders,  setExpandedFolders]  = useState({});
+  const [quotePrompt,      setQuotePrompt]      = useState(null);
   const [completionPrompt, setCompletionPrompt] = useState(null);
-  const [searchTerm, setSearchTerm] = useState('');
-  const [selectedClient, setSelectedClient] = useState('');
-  const [selectedContact, setSelectedContact] = useState('');
+  const [searchTerm,       setSearchTerm]       = useState('');
+  const [selectedClient,   setSelectedClient]   = useState('');
+  const [selectedContact,  setSelectedContact]  = useState('');
+  const [searchFocused,    setSearchFocused]    = useState(false);
+  const [sentLinks,        setSentLinks]        = useState({});
+  const [copiedId,         setCopiedId]         = useState(null);
+  const [chatOrder,        setChatOrder]        = useState(null);
+  const [clientCheckModal, setClientCheckModal] = useState(null);
+  const [unreadCounts,     setUnreadCounts]     = useState({});
 
-  const { showToast, confirm, Toast, ConfirmDialog } = usePopup();
-
-  // meta is now populated from the /clients API, not just from past orders
+  // meta: populated from /clients, not from orders
   const [meta, setMeta] = useState({ clients: [], clientContacts: {}, clientMap: {} });
-  // clientMap: { companyName → { _id, contacts: [{name,phone,email}] } }
-
-  const createEditorRef = useRef(null);
-  const editEditorRef = useRef(null);
 
   const [formData, setFormData] = useState({
     title: '', clientName: '', orderPlacedBy: '',
     description: '', attachments: [], orderType: 'product',
   });
-  const [sentLinks, setSentLinks] = useState({});
-  const [copiedId, setCopiedId] = useState(null);
-  const [chatOrder, setChatOrder] = useState(null);
 
-  // clientCheckModal has two modes:
-  //   mode: 'create' — client not in DB at all
-  //   mode: 'add-contact' — client exists but contact is new
-  const [clientCheckModal, setClientCheckModal] = useState(null);
-
-  // ── Unread client message counts per orderId ─────────────────────────────
-  // { [orderId]: number }  — shown as badge on the portal chat button
-  const [unreadCounts, setUnreadCounts] = useState({});
-  const unreadPollTimer = useRef(null);
-  // Track last-seen client message counts so we can detect new ones for notifs
+  const createEditorRef  = useRef(null);
+  const editEditorRef    = useRef(null);
+  const unreadPollTimer  = useRef(null);
   const prevClientCounts = useRef({});
 
-  // ── Poll portals for unread client messages ─────────────────────────────
-  // "Unread" = client messages received AFTER the team last opened that chat.
-  // We persist the "seen count" per orderId in localStorage so it survives refresh.
-  const getSeenCount = (orderId) => parseInt(localStorage.getItem(`seen_${orderId}`) || '0', 10);
-  const setSeenCount = (orderId, n) => localStorage.setItem(`seen_${orderId}`, String(n));
+  const { showToast, confirm, Toast, ConfirmDialog } = usePopup();
+
+  // ── Data fetching ──────────────────────────────────────────────────────────
+  const fetchOrders = async () => {
+    log.debug('Fetching orders…');
+    setFetchLoading(true);
+    try {
+      const res = await api.get('/orders');
+      if (!Array.isArray(res.data)) throw new Error('Non-array response');
+      log.info('Orders loaded', { count: res.data.length });
+      setOrders(res.data);
+    } catch (err) {
+      log.error('Failed to fetch orders', err.message);
+      setOrders([]);
+    } finally {
+      setFetchLoading(false);
+    }
+  };
+
+  const fetchClients = async () => {
+    log.debug('Fetching client list for dropdowns…');
+    try {
+      const res  = await api.get('/clients');
+      const data = Array.isArray(res.data) ? res.data : [];
+
+      const clientMap = {};
+      data.forEach(c => {
+        clientMap[c.companyName] = { _id: c._id, contacts: c.contacts || [] };
+      });
+
+      const clients = data.map(c => c.companyName).sort();
+      const clientContacts = {};
+      data.forEach(c => {
+        clientContacts[c.companyName] = (c.contacts || [])
+          .map(ct => ct.name)
+          .filter(Boolean)
+          .sort();
+      });
+
+      log.info('Clients loaded for dropdowns', { count: clients.length });
+      setMeta({ clients, clientContacts, clientMap });
+    } catch (err) {
+      log.warn('Could not load clients from API', err.message);
+    }
+  };
+
+  // ── Unread polling ─────────────────────────────────────────────────────────
+  // Keep a ref to orders so the poller always reads the latest list
+  // without needing orders in its dependency array.
+  const ordersRef = useRef(orders);
+  useEffect(() => { ordersRef.current = orders; }, [orders]);
 
   const pollUnreadMessages = async () => {
     try {
-      const countRes = await api.get('/portal/unread-counts').catch(() => ({ data: {} }));
-      const counts = countRes.data || {};
+      const { data: counts = {} } = await api.get('/portal/unread-counts').catch(() => ({ data: {} }));
 
       const badges = {};
       Object.entries(counts).forEach(([orderId, data]) => {
@@ -286,11 +896,10 @@ export default function App() {
         const unread = Math.max(0, total - seen);
         badges[orderId] = { ...data, unread };
 
-        // Fire push notif if new messages arrived since last poll
         const prev = prevClientCounts.current[orderId] || 0;
         if (total > prev && prev > 0) {
-          const order = orders.find(o => o._id === orderId);
-          const label = order ? `${order.clientName}` : 'A client';
+          const order = ordersRef.current.find(o => o._id === orderId);
+          const label = order?.clientName || 'A client';
           pushNotif(
             `${label} sent a message`,
             data.lastClientMessage || 'New message in portal',
@@ -302,191 +911,90 @@ export default function App() {
       });
 
       setUnreadCounts(badges);
-    } catch {}
+    } catch (err) {
+      log.warn('Unread poll failed', err.message);
+    }
   };
 
+  // ── Bootstrap — runs once on mount ────────────────────────────────────────
+  // All three functions are plain declarations above this effect,
+  // so there is no TDZ issue. The empty dep array is intentional:
+  // we want mount-only behaviour; the functions are stable references
+  // within this render scope.
   useEffect(() => {
     initNotifications();
     fetchOrders();
     fetchClients();
-    // Start polling for unread messages every 15 seconds
-    unreadPollTimer.current = setInterval(pollUnreadMessages, 15000);
-    pollUnreadMessages(); // run immediately
+    pollUnreadMessages();
+    unreadPollTimer.current = setInterval(pollUnreadMessages, UNREAD_POLL_INTERVAL);
     return () => clearInterval(unreadPollTimer.current);
   }, []);
 
-  // ── Load clients from the /clients API ──────────────────────────────────────
-  // This is the source of truth for the dropdowns, not the orders array.
-  const fetchClients = async () => {
-    try {
-      const res = await api.get('/clients');
-      const data = Array.isArray(res.data) ? res.data : [];
-
-      const clientMap = {};
-      data.forEach(c => {
-        clientMap[c.companyName] = { _id: c._id, contacts: c.contacts || [] };
-      });
-
-      const clients = data.map(c => c.companyName).sort();
-      const clientContacts = {};
-      data.forEach(c => {
-        clientContacts[c.companyName] = (c.contacts || []).map(ct => ct.name).filter(Boolean).sort();
-      });
-
-      setMeta({ clients, clientContacts, clientMap });
-    } catch (err) {
-      console.warn('Could not load clients from API:', err.message);
-    }
-  };
-
+  // ── Derived data ───────────────────────────────────────────────────────────
   const filteredOrders = useMemo(() => {
+    const term = searchTerm.toLowerCase();
     return (orders || []).filter(order => {
-      const matchesTab = order.status === activeTab;
-      const matchesClient = !selectedClient || order.clientName === selectedClient;
-      const matchesContact = !selectedContact || order.orderPlacedBy === selectedContact;
-      const term = searchTerm.toLowerCase();
-      const searchFields = [
+      if (order.status !== activeTab) return false;
+      if (selectedClient  && order.clientName    !== selectedClient)  return false;
+      if (selectedContact && order.orderPlacedBy !== selectedContact) return false;
+      if (!searchTerm) return true;
+      const haystack = [
         order.clientName, order.title, order.refNumber, order._id,
         order.orderPlacedBy, order.invoiceNumber, order.description,
       ].join(' ').toLowerCase();
-      const matchesSearch = !searchTerm || searchFields.includes(term);
-      return matchesTab && matchesClient && matchesContact && matchesSearch;
+      return haystack.includes(term);
     });
   }, [orders, activeTab, searchTerm, selectedClient, selectedContact]);
 
-  const deleteMetaItem = (type, value, parentClient = null) => {
-    setMeta(prev => {
-      if (type === 'clients') {
-        const newContacts = { ...prev.clientContacts };
-        const newMap = { ...prev.clientMap };
-        delete newContacts[value];
-        delete newMap[value];
-        return { ...prev, clients: prev.clients.filter(item => item !== value), clientContacts: newContacts, clientMap: newMap };
-      } else {
-        return {
-          ...prev,
-          clientContacts: {
-            ...prev.clientContacts,
-            [parentClient]: prev.clientContacts[parentClient].filter(item => item !== value),
-          },
-        };
-      }
-    });
-  };
-
-  const fetchOrders = async () => {
-    setFetchLoading(true);
-    try {
-      const res = await api.get('/orders');
-      const data = res.data;
-      if (Array.isArray(data)) {
-        setOrders(data);
-      } else {
-        console.error('Received non-array data:', data);
-        setOrders([]);
-      }
-    } catch (err) {
-      console.error('Fetch error:', err);
-      setOrders([]);
-    } finally {
-      setFetchLoading(false);
-    }
-  };
-
-  const handlePaste = (e) => {
-    const items = (e.clipboardData || e.originalEvent.clipboardData).items;
-    for (let index in items) {
-      const item = items[index];
-      if (item.kind === 'file' && item.type.indexOf('image/') !== -1) {
-        e.preventDefault();
-        const blob = item.getAsFile();
-        const reader = new FileReader();
-        reader.onload = (event) => {
-          const img = `<img src="${event.target.result}" style="max-width: 100%; border-radius: 8px; margin: 10px 0;" />`;
-          document.execCommand('insertHTML', false, img);
-        };
-        reader.readAsDataURL(blob);
-      }
-    }
-  };
-
-  const getFinancialYear = (dateStr) => {
-    const date = new Date(dateStr);
-    const year = date.getFullYear();
-    const month = date.getMonth();
-    const fyStart = month >= 3 ? year : year - 1;
-    return `${(fyStart).toString().slice(-2)}-${(fyStart + 1).toString().slice(-2)}`;
-  };
-
-  const getMonthName = (dateStr) => new Date(dateStr).toLocaleString('default', { month: 'long' });
-
   const groupedCompleted = useMemo(() => {
+    const term = searchTerm.toLowerCase();
     const completed = orders.filter(o => {
-      const isCompleted = o.status === 'completed';
-      const term = searchTerm.toLowerCase();
-      const matchesSearch = !searchTerm ||
+      if (o.status !== 'completed') return false;
+      if (!searchTerm) return true;
+      return (
         o.clientName?.toLowerCase().includes(term) ||
         o.title?.toLowerCase().includes(term) ||
-        o.invoiceNumber?.toLowerCase().includes(term);
-      return isCompleted && matchesSearch;
+        o.invoiceNumber?.toLowerCase().includes(term)
+      );
     });
     const hierarchy = {};
     completed.forEach(order => {
-      const date = order.completedAt || order.updatedAt || new Date().toISOString();
-      const fy = getFinancialYear(date);
+      const date  = order.completedAt || order.updatedAt || new Date().toISOString();
+      const fy    = getFinancialYear(date);
       const month = getMonthName(date);
-      if (!hierarchy[fy]) hierarchy[fy] = {};
+      if (!hierarchy[fy])        hierarchy[fy] = {};
       if (!hierarchy[fy][month]) hierarchy[fy][month] = [];
       hierarchy[fy][month].push(order);
     });
     return hierarchy;
   }, [orders, searchTerm]);
 
-  const toggleFolder = (path) => setExpandedFolders(prev => ({ ...prev, [path]: !prev[path] }));
-
-  const handleFileUpload = (e, isEdit = false) => {
-    const files = Array.from(e.target.files);
-    files.forEach(file => {
-      const reader = new FileReader();
-      reader.onload = (event) => {
-        const attachment = { name: file.name, base64: event.target.result, isNew: true };
-        if (isEdit) {
-          setEditOrder(prev => ({ ...prev, attachments: [...(prev.attachments || []), attachment] }));
-        } else {
-          setFormData(prev => ({ ...prev, attachments: [...(prev.attachments || []), attachment] }));
-        }
-      };
-      reader.readAsDataURL(file);
-    });
-  };
-
-  // ── Helper: send portal email with CC ──────────────────────────────────────
+  // ── Mutations ──────────────────────────────────────────────────────────────
   const sendPortalEmail = async ({ slug, clientEmail, contactName, clientName, orderRef, title, portalUrl }) => {
+    log.debug('Sending portal email', { clientEmail, orderRef });
     await api.post('/portal/send-email', {
       slug, clientEmail, contactName, clientName, orderRef, title, portalUrl,
-      cc: CC_EMAIL,  // always CC info@marqland.com
+      cc: CC_EMAIL,
     });
   };
 
-  // ── saveOrder — create inquiry, then handle client/contact DB logic ─────────
   const saveOrder = async (e) => {
     e.preventDefault();
+    log.info('Submitting new inquiry', { title: formData.title, client: formData.clientName });
     setLoading(true);
-    const richDescription = createEditorRef.current ? createEditorRef.current.innerHTML : formData.description;
+
+    const richDescription = createEditorRef.current
+      ? createEditorRef.current.innerHTML
+      : formData.description;
+
     const financialYear = getFinancialYear(new Date().toISOString());
-
-    const fyOrders = orders.filter(o => o.refNumber && o.refNumber.startsWith('INQ-' + financialYear));
-    let nextNumber = 1;
-    if (fyOrders.length > 0) {
-      const lastNumbers = fyOrders.map(o => {
-        const parts = o.refNumber.split('-');
-        return parseInt(parts.pop(), 10);
-      }).filter(num => !isNaN(num));
-      const maxNum = lastNumbers.length > 0 ? Math.max(...lastNumbers) : 0;
-      nextNumber = maxNum + 1;
-    }
-
+    const fyOrders      = orders.filter(o => o.refNumber?.startsWith('INQ-' + financialYear));
+    const lastNumbers   = fyOrders
+      .map(o => parseInt(o.refNumber.split('-').pop(), 10))
+      .filter(n => !isNaN(n));
+    const nextNumber  = lastNumbers.length > 0 ? Math.max(...lastNumbers) + 1 : 1;
     const generatedRef = `INQ-${financialYear}-${String(nextNumber).padStart(3, '0')}`;
+
     const payload = {
       ...formData,
       refNumber: generatedRef,
@@ -501,14 +1009,13 @@ export default function App() {
         setIsModalOpen(false);
         setFormData({ title: '', clientName: '', orderPlacedBy: '', description: '', attachments: [], orderType: 'product' });
         fetchOrders();
+        log.info('Inquiry created', { ref: generatedRef });
 
-        // ── Create the portal immediately so we get the real slug ──────────
-        // The backend generates slug as "{5-char-token}-{refNumber}" e.g. "uk2al-inq-26-27-002".
-        // We MUST create the portal here to learn that slug — computing it on the
-        // frontend will always produce the wrong value (missing the token prefix).
+        // Create portal to get the real server-generated slug
         const savedOrder = res.data;
-        let portalSlug = generatedRef.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
-        let portalUrl  = `${CLIENT_BASE_URL}/p/${portalSlug}`;
+        let portalSlug   = generatedRef.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+        let portalUrl    = `${CLIENT_BASE_URL}/p/${portalSlug}`;
+
         try {
           const portalRes = await api.post('/portal', {
             orderId:    savedOrder._id,
@@ -520,99 +1027,78 @@ export default function App() {
           if (portalRes.data?.slug) {
             portalSlug = portalRes.data.slug;
             portalUrl  = `${CLIENT_BASE_URL}/p/${portalSlug}`;
-            console.log('✅ Portal created with slug:', portalSlug);
+            log.info('Portal created', { slug: portalSlug });
           }
-        } catch (portalCreateErr) {
-          // 409 = portal already exists for this order — fetch the existing one
-          if (portalCreateErr.response?.status === 409 && portalCreateErr.response.data?.portal?.slug) {
-            portalSlug = portalCreateErr.response.data.portal.slug;
+        } catch (portalErr) {
+          if (portalErr.response?.status === 409 && portalErr.response.data?.portal?.slug) {
+            portalSlug = portalErr.response.data.portal.slug;
             portalUrl  = `${CLIENT_BASE_URL}/p/${portalSlug}`;
-            console.log('ℹ️ Portal already existed, slug:', portalSlug);
+            log.info('Portal already existed', { slug: portalSlug });
           } else {
-            console.warn('Portal creation failed — slug may be wrong:', portalCreateErr.message);
+            log.warn('Portal creation failed — slug may be wrong', portalErr.message);
           }
         }
 
+        // Client/contact lookup → determine email-send scenario
         try {
           const lookup = await api.get('/clients/lookup', { params: { name: payload.clientName } });
 
           if (lookup.data.found && lookup.data.client) {
             const existingClient = lookup.data.client;
-
-            // Check if the contact person is already in this client's contacts
             const contactName    = payload.orderPlacedBy?.trim() || '';
             const matchedContact = existingClient.contacts?.find(
               ct => ct.name?.toLowerCase() === contactName.toLowerCase()
             );
 
             if (matchedContact?.email) {
-              // ── Scenario A: Client exists, contact exists with email → send immediately ──
+              // Scenario A: client + contact both exist with email
               try {
                 await sendPortalEmail({
                   slug: portalSlug, clientEmail: matchedContact.email,
                   contactName: matchedContact.name, clientName: existingClient.companyName,
                   orderRef: generatedRef, title: payload.title, portalUrl,
                 });
-                console.log('✅ Portal email sent to', matchedContact.email);
+                log.info('Portal email sent', { email: matchedContact.email });
               } catch (emailErr) {
-                console.warn('Email send failed (non-fatal):', emailErr.message);
+                log.warn('Email send failed (non-fatal)', emailErr.message);
               }
-            } else if (matchedContact && !matchedContact.email) {
-              // ── Scenario B: Contact exists but has no email → show add-contact modal ──
-              setClientCheckModal({
-                mode:        'add-contact',
-                clientId:    existingClient._id,
-                companyName: existingClient.companyName,
-                contactName: contactName,
-                orderRef:    generatedRef,
-                title:       payload.title,
-                portalSlug,
-                portalUrl,
-              });
             } else {
-              // ── Scenario C: Client exists, but this contact is brand new → add contact ──
+              // Scenarios B & C: contact exists without email OR brand-new contact
               setClientCheckModal({
                 mode:        'add-contact',
                 clientId:    existingClient._id,
                 companyName: existingClient.companyName,
-                contactName: contactName,
-                orderRef:    generatedRef,
-                title:       payload.title,
-                portalSlug,
-                portalUrl,
+                contactName, orderRef: generatedRef,
+                title: payload.title, portalSlug, portalUrl,
               });
             }
           } else {
-            // ── Scenario D: Client not in DB at all → create client modal ──
+            // Scenario D: client not in DB
             setClientCheckModal({
-              mode:        'create',
-              clientName:  payload.clientName,
+              mode: 'create', clientName: payload.clientName,
               contactName: payload.orderPlacedBy?.trim() || '',
-              orderRef:    generatedRef,
-              title:       payload.title,
-              portalSlug,
-              portalUrl,
+              orderRef: generatedRef, title: payload.title, portalSlug, portalUrl,
             });
           }
         } catch (lookupErr) {
-          console.warn('Client lookup failed:', lookupErr.message);
+          log.warn('Client lookup failed', lookupErr.message);
           setClientCheckModal({
-            mode:        'create',
-            clientName:  payload.clientName,
+            mode: 'create', clientName: payload.clientName,
             contactName: payload.orderPlacedBy?.trim() || '',
-            orderRef:    generatedRef,
-            title:       payload.title,
-            portalSlug,
-            portalUrl:   `${CLIENT_BASE_URL}/p/${portalSlug}`,
+            orderRef: generatedRef, title: payload.title, portalSlug,
+            portalUrl: `${CLIENT_BASE_URL}/p/${portalSlug}`,
           });
         }
       }
-    } catch (err) { console.error(err); }
-    finally { setLoading(false); }
+    } catch (err) {
+      log.error('Save order failed', err.message);
+    } finally {
+      setLoading(false);
+    }
   };
 
-  const updateOrder = async (id, payload, e) => {
-    if (e) e.stopPropagation();
+  const updateOrder = async (id, payload) => {
+    log.info('Updating order', { id });
     setLoading(true);
     const finalPayload = { ...payload };
     if (editEditorRef.current && id === editOrder?._id) {
@@ -622,13 +1108,153 @@ export default function App() {
       await api.patch(`/orders/${id}`, finalPayload);
       setEditOrder(null);
       fetchOrders();
-    } catch (err) { console.error(err); }
-    finally { setLoading(false); }
+      log.info('Order updated', { id });
+    } catch (err) {
+      log.error('Update order failed', err.message);
+    } finally {
+      setLoading(false);
+    }
   };
 
+  const deleteOrder = async (order) => {
+    const ok = await confirm({
+      title:        'Delete Order',
+      message:      `"${order.title}" and its portal will be permanently removed.`,
+      confirmLabel: 'Delete',
+      variant:      'danger',
+    });
+    if (!ok) return;
+    log.info('Deleting order', { id: order._id, title: order.title });
+    try {
+      await api.delete(`/orders/${order._id}`);
+      try {
+        const portalRes = await api.get(`/portal/order/${order._id}`);
+        if (portalRes.data?.slug) await api.delete(`/portal/${portalRes.data.slug}`);
+      } catch { /* portal may not exist */ }
+      showToast('success', `"${order.title}" deleted`);
+      fetchOrders();
+    } catch (err) {
+      log.error('Delete order failed', err.message);
+      showToast('error', err.response?.data?.message || err.message);
+    }
+  };
+
+  // ── UI helpers ─────────────────────────────────────────────────────────────
+  const deleteMetaItem = (type, value, parentClient = null) => {
+    setMeta(prev => {
+      if (type === 'clients') {
+        const newContacts = { ...prev.clientContacts };
+        const newMap      = { ...prev.clientMap };
+        delete newContacts[value];
+        delete newMap[value];
+        return { ...prev, clients: prev.clients.filter(i => i !== value), clientContacts: newContacts, clientMap: newMap };
+      }
+      return {
+        ...prev,
+        clientContacts: {
+          ...prev.clientContacts,
+          [parentClient]: prev.clientContacts[parentClient].filter(i => i !== value),
+        },
+      };
+    });
+  };
+
+  const toggleFolder = (path) => setExpandedFolders(prev => ({ ...prev, [path]: !prev[path] }));
+
+  const handleFileUpload = (e, isEdit = false) => {
+    Array.from(e.target.files).forEach(file => {
+      const reader = new FileReader();
+      reader.onload = (ev) => {
+        const attachment = { name: file.name, base64: ev.target.result, isNew: true };
+        if (isEdit) {
+          setEditOrder(prev => ({ ...prev, attachments: [...(prev.attachments || []), attachment] }));
+        } else {
+          setFormData(prev => ({ ...prev, attachments: [...(prev.attachments || []), attachment] }));
+        }
+      };
+      reader.readAsDataURL(file);
+    });
+  };
+
+  const handlePaste = (e) => {
+    const items = (e.clipboardData || e.originalEvent.clipboardData).items;
+    for (const item of Object.values(items)) {
+      if (item.kind === 'file' && item.type.startsWith('image/')) {
+        e.preventDefault();
+        const blob   = item.getAsFile();
+        const reader = new FileReader();
+        reader.onload = (ev) => {
+          const img = `<img src="${ev.target.result}" style="max-width:100%;border-radius:4px;margin:10px 0;" />`;
+          document.execCommand('insertHTML', false, img);
+        };
+        reader.readAsDataURL(blob);
+      }
+    }
+  };
+
+  const loadOrderAttachments = async (order) => {
+    setEditOrder(order);
+    try {
+      const res = await api.get(`/orders/${order._id}/attachments`);
+      if (Array.isArray(res.data)) {
+        setEditOrder(prev =>
+          prev?._id === order._id ? { ...prev, attachments: res.data } : prev
+        );
+      }
+    } catch (err) {
+      log.warn('Attachment refresh failed (non-fatal)', err.message);
+    }
+  };
+
+  const handleOpenPortalChat = async (order, ordData) => {
+    await requestNotifPermission();
+    const total = ordData?.clientCount || 0;
+    setSeenCount(order._id, total);
+    setUnreadCounts(prev => ({
+      ...prev,
+      [order._id]: { ...(prev[order._id] || {}), unread: 0 },
+    }));
+    setChatOrder(order);
+  };
+
+  const handleCopyLink = (order, portalUrl) => {
+    navigator.clipboard.writeText(portalUrl);
+    setSentLinks(prev => ({ ...prev, [order._id]: true }));
+    setCopiedId(order._id);
+    setTimeout(() => setCopiedId(null), 2000);
+  };
+
+  // ── Shared row props ───────────────────────────────────────────────────────
+  const rowProps = {
+    loading, unreadCounts, sentLinks, copiedId,
+    onRowClick:       loadOrderAttachments,
+    onStartProject:   (order) => setQuotePrompt(order),
+    onMarkComplete:   (order) => setCompletionPrompt(order),
+    onOpenPortalChat: handleOpenPortalChat,
+    onCopyLink:       handleCopyLink,
+    onDelete:         deleteOrder,
+  };
+
+  // ── Column-header style (matches ClientList th) ────────────────────────────
+  const thStyle = {
+    padding: '12px 20px', textAlign: 'left',
+    fontFamily: jost, fontSize: 9, fontWeight: 400,
+    letterSpacing: '0.25em', textTransform: 'uppercase',
+    color: T.muted, borderBottom: `1px solid ${T.border}`,
+    background: T.offwhite,
+  };
+
+  // ── Tab config ─────────────────────────────────────────────────────────────
+  const TABS = [
+    { id: 'inquiry',   label: 'Inquiries',       icon: Clock },
+    { id: 'ongoing',   label: 'Ongoing',          icon: ArrowRight },
+    { id: 'completed', label: 'Completed Orders', icon: Calendar },
+  ];
+
+  // ── CustomCreatableSelect (local) ──────────────────────────────────────────
   const CustomCreatableSelect = ({ label, options, value, onChange, onDelete, isDisabled }) => (
-    <div className="space-y-1">
-      <label className="text-[10px] font-black text-slate-400 uppercase px-1">{label}</label>
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+      <FieldLabel>{label}</FieldLabel>
       <CreatableSelect
         isClearable
         isDisabled={isDisabled}
@@ -636,586 +1262,883 @@ export default function App() {
         value={value}
         onChange={onChange}
         formatOptionLabel={(option, { context }) => (
-          <div className="flex justify-between items-center">
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
             <span>{option.label}</span>
             {context === 'menu' && (
-              <button onClick={(e) => { e.stopPropagation(); onDelete(option.value); }} className="hover:text-red-500 p-1">
-                <X size={12} />
+              <button
+                onClick={e => { e.stopPropagation(); onDelete(option.value); }}
+                style={{ background: 'none', border: 'none', cursor: 'pointer', color: T.muted, padding: 2 }}
+              >
+                <X size={11} />
               </button>
             )}
           </div>
         )}
         styles={{
-          control: (base) => ({
-            ...base, border: 'none', borderRadius: '0.75rem', padding: '4px',
-            backgroundColor: '#f8fafc', fontSize: '14px', fontWeight: 'bold',
+          control: base => ({
+            ...base, border: `1px solid ${T.border}`, borderRadius: 3,
+            padding: '2px 4px', background: 'white', fontSize: 13, fontFamily: jost,
+            boxShadow: 'none', '&:hover': { borderColor: T.gold },
+          }),
+          option: (base, { isFocused }) => ({
+            ...base, fontFamily: jost, fontSize: 12,
+            background: isFocused ? T.dimBg : 'white',
+            color: T.text,
           }),
         }}
       />
     </div>
   );
 
-  const downloadFile = (file, e) => {
-    e.stopPropagation();
-    const url = file.downloadUrl || file['@microsoft.graph.downloadUrl'] || file.webUrl;
-    const link = document.createElement('a');
-    link.href = url;
-    link.setAttribute('download', file.name);
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-  };
-
-  const getFileIcon = (type) => {
-    if (type.includes('image')) return <ImageIcon size={14} className="text-blue-500" />;
-    if (type.includes('sheet') || type.includes('excel')) return <FileSpreadsheet size={14} className="text-emerald-500" />;
-    return <FileText size={14} className="text-slate-400" />;
-  };
-
-  const loadOrderAttachments = async (order) => {
-    // Show the modal immediately with stored metadata, then fetch live OneDrive links
-    setEditOrder(order);
-    try {
-      const res = await api.get(`/orders/${order._id}/attachments`);
-      if (Array.isArray(res.data)) {
-        setEditOrder(prev => prev?._id === order._id ? { ...prev, attachments: res.data } : prev);
-      }
-    } catch {
-      // Non-fatal — stored attachment metadata already shown
-    }
-  };
-
-  const OrderRow = ({ order }) => (
-    <tr onClick={() => loadOrderAttachments(order)}
-      className="hover:bg-slate-50/80 cursor-pointer transition-colors border-b border-slate-100 last:border-0">
-      <td className="px-6 py-4">
-        <div className="flex flex-col gap-1">
-          {order.status === 'completed' ? (
-            order.invoiceNumber && (
-              <span className="text-[10px] font-black bg-emerald-600 text-white px-2 py-1 rounded uppercase tracking-wider w-fit flex items-center gap-1">
-                <Receipt size={10} /> {order.invoiceNumber}
-              </span>
-            )
-          ) : (
-            <>
-              {order.refNumber
-                ? <span className="text-[10px] font-black bg-indigo-600 text-white px-2 py-1 rounded uppercase tracking-wider w-fit">{order.refNumber}</span>
-                : <span className="text-[10px] font-black bg-slate-100 text-slate-500 px-2 py-1 rounded w-fit">#{order._id.slice(-6)}</span>
-              }
-            </>
-          )}
-        </div>
-      </td>
-      <td className="px-6 py-4">
-        <div className="flex items-start gap-2">
-          <div className={`mt-0.5 p-1.5 rounded-lg shrink-0 ${order.orderType === 'offsite' ? 'bg-orange-50 text-orange-500' : 'bg-indigo-50 text-indigo-500'}`}
-            title={order.orderType === 'offsite' ? 'Offsite / Property' : 'Product Gifting'}>
-            {order.orderType === 'offsite' ? <MapPin size={12} /> : <Package size={12} />}
-          </div>
-          <div>
-            <div className="font-bold text-sm text-slate-800 leading-tight">{order.title}</div>
-            <div className="flex flex-col mt-0.5">
-              <span className="text-[11px] text-slate-500 font-bold">{order.clientName}</span>
-              <span className="text-[10px] text-slate-400 font-medium leading-tight">Attn: {order.orderPlacedBy || 'N/A'}</span>
-            </div>
-          </div>
-        </div>
-      </td>
-      <td className="px-6 py-4 max-w-xs">
-        <div className="text-xs text-slate-500 line-clamp-1 italic pointer-events-none"
-          dangerouslySetInnerHTML={{ __html: order.description?.replace(/<img[^>]*>/g, '[Image]') || '...' }} />
-      </td>
-      <td className="px-6 py-4">
-        {order.attachments && order.attachments.length > 0 && (
-          <div className="flex flex-wrap gap-2">
-            {order.attachments.map((file, idx) => (
-              <a key={idx} href={file.webUrl} target="_blank" rel="noopener noreferrer"
-                onClick={(e) => e.stopPropagation()}
-                className="flex items-center gap-2 px-3 py-1.5 bg-blue-50 text-blue-600 rounded-lg text-[10px] font-bold hover:bg-blue-100 transition-colors">
-                <FileText size={12} />
-                <span className="truncate max-w-[100px]">{file.name}</span>
-                <button onClick={(e) => { e.stopPropagation(); e.preventDefault(); downloadFile(file, e); }}
-                  className="text-indigo-500"><Download size={14} /></button>
-              </a>
-            ))}
-          </div>
-        )}
-      </td>
-      <td className="px-6 py-4 text-right">
-        <div className="flex items-center justify-end gap-1.5">
-          {order.status === 'inquiry' && (
-            <button disabled={loading} onClick={(e) => { e.stopPropagation(); setQuotePrompt(order); }}
-              className={`px-3 py-1.5 rounded-lg font-black text-[10px] transition-colors uppercase ${loading ? 'bg-slate-100 text-slate-400 cursor-not-allowed' : 'bg-indigo-50 text-indigo-600 hover:bg-indigo-100'}`}>
-              {loading ? '...' : 'Start Project'}
-            </button>
-          )}
-          {order.status === 'ongoing' && (
-            <button disabled={loading} onClick={(e) => { e.stopPropagation(); setCompletionPrompt(order); }}
-              className={`p-2 rounded-lg transition-colors ${loading ? 'text-slate-300 cursor-not-allowed' : 'text-emerald-500 hover:bg-emerald-50'}`} title="Mark complete">
-              <CheckCircle size={18} className={loading ? 'animate-pulse' : ''} />
-            </button>
-          )}
-          {(order.status === 'inquiry' || order.status === 'ongoing') && (() => {
-            const ordData   = unreadCounts[order._id];
-            const unread    = ordData?.unread || 0;
-            const hasUnread = unread > 0;
-            return (
-              <button
-                onClick={async (e) => {
-                  e.stopPropagation();
-                  await requestNotifPermission();
-                  // Mark all messages as seen — persists in localStorage, clears badge
-                  const total = ordData?.clientCount || 0;
-                  setSeenCount(order._id, total);
-                  setUnreadCounts(prev => ({
-                    ...prev,
-                    [order._id]: { ...(prev[order._id] || {}), unread: 0 },
-                  }));
-                  setChatOrder(order);
-                }}
-                className={`relative p-2 rounded-lg transition-colors ${hasUnread ? 'text-violet-600 bg-violet-50' : 'text-violet-400 hover:text-violet-600 hover:bg-violet-50'}`}
-                title={hasUnread ? `${unread} new client message${unread !== 1 ? 's' : ''}` : 'Open portal chat'}>
-                <Link2 size={16} />
-                {hasUnread && (
-                  <span className="absolute -top-1 -right-1 min-w-[16px] h-4 bg-red-500 text-white text-[9px] font-black rounded-full flex items-center justify-center px-1 leading-none shadow-sm">
-                    {unread > 9 ? '9+' : unread}
-                  </span>
-                )}
-              </button>
-            );
-          })()}
-          {(order.status === 'inquiry' || order.status === 'ongoing') && (() => {
-            const slug      = order.refNumber?.toLowerCase().replace(/[^a-z0-9]+/g, '-');
-            const portalUrl = `${CLIENT_BASE_URL}/p/${slug}`;
-            const alreadySent = sentLinks[order._id];
-            const justCopied  = copiedId === order._id;
-            if (alreadySent) {
-              return (
-                <div className="relative group">
-                  <button disabled className="p-2 text-slate-300 cursor-not-allowed rounded-lg" title="Link already sent">
-                    <Send size={16} />
-                  </button>
-                  <div className="absolute right-0 top-8 hidden group-hover:flex flex-col gap-1.5 bg-slate-900 text-white rounded-xl p-3 shadow-xl z-50 min-w-[180px]">
-                    <span className="text-[10px] font-bold text-slate-400 uppercase">Link sent</span>
-                    <button onClick={(e) => { e.stopPropagation(); navigator.clipboard.writeText(portalUrl); setCopiedId(order._id); setTimeout(() => setCopiedId(null), 2000); }}
-                      className="flex items-center gap-2 text-[11px] font-bold text-indigo-300 hover:text-white transition-colors">
-                      {justCopied ? <CheckCircle size={12} /> : <Copy size={12} />}
-                      {justCopied ? 'Copied!' : 'Copy link again'}
-                    </button>
-                  </div>
-                </div>
-              );
-            }
-            return (
-              <button onClick={async (e) => {
-                e.stopPropagation();
-                navigator.clipboard.writeText(portalUrl);
-                setSentLinks(prev => ({ ...prev, [order._id]: slug }));
-                setCopiedId(order._id);
-                setTimeout(() => setCopiedId(null), 2000);
-              }} className="p-2 text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 rounded-lg transition-colors" title="Copy & send client link">
-                {justCopied ? <CheckCircle size={16} className="text-emerald-500" /> : <Send size={16} />}
-              </button>
-            );
-          })()}
-          {order.status !== 'completed' && (
-            <button disabled={loading} onClick={async (e) => {
-              e.stopPropagation();
-              const ok = await confirm({
-                title        : 'Delete Order',
-                message      : `"${order.title}" and its portal will be permanently removed.`,
-                confirmLabel : 'Delete',
-                variant      : 'danger',
-              });
-              if (!ok) return;
-              try {
-                await api.delete(`/orders/${order._id}`);
-                try { const portalRes = await api.get(`/portal/order/${order._id}`); if (portalRes.data?.slug) await api.delete(`/portal/${portalRes.data.slug}`); } catch {}
-                showToast('success', `"${order.title}" deleted`);
-                fetchOrders();
-              } catch (err) { showToast('error', err.response?.data?.message || err.message); }
-            }}
-              className={`p-2 transition-colors ${loading ? 'text-slate-200 cursor-not-allowed' : 'text-slate-300 hover:text-red-500'}`}>
-              <Trash2 size={18} />
-            </button>
-          )}
-        </div>
-      </td>
-    </tr>
-  );
-
+  // ── Render ─────────────────────────────────────────────────────────────────
   return (
-    <div className="p-8 bg-slate-50 min-h-screen font-sans text-slate-900">
+    <div style={{ minHeight: '100vh', background: T.offwhite, fontFamily: jost, padding: '56px 48px' }}>
+
       <Toast />
       <ConfirmDialog />
-      <div className="flex flex-wrap justify-between items-center gap-4 mb-8">
-        <div>
-          <h1 className="text-3xl font-black uppercase tracking-tighter">Order Management</h1>
-          <p className="text-slate-500 text-sm font-bold">Update Order Status Over Here</p>
-        </div>
-        <div className="flex flex-1 items-center gap-2 max-w-4xl">
-          <div className="relative flex-1 hidden md:block">
-            <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={16} />
-            <input type="text" placeholder="Search everything..."
-              className="w-full pl-10 pr-4 py-2 bg-white border border-slate-200 rounded-xl font-bold text-xs focus:ring-2 focus:ring-indigo-100 outline-none"
-              value={searchTerm} onChange={(e) => setSearchTerm(e.target.value)} />
+
+      {/* ── Page header ─────────────────────────────────────────────────── */}
+      <div style={{ marginBottom: 40 }}>
+        <GoldRule />
+        <p style={{
+          fontSize: 9, fontWeight: 400, letterSpacing: '0.3em',
+          textTransform: 'uppercase', color: T.muted, marginBottom: 10,
+        }}>
+          Operations
+        </p>
+        <h1 style={{
+          fontFamily: serif, fontSize: 40, fontWeight: 300,
+          color: T.navy, lineHeight: 1.05, margin: '0 0 24px',
+        }}>
+          Order <em style={{ color: T.gold }}>Management.</em>
+        </h1>
+
+        {/* Controls row */}
+        <div style={{ display: 'flex', gap: 14, flexWrap: 'wrap', alignItems: 'center' }}>
+
+          {/* Search */}
+          <div style={{ position: 'relative', flex: '1 1 260px', maxWidth: 420 }}>
+            <Search size={13} style={{
+              position: 'absolute', left: 13, top: '50%',
+              transform: 'translateY(-50%)', color: T.muted, pointerEvents: 'none',
+            }} />
+            <input
+              type="text"
+              placeholder="Search orders, clients, references…"
+              value={searchTerm}
+              onChange={e => setSearchTerm(e.target.value)}
+              onFocus={() => setSearchFocused(true)}
+              onBlur={() => setSearchFocused(false)}
+              style={{
+                width: '100%', padding: '10px 36px 10px 36px',
+                background: 'white',
+                border: `1px solid ${searchFocused ? T.gold : T.border}`,
+                borderRadius: 3,
+                fontFamily: jost, fontSize: 12, fontWeight: 300,
+                color: T.text, outline: 'none',
+                boxSizing: 'border-box', transition: 'border-color 0.2s',
+              }}
+            />
+            {searchTerm && (
+              <button
+                onClick={() => setSearchTerm('')}
+                style={{
+                  position: 'absolute', right: 12, top: '50%',
+                  transform: 'translateY(-50%)', background: 'none',
+                  border: 'none', cursor: 'pointer', color: T.muted,
+                  display: 'flex', padding: 0,
+                }}
+              >✕</button>
+            )}
           </div>
-          <select className="bg-white border border-slate-200 rounded-xl px-3 py-2 font-bold text-xs outline-none focus:ring-2 focus:ring-indigo-100"
-            value={selectedClient} onChange={(e) => { setSelectedClient(e.target.value); setSelectedContact(''); }}>
+
+          {/* Client filter */}
+          <select
+            value={selectedClient}
+            onChange={e => { setSelectedClient(e.target.value); setSelectedContact(''); }}
+            style={{
+              padding: '10px 14px', background: 'white',
+              border: `1px solid ${T.border}`, borderRadius: 3,
+              fontFamily: jost, fontSize: 12, fontWeight: 300,
+              color: T.text, outline: 'none', cursor: 'pointer',
+            }}
+          >
             <option value="">All Clients</option>
             {meta.clients.map(c => <option key={c} value={c}>{c}</option>)}
           </select>
-          <select className="bg-white border border-slate-200 rounded-xl px-3 py-2 font-bold text-xs outline-none focus:ring-2 focus:ring-indigo-100"
-            value={selectedContact} onChange={(e) => setSelectedContact(e.target.value)}>
+
+          {/* Contact filter */}
+          <select
+            value={selectedContact}
+            onChange={e => setSelectedContact(e.target.value)}
+            style={{
+              padding: '10px 14px', background: 'white',
+              border: `1px solid ${T.border}`, borderRadius: 3,
+              fontFamily: jost, fontSize: 12, fontWeight: 300,
+              color: T.text, outline: 'none', cursor: 'pointer',
+            }}
+          >
             <option value="">All Contacts</option>
             {(selectedClient
               ? (meta.clientContacts[selectedClient] || [])
               : Array.from(new Set(Object.values(meta.clientContacts).flat()))
             ).map(c => <option key={c} value={c}>{c}</option>)}
           </select>
+
+          {/* Reset filters */}
           {(searchTerm || selectedClient || selectedContact) && (
-            <button onClick={() => { setSearchTerm(''); setSelectedClient(''); setSelectedContact(''); }}
-              className="p-2 text-slate-400 hover:text-indigo-600 transition-colors" title="Reset Filters">
-              <X size={18} />
+            <button
+              onClick={() => { setSearchTerm(''); setSelectedClient(''); setSelectedContact(''); }}
+              style={{
+                background: 'none', border: 'none', cursor: 'pointer',
+                color: T.muted, display: 'flex', padding: 6,
+                transition: 'color 0.2s',
+              }}
+              onMouseEnter={e => e.currentTarget.style.color = T.gold}
+              onMouseLeave={e => e.currentTarget.style.color = T.muted}
+              title="Reset Filters"
+            >
+              <X size={17} />
             </button>
           )}
+
+          {/* New inquiry CTA */}
+          <GoldBtn onClick={() => setIsModalOpen(true)} style={{ marginLeft: 'auto', flexShrink: 0 }}>
+            + New Inquiry
+          </GoldBtn>
         </div>
-        <button onClick={() => setIsModalOpen(true)}
-          className="bg-indigo-600 text-white px-6 py-3 rounded-xl font-black text-sm flex items-center gap-2 hover:bg-indigo-700 transition-all shadow-lg whitespace-nowrap">
-          <Plus size={18} /> NEW INQUIRY
-        </button>
       </div>
 
-      <div className="flex gap-1 mb-6 bg-slate-200/50 p-1 rounded-2xl w-fit">
-        {[
-          { id: 'inquiry', label: 'Inquiries', icon: Clock },
-          { id: 'ongoing', label: 'Ongoing', icon: ArrowRight },
-          { id: 'completed', label: 'Completed Orders', icon: Calendar },
-        ].map(tab => (
-          <button key={tab.id} onClick={() => setActiveTab(tab.id)}
-            className={`flex items-center gap-2 px-6 py-2.5 rounded-xl text-xs font-black uppercase transition-all ${activeTab === tab.id ? 'bg-white text-indigo-600 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}>
-            <tab.icon size={14} />{tab.label}
+      {/* ── Tab bar ─────────────────────────────────────────────────────── */}
+      <div style={{
+        display: 'flex', gap: 2, marginBottom: 24,
+        borderBottom: `1px solid ${T.border}`,
+      }}>
+        {TABS.map(tab => (
+          <button
+            key={tab.id}
+            onClick={() => setActiveTab(tab.id)}
+            style={{
+              display: 'inline-flex', alignItems: 'center', gap: 7,
+              padding: '10px 22px',
+              background: 'none', border: 'none', cursor: 'pointer',
+              fontFamily: jost, fontSize: 9, fontWeight: 400,
+              letterSpacing: '0.22em', textTransform: 'uppercase',
+              color: activeTab === tab.id ? T.gold : T.muted,
+              borderBottom: activeTab === tab.id ? `2px solid ${T.gold}` : '2px solid transparent',
+              marginBottom: -1,
+              transition: 'color 0.2s, border-color 0.2s',
+            }}
+          >
+            <tab.icon size={13} />
+            {tab.label}
           </button>
         ))}
       </div>
 
-      <div className="bg-white rounded-[2rem] border border-slate-200 overflow-hidden shadow-sm">
+      {/* ── Table container ──────────────────────────────────────────────── */}
+      <div style={{ background: 'white', border: `1px solid ${T.border}`, overflow: 'hidden' }}>
+
         {fetchLoading ? (
-          <div className="flex-1 flex flex-col items-center justify-center gap-3 py-20">
-            <Loader2 className="animate-spin text-indigo-600" size={40} />
-            <p className="text-xs font-black uppercase text-slate-400 tracking-widest">Fetching Orders...</p>
+          <div style={{
+            display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
+            gap: 14, padding: '80px 0',
+          }}>
+            <Spinner size={36} />
+            <p style={{
+              fontFamily: jost, fontSize: 9, fontWeight: 400,
+              letterSpacing: '0.3em', textTransform: 'uppercase', color: T.muted,
+            }}>
+              Fetching Orders…
+            </p>
           </div>
-        ) : (
-          <>
-            {activeTab !== 'completed' ? (
-              <table className="w-full text-left">
-                <thead className="bg-slate-50/50 border-b border-slate-200">
-                  <tr className="text-[10px] font-black uppercase text-slate-400">
-                    <th className="px-6 py-4">Identifiers</th>
-                    <th className="px-6 py-4">Project</th>
-                    <th className="px-6 py-4">Description</th>
-                    <th className="px-6 py-4">Files</th>
-                    <th className="px-6 py-4 text-right">Actions</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {filteredOrders.map(order => <OrderRow key={order._id} order={order} />)}
-                  {filteredOrders.length === 0 && (
-                    <tr><td colSpan="5" className="py-20 text-center text-slate-400 font-bold text-sm uppercase">
+        ) : activeTab !== 'completed' ? (
+
+          /* ── Inquiries / Ongoing table ── */
+          <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+            <thead>
+              <tr>
+                <th style={thStyle}>Identifiers</th>
+                <th style={thStyle}>Project</th>
+                <th style={thStyle}>Description</th>
+                <th style={thStyle}>Files</th>
+                <th style={{ ...thStyle, textAlign: 'right' }}>Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {filteredOrders.map(order => (
+                <OrderRow key={order._id} order={order} {...rowProps} />
+              ))}
+              {filteredOrders.length === 0 && (
+                <tr>
+                  <td colSpan={5} style={{ padding: '64px 0', textAlign: 'center' }}>
+                    <p style={{
+                      fontFamily: jost, fontSize: 12, fontWeight: 300,
+                      letterSpacing: '0.1em', color: T.muted,
+                    }}>
                       No matches found{searchTerm ? ` for "${searchTerm}"` : ''}
-                    </td></tr>
-                  )}
-                </tbody>
-              </table>
-            ) : (
-              <div className="p-4 space-y-4">
-                {Object.entries(groupedCompleted).length === 0 && (
-                  <div className="py-20 text-center text-slate-400 font-bold text-sm uppercase">No completed records found</div>
-                )}
-                {Object.entries(groupedCompleted).map(([fy, months]) => (
-                  <div key={fy} className="space-y-2">
-                    <button onClick={() => toggleFolder(fy)} className="w-full flex items-center gap-3 p-4 bg-slate-50 rounded-2xl">
-                      <FolderOpen size={18} className="text-indigo-500" />
-                      <span className="font-black text-sm uppercase">{fy}</span>
-                      {expandedFolders[fy] ? <ChevronDown size={16} className="ml-auto opacity-40" /> : <ChevronRight size={16} className="ml-auto opacity-40" />}
-                    </button>
-                    {expandedFolders[fy] && (
-                      <div className="ml-6 space-y-2">
-                        {Object.entries(months).map(([month, items]) => (
-                          <div key={month} className="space-y-1">
-                            <button onClick={() => toggleFolder(`${fy}-${month}`)} className="w-full flex items-center gap-3 p-3 bg-white border border-slate-100 rounded-xl">
-                              <Calendar size={14} className="text-slate-400" />
-                              <span className="font-bold text-xs uppercase text-slate-600">{month} ({items.length})</span>
-                            </button>
-                            {expandedFolders[`${fy}-${month}`] && (
-                              <div className="overflow-hidden border border-slate-100 rounded-xl mb-4 bg-slate-50/30">
-                                <table className="w-full text-left">
-                                  <tbody>{items.map(order => <OrderRow key={order._id} order={order} />)}</tbody>
-                                </table>
-                              </div>
-                            )}
-                          </div>
-                        ))}
-                      </div>
-                    )}
-                  </div>
-                ))}
-              </div>
+                    </p>
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+
+        ) : (
+
+          /* ── Completed orders — FY / Month hierarchy ── */
+          <div style={{ padding: '24px' }}>
+            {Object.entries(groupedCompleted).length === 0 && (
+              <p style={{
+                textAlign: 'center', padding: '64px 0',
+                fontFamily: jost, fontSize: 12, fontWeight: 300,
+                letterSpacing: '0.1em', color: T.muted,
+              }}>
+                No completed records found
+              </p>
             )}
-          </>
+
+            {Object.entries(groupedCompleted).map(([fy, months]) => (
+              <div key={fy} style={{ marginBottom: 12 }}>
+                {/* FY row */}
+                <button
+                  onClick={() => toggleFolder(fy)}
+                  style={{
+                    width: '100%', display: 'flex', alignItems: 'center', gap: 10,
+                    padding: '14px 18px', background: T.offwhite,
+                    border: `1px solid ${T.border}`, cursor: 'pointer',
+                    fontFamily: jost, fontSize: 10, fontWeight: 500,
+                    letterSpacing: '0.2em', textTransform: 'uppercase', color: T.text,
+                    textAlign: 'left',
+                  }}
+                >
+                  <FolderOpen size={15} style={{ color: T.gold }} />
+                  {fy}
+                  {expandedFolders[fy]
+                    ? <ChevronDown size={14} style={{ marginLeft: 'auto', color: T.muted }} />
+                    : <ChevronRight size={14} style={{ marginLeft: 'auto', color: T.muted }} />}
+                </button>
+
+                {expandedFolders[fy] && (
+                  <div style={{ marginLeft: 24, marginTop: 4, display: 'flex', flexDirection: 'column', gap: 6 }}>
+                    {Object.entries(months).map(([month, items]) => (
+                      <div key={month}>
+                        {/* Month row */}
+                        <button
+                          onClick={() => toggleFolder(`${fy}-${month}`)}
+                          style={{
+                            width: '100%', display: 'flex', alignItems: 'center', gap: 8,
+                            padding: '10px 14px', background: 'white',
+                            border: `1px solid ${T.border}`, cursor: 'pointer',
+                            fontFamily: jost, fontSize: 9, fontWeight: 400,
+                            letterSpacing: '0.22em', textTransform: 'uppercase', color: T.muted,
+                            textAlign: 'left',
+                          }}
+                        >
+                          <Calendar size={12} />
+                          {month} ({items.length})
+                        </button>
+
+                        {expandedFolders[`${fy}-${month}`] && (
+                          <div style={{
+                            border: `1px solid ${T.border}`,
+                            borderTop: 'none',
+                            overflow: 'hidden',
+                            marginBottom: 8,
+                          }}>
+                            <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+                              <tbody>
+                                {items.map(order => (
+                                  <OrderRow key={order._id} order={order} {...rowProps} />
+                                ))}
+                              </tbody>
+                            </table>
+                          </div>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+
+        {/* Row count footer (mirrors ClientList) */}
+        {!fetchLoading && activeTab !== 'completed' && (
+          <div style={{
+            borderTop: `1px solid ${T.border}`,
+            padding: '10px 20px',
+            fontFamily: jost, fontSize: 10, fontWeight: 300,
+            letterSpacing: '0.12em', color: T.muted, textAlign: 'right',
+          }}>
+            {filteredOrders.length} of {orders.filter(o => o.status === activeTab).length} records
+          </div>
         )}
       </div>
 
-      {/* ── Edit Order Modal ── */}
+      {/* ════════════════════════════════════════════════════════════════════
+          EDIT ORDER MODAL
+      ════════════════════════════════════════════════════════════════════ */}
       {editOrder && (
-        <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-md flex items-center justify-center p-4">
-          <div className="fixed inset-0 z-50 bg-white flex flex-col animate-in fade-in slide-in-from-bottom-2 duration-300 w-full rounded-[2.5rem] shadow-2xl p-8 space-y-6 overflow-y-auto custom-scrollbar">
-            <div className="flex justify-between items-center pb-4 border-b border-slate-100">
-              <h2 className="text-lg font-black uppercase">Record Details</h2>
-              <button disabled={loading} onClick={() => setEditOrder(null)}>
-                <X size={20} className={loading ? 'opacity-20' : ''} />
+        <div style={{
+          position: 'fixed', inset: 0,
+          background: 'rgba(14,21,32,0.78)', backdropFilter: 'blur(6px)',
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          padding: 24, zIndex: 50,
+        }}>
+          <div style={{
+            background: 'white', border: `1px solid ${T.border}`,
+            width: '100%', maxWidth: 720,
+            maxHeight: '92vh', overflowY: 'auto',
+            padding: '40px 40px 32px',
+          }}>
+            {/* Header */}
+            <div style={{
+              display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start',
+              marginBottom: 32, paddingBottom: 20, borderBottom: `1px solid ${T.border}`,
+            }}>
+              <div>
+                <p style={{
+                  fontFamily: jost, fontSize: 9, fontWeight: 400,
+                  letterSpacing: '0.28em', textTransform: 'uppercase',
+                  color: T.muted, marginBottom: 6,
+                }}>
+                  Update Record
+                </p>
+                <h2 style={{ fontFamily: serif, fontSize: 28, fontWeight: 300, color: T.navy, margin: 0 }}>
+                  Record Details
+                </h2>
+              </div>
+              <button
+                disabled={loading}
+                onClick={() => setEditOrder(null)}
+                style={{
+                  background: 'none', border: 'none', cursor: loading ? 'not-allowed' : 'pointer',
+                  color: T.muted, fontSize: 20, lineHeight: 1, padding: 4,
+                  opacity: loading ? 0.3 : 1,
+                }}
+              >
+                ✕
               </button>
             </div>
+
             {loading ? (
-              <div className="flex-1 flex flex-col items-center justify-center gap-4 py-32">
-                <Loader2 className="animate-spin text-indigo-600" size={48} />
-                <div className="text-center">
-                  <p className="text-sm font-black uppercase text-slate-600 tracking-wider">Updating Record...</p>
-                  <p className="text-[10px] font-bold text-slate-400 uppercase">Syncing changes to database</p>
+              <div style={{
+                display: 'flex', flexDirection: 'column', alignItems: 'center',
+                justifyContent: 'center', gap: 14, padding: '80px 0',
+              }}>
+                <Spinner size={40} />
+                <div style={{ textAlign: 'center' }}>
+                  <p style={{
+                    fontFamily: jost, fontSize: 10, fontWeight: 500,
+                    letterSpacing: '0.22em', textTransform: 'uppercase', color: T.text,
+                  }}>
+                    Updating Record…
+                  </p>
+                  <p style={{
+                    fontFamily: jost, fontSize: 9, fontWeight: 300,
+                    letterSpacing: '0.12em', color: T.muted, marginTop: 4,
+                  }}>
+                    Syncing changes to database
+                  </p>
                 </div>
               </div>
             ) : (
               <>
-                <div className="grid grid-cols-2 gap-4">
-                  <div className="space-y-1">
-                    <label className="text-[9px] font-black uppercase text-slate-400 px-1">Project Title</label>
-                    <input className="w-full bg-slate-50 p-4 rounded-xl font-bold text-sm outline-none"
-                      value={editOrder.title || ''} onChange={e => setEditOrder({ ...editOrder, title: e.target.value })} />
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16, marginBottom: 16 }}>
+                  <div>
+                    <FieldLabel>Project Title</FieldLabel>
+                    <FocusInput
+                      value={editOrder.title || ''}
+                      onChange={e => setEditOrder({ ...editOrder, title: e.target.value })}
+                      placeholder="Project Title"
+                    />
                   </div>
-                  <div className="space-y-1">
-                    <label className="text-[9px] font-black uppercase text-slate-400 px-1">Client Name</label>
-                    <input className="w-full bg-slate-50 p-4 rounded-xl font-bold text-sm outline-none"
-                      value={editOrder.clientName || ''} onChange={e => setEditOrder({ ...editOrder, clientName: e.target.value })} />
-                  </div>
-                </div>
-                <div className="grid grid-cols-2 gap-4">
-                  <div className="space-y-1">
-                    <label className="text-[9px] font-black uppercase text-slate-400 px-1">
-                      {activeTab === 'ongoing' ? 'Quote Number' : 'Ref Number'}
-                    </label>
-                    <input readOnly className="w-full bg-slate-50 p-4 rounded-xl font-bold text-sm outline-none uppercase"
-                      value={editOrder.refNumber || ''} />
-                  </div>
-                  <div className="space-y-1">
-                    <label className="text-[9px] font-black uppercase text-slate-400 px-1">Order Placed By</label>
-                    <input className="w-full bg-slate-50 p-4 rounded-xl font-bold text-sm outline-none uppercase"
-                      placeholder="N/A" value={editOrder.orderPlacedBy || ''}
-                      onChange={e => setEditOrder({ ...editOrder, orderPlacedBy: e.target.value })} />
+                  <div>
+                    <FieldLabel>Client Name</FieldLabel>
+                    <FocusInput
+                      value={editOrder.clientName || ''}
+                      onChange={e => setEditOrder({ ...editOrder, clientName: e.target.value })}
+                      placeholder="Client Name"
+                    />
                   </div>
                 </div>
-                <div className="space-y-2">
-                  <div className="flex items-center justify-between px-1">
-                    <label className="text-[9px] font-black uppercase text-slate-400">Project Notes</label>
-                    <div className="flex gap-2 text-slate-300"><ImageIcon size={12} /><TableIcon size={12} /></div>
+
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16, marginBottom: 16 }}>
+                  <div>
+                    <FieldLabel>{activeTab === 'ongoing' ? 'Quote Number' : 'Ref Number'}</FieldLabel>
+                    <FocusInput value={editOrder.refNumber || ''} readOnly />
                   </div>
-                  <div ref={editEditorRef} contentEditable onPaste={handlePaste}
+                  <div>
+                    <FieldLabel>Order Placed By</FieldLabel>
+                    <FocusInput
+                      value={editOrder.orderPlacedBy || ''}
+                      onChange={e => setEditOrder({ ...editOrder, orderPlacedBy: e.target.value })}
+                      placeholder="N/A"
+                    />
+                  </div>
+                </div>
+
+                {/* Rich text notes */}
+                <div style={{ marginBottom: 16 }}>
+                  <div style={{
+                    display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+                    marginBottom: 8,
+                  }}>
+                    <FieldLabel>Project Notes</FieldLabel>
+                    <div style={{ display: 'flex', gap: 8, color: T.muted }}>
+                      <ImageIcon size={12} /> <TableIcon size={12} />
+                    </div>
+                  </div>
+                  <div
+                    ref={editEditorRef}
+                    contentEditable
+                    onPaste={handlePaste}
                     dangerouslySetInnerHTML={{ __html: editOrder.description || '' }}
-                    className="w-full bg-slate-50 p-5 rounded-xl font-bold text-sm outline-none min-h-[500px] border-2 border-transparent focus:border-indigo-100 transition-all overflow-y-auto"
-                    style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-word', display: 'block' }} />
+                    style={{
+                      width: '100%', minHeight: 400,
+                      padding: '16px 18px',
+                      background: T.offwhite, border: `1px solid ${T.border}`,
+                      fontFamily: jost, fontSize: 13, fontWeight: 300,
+                      outline: 'none', boxSizing: 'border-box',
+                      whiteSpace: 'pre-wrap', wordBreak: 'break-word',
+                      overflowY: 'auto',
+                      transition: 'border-color 0.2s',
+                    }}
+                    onFocus={e => e.currentTarget.style.borderColor = T.gold}
+                    onBlur={e => e.currentTarget.style.borderColor = T.border}
+                  />
                 </div>
-                <div className="space-y-2">
-                  <p className="text-[10px] font-black uppercase text-slate-400">Attachments</p>
-                  <div className="flex flex-wrap gap-2">
+
+                {/* Attachments */}
+                <div style={{ marginBottom: 20 }}>
+                  <FieldLabel>Attachments</FieldLabel>
+                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginTop: 8 }}>
                     {editOrder.attachments?.map((file, idx) => (
-                      <div key={idx} className="flex items-center gap-2 px-3 py-1.5 bg-blue-50 text-blue-600 rounded-lg text-[10px] font-bold">
-                        <FileText size={12} />
-                        <span className="truncate max-w-[100px]">{file.name}</span>
-                        <button onClick={(e) => downloadFile(file, e)} className="text-indigo-500"><Download size={14} /></button>
-                        <button onClick={() => setEditOrder({ ...editOrder, attachments: editOrder.attachments.filter((_, i) => i !== idx) })} className="text-red-400"><X size={14} /></button>
+                      <div key={idx} style={{
+                        display: 'inline-flex', alignItems: 'center', gap: 6,
+                        padding: '5px 12px',
+                        background: 'rgba(79,70,229,0.05)',
+                        border: `1px solid rgba(79,70,229,0.12)`,
+                        fontFamily: jost, fontSize: 10, color: T.indigo,
+                      }}>
+                        <FileText size={11} />
+                        <span style={{ maxWidth: 110, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                          {file.name}
+                        </span>
+                        <Download size={12} style={{ cursor: 'pointer' }} onClick={e => {
+                          const url = file.downloadUrl || file['@microsoft.graph.downloadUrl'] || file.webUrl;
+                          const a = document.createElement('a');
+                          a.href = url; a.setAttribute('download', file.name);
+                          document.body.appendChild(a); a.click(); document.body.removeChild(a);
+                        }} />
+                        <X size={12} style={{ cursor: 'pointer', color: T.danger }} onClick={() =>
+                          setEditOrder({ ...editOrder, attachments: editOrder.attachments.filter((_, i) => i !== idx) })
+                        } />
                       </div>
                     ))}
-                    <label className="cursor-pointer bg-indigo-50 text-indigo-500 p-2 rounded-lg flex items-center justify-center w-10 h-10">
-                      <Plus size={16} />
-                      <input type="file" multiple className="hidden" onChange={(e) => handleFileUpload(e, true)} />
+                    <label style={{
+                      display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+                      width: 38, height: 38, cursor: 'pointer',
+                      background: T.dimBg, border: `1px solid ${T.borderG}`, color: T.gold,
+                    }}>
+                      <Plus size={15} />
+                      <input type="file" multiple style={{ display: 'none' }} onChange={e => handleFileUpload(e, true)} />
                     </label>
                   </div>
                 </div>
-                {/* ── Linked Shipments — product orders only ── */}
+
+                {/* Linked shipments — product orders only */}
                 {editOrder.orderType !== 'offsite' && (
-                  <LinkedShipmentsPanel orderId={editOrder._id} />
+                  <div style={{ marginBottom: 20 }}>
+                    <LinkedShipmentsPanel orderId={editOrder._id} />
+                  </div>
                 )}
 
-                <button disabled={loading} onClick={() => updateOrder(editOrder._id, editOrder)}
-                  className="w-full bg-indigo-600 text-white py-4 rounded-xl font-black uppercase tracking-widest text-xs shadow-lg disabled:bg-slate-300 transition-all">
-                  {loading ? 'Processing...' : 'Update Database'}
-                </button>
+                {/* Footer actions */}
+                <div style={{
+                  display: 'flex', justifyContent: 'flex-end', gap: 14,
+                  borderTop: `1px solid ${T.border}`, paddingTop: 24,
+                }}>
+                  <GhostBtn onClick={() => setEditOrder(null)}>Cancel</GhostBtn>
+                  <GoldBtn
+                    onClick={() => updateOrder(editOrder._id, editOrder)}
+                    disabled={loading}
+                  >
+                    {loading ? 'Saving…' : 'Update Database'}
+                  </GoldBtn>
+                </div>
               </>
             )}
           </div>
         </div>
       )}
 
-      {/* ── New Inquiry Modal ── */}
+      {/* ════════════════════════════════════════════════════════════════════
+          NEW INQUIRY MODAL
+      ════════════════════════════════════════════════════════════════════ */}
       {isModalOpen && (
-        <div className="fixed inset-0 z-50 bg-slate-900/40 backdrop-blur-sm flex items-center justify-center p-4">
-          <div className="bg-white w-full max-w-2xl rounded-[2.5rem] shadow-2xl overflow-hidden max-h-[90vh] flex flex-col">
-            <div className="px-8 py-6 border-b border-slate-100 flex justify-between items-center bg-slate-50/50">
+        <div style={{
+          position: 'fixed', inset: 0,
+          background: 'rgba(14,21,32,0.75)', backdropFilter: 'blur(4px)',
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          padding: 24, zIndex: 50,
+        }}>
+          <div style={{
+            background: 'white', border: `1px solid ${T.border}`,
+            width: '100%', maxWidth: 620,
+            maxHeight: '90vh', overflow: 'hidden',
+            display: 'flex', flexDirection: 'column',
+          }}>
+            {/* Header */}
+            <div style={{
+              display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start',
+              padding: '32px 36px 20px',
+              borderBottom: `1px solid ${T.border}`,
+            }}>
               <div>
-                <h2 className="text-lg font-black uppercase leading-tight">Create New Inquiry</h2>
-                <p className="text-[9px] font-bold text-slate-400 uppercase tracking-widest">Pasting screenshots & tables supported</p>
+                <p style={{
+                  fontFamily: jost, fontSize: 9, fontWeight: 400,
+                  letterSpacing: '0.28em', textTransform: 'uppercase',
+                  color: T.muted, marginBottom: 6,
+                }}>
+                  New Registration
+                </p>
+                <h2 style={{ fontFamily: serif, fontSize: 28, fontWeight: 300, color: T.navy, margin: 0 }}>
+                  Create Inquiry
+                </h2>
+                <p style={{
+                  fontFamily: jost, fontSize: 9, fontWeight: 300,
+                  color: T.muted, marginTop: 6, letterSpacing: '0.12em',
+                }}>
+                  Paste screenshots and tables directly into the notes field.
+                </p>
               </div>
-              <button disabled={loading} onClick={() => setIsModalOpen(false)}
-                className={`p-2 rounded-full ${loading ? 'opacity-20' : 'hover:bg-slate-100'}`}>
-                <X size={20} />
+              <button
+                disabled={loading}
+                onClick={() => setIsModalOpen(false)}
+                style={{
+                  background: 'none', border: 'none', cursor: loading ? 'not-allowed' : 'pointer',
+                  color: T.muted, fontSize: 20, lineHeight: 1, padding: 4,
+                  opacity: loading ? 0.3 : 1,
+                }}
+              >
+                ✕
               </button>
             </div>
+
             {loading ? (
-              <div className="flex-1 flex flex-col items-center justify-center gap-4 py-32">
-                <Loader2 className="animate-spin text-indigo-600" size={48} />
-                <div className="text-center">
-                  <p className="text-sm font-black uppercase text-slate-600 tracking-wider">Submitting Inquiry...</p>
-                  <p className="text-[10px] font-bold text-slate-400 uppercase">Saving to database and syncing files</p>
-                </div>
+              <div style={{
+                flex: 1, display: 'flex', flexDirection: 'column',
+                alignItems: 'center', justifyContent: 'center', gap: 14, padding: '60px 0',
+              }}>
+                <Spinner size={36} />
+                <p style={{
+                  fontFamily: jost, fontSize: 9, fontWeight: 400,
+                  letterSpacing: '0.28em', textTransform: 'uppercase', color: T.muted,
+                }}>
+                  Submitting Inquiry…
+                </p>
               </div>
             ) : (
-              <form onSubmit={saveOrder} className="p-8 space-y-5 overflow-y-auto custom-scrollbar">
-                <input required placeholder="Project Title"
-                  className="w-full bg-slate-50 p-4 rounded-xl font-bold text-sm outline-none border-2 border-transparent focus:border-indigo-100 transition-all"
-                  value={formData.title} onChange={e => setFormData({ ...formData, title: e.target.value })} />
+              <form
+                onSubmit={saveOrder}
+                style={{ padding: '28px 36px 32px', overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 18 }}
+              >
+                {/* Project title */}
+                <div>
+                  <FieldLabel>Project Title</FieldLabel>
+                  <FocusInput
+                    value={formData.title}
+                    onChange={e => setFormData({ ...formData, title: e.target.value })}
+                    placeholder="Project title"
+                  />
+                </div>
 
-                <div className="grid grid-cols-2 gap-3">
-                  {[{ v: 'product', label: '🎁 Product Gifting' }, { v: 'offsite', label: '🏨 Offsite' }].map(({ v, label }) => (
-                    <button type="button" key={v} onClick={() => setFormData({ ...formData, orderType: v })}
-                      className={`py-3 rounded-xl font-black text-xs uppercase tracking-widest border-2 transition-all ${formData.orderType === v ? 'border-indigo-600 bg-indigo-50 text-indigo-600' : 'border-slate-200 bg-slate-50 text-slate-400 hover:border-slate-300'}`}>
+                {/* Order type toggle */}
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+                  {[
+                    { v: 'product', label: '🎁 Product Gifting' },
+                    { v: 'offsite', label: '🏨 Offsite' },
+                  ].map(({ v, label }) => (
+                    <button
+                      type="button"
+                      key={v}
+                      onClick={() => setFormData({ ...formData, orderType: v })}
+                      style={{
+                        padding: '12px 0', cursor: 'pointer',
+                        fontFamily: jost, fontSize: 9, fontWeight: 400,
+                        letterSpacing: '0.2em', textTransform: 'uppercase',
+                        background: formData.orderType === v ? T.dimBg : 'white',
+                        border: `1px solid ${formData.orderType === v ? T.gold : T.border}`,
+                        color: formData.orderType === v ? T.gold : T.muted,
+                        transition: 'all 0.2s',
+                      }}
+                    >
                       {label}
                     </button>
                   ))}
                 </div>
 
-                <div className="grid grid-cols-2 gap-4">
+                {/* Client + Contact */}
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
                   <CustomCreatableSelect
                     label="Client Company"
                     options={meta.clients.map(c => ({ label: c, value: c }))}
                     value={formData.clientName ? { label: formData.clientName, value: formData.clientName } : null}
-                    onChange={(v) => setFormData({ ...formData, clientName: v?.value || '', orderPlacedBy: '' })}
-                    onDelete={(val) => deleteMetaItem('clients', val)}
+                    onChange={v => setFormData({ ...formData, clientName: v?.value || '', orderPlacedBy: '' })}
+                    onDelete={val => deleteMetaItem('clients', val)}
                   />
                   <CustomCreatableSelect
                     label="Contact Person"
                     isDisabled={!formData.clientName}
                     options={(meta.clientContacts[formData.clientName] || []).map(c => ({ label: c, value: c }))}
                     value={formData.orderPlacedBy ? { label: formData.orderPlacedBy, value: formData.orderPlacedBy } : null}
-                    onChange={(v) => setFormData({ ...formData, orderPlacedBy: v?.value || '' })}
-                    onDelete={(val) => deleteMetaItem('contacts', val, formData.clientName)}
+                    onChange={v => setFormData({ ...formData, orderPlacedBy: v?.value || '' })}
+                    onDelete={val => deleteMetaItem('contacts', val, formData.clientName)}
                   />
                 </div>
 
-                <div className="space-y-2">
-                  <div className="flex items-center justify-between px-1">
-                    <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Requirements</label>
-                    <div className="flex gap-2 text-slate-400"><ImageIcon size={14} /><TableIcon size={14} /></div>
+                {/* Requirements (rich text) */}
+                <div>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+                    <FieldLabel>Requirements</FieldLabel>
+                    <div style={{ display: 'flex', gap: 8, color: T.muted }}>
+                      <ImageIcon size={12} /> <TableIcon size={12} />
+                    </div>
                   </div>
-                  <div ref={createEditorRef} contentEditable onPaste={handlePaste}
-                    onInput={(e) => setFormData({ ...formData, description: e.currentTarget.innerHTML })}
-                    className="w-full bg-slate-50 p-6 rounded-2xl text-sm outline-none min-h-[250px] border-2 border-transparent focus:border-indigo-100 transition-all shadow-inner custom-scrollbar"
-                    style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-word', display: 'block' }}
-                    data-placeholder="Describe project details... Paste images or Excel tables directly here." />
+                  <div
+                    ref={createEditorRef}
+                    contentEditable
+                    onPaste={handlePaste}
+                    onInput={e => setFormData({ ...formData, description: e.currentTarget.innerHTML })}
+                    style={{
+                      width: '100%', minHeight: 220, padding: '14px 16px',
+                      background: T.offwhite, border: `1px solid ${T.border}`,
+                      fontFamily: jost, fontSize: 13, fontWeight: 300, color: T.text,
+                      outline: 'none', boxSizing: 'border-box',
+                      whiteSpace: 'pre-wrap', wordBreak: 'break-word',
+                      transition: 'border-color 0.2s',
+                    }}
+                    data-placeholder="Describe project details… paste images or Excel tables here."
+                    onFocus={e => e.currentTarget.style.borderColor = T.gold}
+                    onBlur={e => e.currentTarget.style.borderColor = T.border}
+                  />
                 </div>
 
-                <div className="flex justify-between items-center bg-slate-50 p-4 rounded-xl border border-dashed border-slate-200">
-                  <label className="cursor-pointer bg-white text-slate-600 px-4 py-2 rounded-lg font-bold text-xs flex items-center gap-2 border border-slate-200 shadow-sm">
-                    <Plus size={14} /> Attach Files
-                    <input type="file" multiple className="hidden" onChange={(e) => handleFileUpload(e, false)} />
+                {/* Attachments */}
+                <div style={{
+                  display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+                  padding: '14px 16px',
+                  background: T.offwhite, border: `1px dashed ${T.border}`,
+                }}>
+                  <label style={{
+                    display: 'inline-flex', alignItems: 'center', gap: 7,
+                    padding: '8px 18px', cursor: 'pointer',
+                    background: 'white', border: `1px solid ${T.border}`,
+                    fontFamily: jost, fontSize: 9, fontWeight: 400,
+                    letterSpacing: '0.18em', textTransform: 'uppercase', color: T.muted,
+                  }}>
+                    <Plus size={12} /> Attach Files
+                    <input type="file" multiple style={{ display: 'none' }} onChange={e => handleFileUpload(e, false)} />
                   </label>
-                  <div className="text-[10px] font-bold text-slate-400">{formData.attachments.length} files attached</div>
+                  <span style={{ fontFamily: jost, fontSize: 10, fontWeight: 300, color: T.muted }}>
+                    {formData.attachments.length} file{formData.attachments.length !== 1 ? 's' : ''} attached
+                  </span>
                 </div>
 
-                <button type="submit" className="w-full bg-indigo-600 text-white py-4 rounded-xl font-black uppercase tracking-widest text-xs shadow-lg shadow-indigo-100">
-                  Submit Inquiry
-                </button>
+                {/* Submit */}
+                <div style={{ display: 'flex', justifyContent: 'flex-end', borderTop: `1px solid ${T.border}`, paddingTop: 20 }}>
+                  <GoldBtn style={{ padding: '13px 48px' }}>
+                    Submit Inquiry
+                  </GoldBtn>
+                </div>
               </form>
             )}
           </div>
         </div>
       )}
 
-      {/* ── Quote prompt ── */}
+      {/* ════════════════════════════════════════════════════════════════════
+          QUOTE PROMPT
+      ════════════════════════════════════════════════════════════════════ */}
       {quotePrompt && (
-        <div className="fixed inset-0 z-[100] bg-indigo-950/70 backdrop-blur-md flex items-center justify-center p-4">
-          <div className="bg-white p-8 rounded-[2.5rem] shadow-2xl max-w-sm w-full space-y-6">
-            <div className="text-center">
-              <div className="w-12 h-12 bg-indigo-100 text-indigo-600 rounded-2xl flex items-center justify-center mx-auto mb-4"><Hash size={24} /></div>
-              <h3 className="text-lg font-black uppercase">Finalize Quote</h3>
-              <p className="text-slate-500 text-[10px] font-bold uppercase mt-1">Assign a reference number to move to production</p>
+        <div style={{
+          position: 'fixed', inset: 0, background: 'rgba(14,21,32,0.82)', backdropFilter: 'blur(8px)',
+          display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 24, zIndex: 100,
+        }}>
+          <div style={{
+            background: 'white', border: `1px solid ${T.border}`,
+            padding: '40px', width: '100%', maxWidth: 380,
+          }}>
+            <div style={{ textAlign: 'center', marginBottom: 28 }}>
+              <div style={{
+                width: 44, height: 44, background: 'rgba(79,70,229,0.08)',
+                display: 'flex', alignItems: 'center', justifyContent: 'center',
+                margin: '0 auto 14px', color: T.indigo,
+              }}>
+                <Hash size={22} />
+              </div>
+              <h3 style={{ fontFamily: serif, fontSize: 26, fontWeight: 300, color: T.navy, margin: '0 0 8px' }}>
+                Finalize Quote
+              </h3>
+              <p style={{
+                fontFamily: jost, fontSize: 9, fontWeight: 400,
+                letterSpacing: '0.18em', textTransform: 'uppercase', color: T.muted,
+              }}>
+                Assign a reference number to move to production
+              </p>
             </div>
-            <input autoFocus id="refInput" placeholder="e.g. Q-2024-001"
-              className="w-full bg-slate-100 p-4 rounded-xl font-black text-center text-sm outline-none border-2 border-transparent focus:border-indigo-500 transition-all uppercase" />
-            <div className="flex gap-2">
-              <button onClick={() => setQuotePrompt(null)} className="flex-1 py-4 text-slate-400 font-black text-[10px] uppercase">Cancel</button>
-              <button onClick={() => { const val = document.getElementById('refInput').value.trim(); if (val) { updateOrder(quotePrompt._id, { status: 'ongoing', refNumber: val }); setQuotePrompt(null); } }}
-                className="flex-1 bg-indigo-600 text-white py-4 rounded-xl font-black text-[10px] uppercase">Confirm & Start</button>
+
+            <FocusInput
+              id="refInput"
+              placeholder="e.g. Q-2024-001"
+              value=""
+              onChange={() => {}}
+              style={{ textAlign: 'center', fontWeight: 500, textTransform: 'uppercase', marginBottom: 20 }}
+            />
+
+            <div style={{ display: 'flex', gap: 12, marginTop: 8 }}>
+              <GhostBtn onClick={() => setQuotePrompt(null)} style={{ flex: 1, textAlign: 'center', padding: '12px 0' }}>
+                Cancel
+              </GhostBtn>
+              <GoldBtn
+                onClick={() => {
+                  const val = document.getElementById('refInput')?.value?.trim();
+                  if (val) { updateOrder(quotePrompt._id, { status: 'ongoing', refNumber: val }); setQuotePrompt(null); }
+                }}
+                style={{ flex: 1, textAlign: 'center' }}
+              >
+                Confirm & Start
+              </GoldBtn>
             </div>
           </div>
         </div>
       )}
 
-      {/* ── Completion prompt ── */}
+      {/* ════════════════════════════════════════════════════════════════════
+          COMPLETION PROMPT
+      ════════════════════════════════════════════════════════════════════ */}
       {completionPrompt && (
-        <div className="fixed inset-0 z-[100] bg-emerald-950/70 backdrop-blur-md flex items-center justify-center p-4">
-          <div className="bg-white p-8 rounded-[2.5rem] shadow-2xl max-w-sm w-full space-y-6">
-            <div className="text-center">
-              <div className="w-12 h-12 bg-emerald-100 text-emerald-600 rounded-2xl flex items-center justify-center mx-auto mb-4"><Receipt size={24} /></div>
-              <h3 className="text-lg font-black uppercase">Completed Order</h3>
-              <p className="text-slate-500 text-[10px] font-bold uppercase mt-1">Enter Final Invoice Number</p>
-              <p className="text-slate-500 text-[10px] font-bold uppercase mt-1">Before Moving to Completed State</p>
+        <div style={{
+          position: 'fixed', inset: 0, background: 'rgba(14,21,32,0.82)', backdropFilter: 'blur(8px)',
+          display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 24, zIndex: 100,
+        }}>
+          <div style={{
+            background: 'white', border: `1px solid ${T.border}`,
+            padding: '40px', width: '100%', maxWidth: 380,
+          }}>
+            <div style={{ textAlign: 'center', marginBottom: 28 }}>
+              <div style={{
+                width: 44, height: 44, background: 'rgba(5,150,105,0.08)',
+                display: 'flex', alignItems: 'center', justifyContent: 'center',
+                margin: '0 auto 14px', color: T.emerald,
+              }}>
+                <Receipt size={22} />
+              </div>
+              <h3 style={{ fontFamily: serif, fontSize: 26, fontWeight: 300, color: T.navy, margin: '0 0 8px' }}>
+                Completed Order
+              </h3>
+              <p style={{
+                fontFamily: jost, fontSize: 9, fontWeight: 400,
+                letterSpacing: '0.18em', textTransform: 'uppercase', color: T.muted,
+              }}>
+                Enter final invoice number before closing
+              </p>
             </div>
-            <input autoFocus id="invoiceInput" placeholder="e.g. INV-10293"
-              className="w-full bg-slate-100 p-4 rounded-xl font-black text-center text-sm outline-none border-2 border-transparent focus:border-emerald-500 transition-all uppercase" />
-            <div className="flex gap-2">
-              <button onClick={() => setCompletionPrompt(null)} className="flex-1 py-4 text-slate-400 font-black text-[10px] uppercase">Cancel</button>
-              <button onClick={() => { const val = document.getElementById('invoiceInput').value.trim(); if (val) { updateOrder(completionPrompt._id, { status: 'completed', invoiceNumber: val, completedAt: new Date().toISOString() }); setCompletionPrompt(null); } }}
-                className="flex-1 bg-emerald-600 text-white py-4 rounded-xl font-black text-[10px] uppercase">Save</button>
+
+            <FocusInput
+              id="invoiceInput"
+              placeholder="e.g. INV-10293"
+              value=""
+              onChange={() => {}}
+              style={{ textAlign: 'center', fontWeight: 500, textTransform: 'uppercase', marginBottom: 20 }}
+            />
+
+            <div style={{ display: 'flex', gap: 12, marginTop: 8 }}>
+              <GhostBtn onClick={() => setCompletionPrompt(null)} style={{ flex: 1, textAlign: 'center', padding: '12px 0' }}>
+                Cancel
+              </GhostBtn>
+              <GoldBtn
+                onClick={() => {
+                  const val = document.getElementById('invoiceInput')?.value?.trim();
+                  if (val) {
+                    updateOrder(completionPrompt._id, {
+                      status: 'completed', invoiceNumber: val,
+                      completedAt: new Date().toISOString(),
+                    });
+                    setCompletionPrompt(null);
+                  }
+                }}
+                style={{ flex: 1, textAlign: 'center' }}
+              >
+                Save
+              </GoldBtn>
             </div>
           </div>
         </div>
       )}
 
-      {/* ══════════════════════════════════════════════════════════════════════
+      {/* ════════════════════════════════════════════════════════════════════
           CLIENT CHECK MODAL
-          Three cases handled here, driven by clientCheckModal.mode:
-            'create'      → client not in DB at all
-            'add-contact' → client exists, but this contact is new
-      ══════════════════════════════════════════════════════════════════════ */}
+          mode: 'create'      — client not in DB
+          mode: 'add-contact' — client exists, contact is new
+      ════════════════════════════════════════════════════════════════════ */}
       {clientCheckModal && (
-        <div className="fixed inset-0 z-[300] flex items-center justify-center p-4"
-          style={{ background: 'rgba(15,23,42,0.75)', backdropFilter: 'blur(6px)' }}>
-          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-lg overflow-hidden">
-
+        <div style={{
+          position: 'fixed', inset: 0,
+          background: 'rgba(14,21,32,0.78)', backdropFilter: 'blur(6px)',
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          padding: 24, zIndex: 300,
+        }}>
+          <div style={{
+            background: 'white', border: `1px solid ${T.border}`,
+            width: '100%', maxWidth: 520, overflow: 'hidden',
+          }}>
             {/* Header */}
-            <div className="flex items-center justify-between px-6 py-4 border-b border-amber-100 bg-amber-50">
-              <div className="flex items-center gap-3">
-                <div className="w-9 h-9 bg-amber-100 rounded-xl flex items-center justify-center">
-                  {clientCheckModal.mode === 'create' ? '⚠️' : <UserPlus size={16} className="text-amber-600" />}
+            <div style={{
+              display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+              padding: '20px 28px', background: 'rgba(184,151,90,0.05)',
+              borderBottom: `1px solid ${T.borderG}`,
+            }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+                <div style={{
+                  width: 36, height: 36,
+                  background: 'rgba(184,151,90,0.1)',
+                  display: 'flex', alignItems: 'center', justifyContent: 'center',
+                  color: T.gold, fontSize: 18,
+                }}>
+                  {clientCheckModal.mode === 'create' ? '⚠️' : <UserPlus size={16} style={{ color: T.gold }} />}
                 </div>
                 <div>
-                  <div className="font-black text-sm text-slate-800">
+                  <p style={{
+                    fontFamily: jost, fontSize: 12, fontWeight: 500, color: T.text, margin: '0 0 3px',
+                  }}>
                     {clientCheckModal.mode === 'create' ? 'Client Not in Database' : 'New Contact Person'}
-                  </div>
-                  <div className="text-[11px] text-amber-700 font-bold mt-0.5">
+                  </p>
+                  <p style={{
+                    fontFamily: jost, fontSize: 10, fontWeight: 300, color: T.gold, margin: 0,
+                  }}>
                     {clientCheckModal.mode === 'create'
                       ? `"${clientCheckModal.clientName}" has no client record yet.`
                       : `"${clientCheckModal.contactName}" is not listed under ${clientCheckModal.companyName}.`
                     }
-                  </div>
+                  </p>
                 </div>
               </div>
-              <button onClick={() => setClientCheckModal(null)}
-                className="p-1.5 text-slate-400 hover:text-slate-700 rounded-lg hover:bg-slate-100 transition">
-                <X size={18} />
+              <button
+                onClick={() => setClientCheckModal(null)}
+                style={{
+                  background: 'none', border: 'none', cursor: 'pointer',
+                  color: T.muted, fontSize: 18, lineHeight: 1, padding: 4,
+                }}
+              >
+                ✕
               </button>
             </div>
 
-            {/* Body — switches between create-client and add-contact forms */}
+            {/* Body */}
             {clientCheckModal.mode === 'create' ? (
               <ClientCreateInlineForm
                 clientName={clientCheckModal.clientName}
@@ -1237,8 +2160,8 @@ export default function App() {
                         portalUrl:   clientCheckModal.portalUrl,
                       });
                       showToast('success', `Portal link sent to ${emailContact.email}`);
-                    } catch (e) {
-                      showToast('error', 'Client created but email failed: ' + e.message);
+                    } catch (err) {
+                      showToast('error', 'Client created but email failed: ' + err.message);
                     }
                   } else {
                     showToast('warning', 'Client created. Add an email address to send the portal link.');
@@ -1270,8 +2193,8 @@ export default function App() {
                         portalUrl:   clientCheckModal.portalUrl,
                       });
                       showToast('success', `Contact added & portal link sent to ${newContact.email}`);
-                    } catch (e) {
-                      showToast('error', 'Contact added but email failed: ' + e.message);
+                    } catch (err) {
+                      showToast('error', 'Contact added but email failed: ' + err.message);
                     }
                   } else {
                     showToast('warning', 'Contact added. No email provided — portal link not sent.');
@@ -1284,27 +2207,39 @@ export default function App() {
         </div>
       )}
 
-      {/* ── Client Portal Editor ── */}
+      {/* ════════════════════════════════════════════════════════════════════
+          CLIENT PORTAL EDITOR DRAWER
+      ════════════════════════════════════════════════════════════════════ */}
       {chatOrder && (
-        <div className="fixed inset-0 z-[200] flex items-center justify-end"
-          style={{ background: 'rgba(15,23,42,0.5)', backdropFilter: 'blur(4px)' }}
-          onClick={e => { if (e.target === e.currentTarget) setChatOrder(null); }}>
-          <div className="h-full w-full max-w-lg bg-white shadow-2xl flex flex-col" style={{ animation: 'slideIn .25s ease', position: 'relative' }}>
-            <style>{`@keyframes slideIn{from{transform:translateX(100%)}to{transform:none}}`}</style>
+        <div
+          style={{
+            position: 'fixed', inset: 0, zIndex: 200,
+            background: 'rgba(14,21,32,0.55)', backdropFilter: 'blur(4px)',
+          }}
+          onClick={e => { if (e.target === e.currentTarget) setChatOrder(null); }}
+        >
+          <div style={{
+            position: 'absolute', top: 0, right: 0, bottom: 0,
+            width: '100%', maxWidth: 480,
+            background: 'white', display: 'flex', flexDirection: 'column',
+            animation: 'slideInRight 0.25s ease',
+          }}>
+            <style>{`@keyframes slideInRight{from{transform:translateX(100%)}to{transform:none}}`}</style>
             <ClientPortalEditor order={chatOrder} onClose={() => setChatOrder(null)} />
           </div>
         </div>
       )}
 
+      {/* ── Custom scrollbar CSS ─────────────────────────────────────────── */}
       <style>{`
-        .custom-scrollbar::-webkit-scrollbar { width: 6px; }
-        .custom-scrollbar::-webkit-scrollbar-track { background: transparent; }
-        .custom-scrollbar::-webkit-scrollbar-thumb { background: #e2e8f0; border-radius: 10px; }
-        .custom-scrollbar:empty:before { content: attr(data-placeholder); color: #94a3b8; font-weight: 600; }
-        [contentEditable] table { border-collapse: collapse; width: 100%; margin: 10px 0; border: 1px solid #e2e8f0; font-size: 12px; }
-        [contentEditable] td, [contentEditable] th { border: 1px solid #e2e8f0; padding: 6px; }
-        [contentEditable] th { background: #f8fafc; }
-        [contentEditable] img { cursor: default; }
+        ::-webkit-scrollbar { width: 5px; }
+        ::-webkit-scrollbar-track { background: transparent; }
+        ::-webkit-scrollbar-thumb { background: rgba(184,151,90,0.25); border-radius: 10px; }
+        [contentEditable]:empty:before { content: attr(data-placeholder); color: #aaa; }
+        [contentEditable] table { border-collapse: collapse; width: 100%; margin: 8px 0; border: 1px solid rgba(0,0,0,0.07); font-size: 12px; }
+        [contentEditable] td, [contentEditable] th { border: 1px solid rgba(0,0,0,0.07); padding: 6px 10px; }
+        [contentEditable] th { background: #faf8f5; }
+        @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
       `}</style>
     </div>
   );

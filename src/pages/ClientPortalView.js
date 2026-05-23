@@ -1867,7 +1867,7 @@ const CostCalculator = ({ portal, wishlisted=new Set() }) => {
         merged[id] = { ...(persistedCalc[id] || {}), ...c };
       });
       log.debug('Persisting calculator state', { slug });
-      fetch(`/api/portal/public/${slug}/calculator`, {
+      fetch(`${BASE_URL}/portal/public/${slug}/calculator`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ calculatorState: merged }),
