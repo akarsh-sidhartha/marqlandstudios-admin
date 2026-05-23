@@ -20,7 +20,7 @@ import { requestNotifPermission, pushNotif, subscribeToPortalPush } from '../uti
 // Always use the public website URL for portal links — NOT window.location.origin.
 // This admin panel runs on admin.marqlandstudios.com, but clients open links on
 // marqlandstudios.com.  Keep in sync with CLIENT_URL in backend .env.
-const CLIENT_BASE_URL = import.meta.env.VITE_CLIENT_URL?.replace(/\/$/, '') || 'https://www.marqlandstudios.com';
+const CLIENT_BASE_URL = process.env.REACT_APP_CLIENT_URL?.replace(/\/$/, '') || 'https://www.marqlandstudios.com';
 const ClientPortalEditor = ({ order, onClose }) => {
   const { user }                    = useAuth();
   const [portal, setPortal]         = useState(null);

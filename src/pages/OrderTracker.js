@@ -17,7 +17,7 @@ const CC_EMAIL = 'info@marqland.com';
 // Portal links sent to clients must always point to the public website, not to
 // whatever domain this admin panel happens to be running on.
 // Matches CLIENT_URL in backend .env and VITE_CLIENT_URL in the admin .env.
-const CLIENT_BASE_URL = import.meta.env.VITE_CLIENT_URL?.replace(/\/$/, '') || 'https://www.marqlandstudios.com';
+const CLIENT_BASE_URL = process.env.REACT_APP_CLIENT_URL?.replace(/\/$/, '') || 'https://www.marqlandstudios.com';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Inline form: CREATE a brand-new client + contact
