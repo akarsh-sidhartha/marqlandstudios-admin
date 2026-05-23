@@ -75,11 +75,11 @@ export const BASE_URL = resolveBaseUrl();
 
 /**
  * Server root without the /api suffix.
- * Use this to build static asset URLs, e.g. `${API_ROOT}${product.imageUrl}`
- * Note: after the R2 migration, imageUrl fields will be full https:// URLs
- * and won't need this prefix.
+ * Uses a trailing-replace so "https://api.marqlandstudios.com/api"
+ * becomes "https://api.marqlandstudios.com" — not "https:/.marqlandstudios.com"
+ * which is what .replace('/api', '') (first-match) incorrectly produces.
  */
-export const API_ROOT = BASE_URL.replace('/api', '');
+export const API_ROOT = BASE_URL.replace(/\/api$/, '');
 
 /** @deprecated Use BASE_URL directly. Kept for backward compatibility. */
 export const getBaseUrl = () => BASE_URL;
