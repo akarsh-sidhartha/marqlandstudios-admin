@@ -12,7 +12,7 @@ const psApi = {
 };
 
 // Image base: in dev the backend is on :5000, in production same origin
-const IMAGE_BASE = process.env.REACT_APP_IMAGE_BASE || '';
+const IMAGE_BASE = process.env.REACT_APP_API_URL || '';
 import {
   Trash2, Upload, Plus, LayoutGrid,
   AlertTriangle, RefreshCw, ChevronRight,
