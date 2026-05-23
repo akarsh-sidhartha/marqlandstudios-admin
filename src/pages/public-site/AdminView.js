@@ -12,7 +12,8 @@ const psApi = {
 };
 
 // Image base: in dev the backend is on :5000, in production same origin
-const IMAGE_BASE = process.env.REACT_APP_API_URL || '';
+//const IMAGE_BASE = process.env.REACT_APP_API_URL || '';
+
 import {
   Trash2, Upload, Plus, LayoutGrid,
   AlertTriangle, RefreshCw, ChevronRight,
@@ -352,7 +353,7 @@ const AdminView = () => {
                     <div key={cat.id} className="relative group bg-white rounded-[2rem] overflow-hidden border border-slate-100 shadow-sm hover:shadow-xl transition-all cursor-pointer h-64"
                       onClick={() => setSelectedCat(cat)}>
                       {cover ? (
-                        <img src={`${IMAGE_BASE}${cover.url}`} className="w-full h-full object-cover transition-transform duration-500 group-hover:scale-105" alt={cat.name} />
+                        <img src={cover.url} className="w-full h-full object-cover ..." alt={cat.name} />
                       ) : (
                         <div className="w-full h-full flex items-center justify-center text-slate-200 bg-slate-50">
                           <LayoutGrid size={40} strokeWidth={1} />
@@ -430,7 +431,7 @@ const AdminView = () => {
                             onDragOver={e => onDragOver(e, idx)}
                             onDragEnd={onDragEnd}
                             className={`relative group aspect-square rounded-[2rem] overflow-hidden border-4 transition-all ${img.isCover && isGenericView ? 'border-black shadow-lg z-10 cursor-default' : 'border-transparent cursor-move'}`}>
-                            <img src={`${IMAGE_BASE}${img.url}`} className="w-full h-full object-cover" alt="asset" />
+                            <img src={img.url} className="w-full h-full object-cover" alt="asset" />
                             <div className="absolute inset-0 bg-black/20 opacity-0 group-hover:opacity-100 transition-all flex flex-col items-center justify-center pointer-events-none">
                               {canDrag && <GripVertical className="text-white opacity-50" size={24} />}
                               {isGenericView && !img.isCover && (
