@@ -15,6 +15,12 @@ import { requestNotifPermission, pushNotif, subscribeToPortalPush } from '../uti
  * The file input MUST be a direct child of the root div — this ensures
  * position:absolute resolves correctly and .click() works in all browsers.
  */
+
+// ── Public client-facing domain ───────────────────────────────────────────────
+// Always use the public website URL for portal links — NOT window.location.origin.
+// This admin panel runs on admin.marqlandstudios.com, but clients open links on
+// marqlandstudios.com.  Keep in sync with CLIENT_URL in backend .env.
+const CLIENT_BASE_URL = import.meta.env.VITE_CLIENT_URL?.replace(/\/$/, '') || 'https://www.marqlandstudios.com';
 const ClientPortalEditor = ({ order, onClose }) => {
   const { user }                    = useAuth();
   const [portal, setPortal]         = useState(null);
@@ -98,9 +104,10 @@ const ClientPortalEditor = ({ order, onClose }) => {
   };
 
   const fallbackSlug = order.refNumber?.toLowerCase().replace(/[^a-z0-9]+/g, '-');
+  // Always link to the public client domain, never to the admin domain
   const portalUrl = portal?.slug
-    ? `${window.location.origin}/p/${portal.slug}`
-    : `${window.location.origin}/p/${fallbackSlug}`;
+    ? `${CLIENT_BASE_URL}/p/${portal.slug}`
+    : `${CLIENT_BASE_URL}/p/${fallbackSlug}`;
 
   useEffect(() => {
     requestNotifPermission();

@@ -13,6 +13,12 @@ import { usePopup } from '../components/AppPopups';
 
 const CC_EMAIL = 'info@marqland.com';
 
+// ── Public client-facing domain ───────────────────────────────────────────────
+// Portal links sent to clients must always point to the public website, not to
+// whatever domain this admin panel happens to be running on.
+// Matches CLIENT_URL in backend .env and VITE_CLIENT_URL in the admin .env.
+const CLIENT_BASE_URL = import.meta.env.VITE_CLIENT_URL?.replace(/\/$/, '') || 'https://www.marqlandstudios.com';
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Inline form: CREATE a brand-new client + contact
 // Pre-fills companyName and contactName from the order form so user only needs
@@ -502,7 +508,7 @@ export default function App() {
         // frontend will always produce the wrong value (missing the token prefix).
         const savedOrder = res.data;
         let portalSlug = generatedRef.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
-        let portalUrl  = `${window.location.origin}/p/${portalSlug}`;
+        let portalUrl  = `${CLIENT_BASE_URL}/p/${portalSlug}`;
         try {
           const portalRes = await api.post('/portal', {
             orderId:    savedOrder._id,
@@ -513,14 +519,14 @@ export default function App() {
           });
           if (portalRes.data?.slug) {
             portalSlug = portalRes.data.slug;
-            portalUrl  = `${window.location.origin}/p/${portalSlug}`;
+            portalUrl  = `${CLIENT_BASE_URL}/p/${portalSlug}`;
             console.log('✅ Portal created with slug:', portalSlug);
           }
         } catch (portalCreateErr) {
           // 409 = portal already exists for this order — fetch the existing one
           if (portalCreateErr.response?.status === 409 && portalCreateErr.response.data?.portal?.slug) {
             portalSlug = portalCreateErr.response.data.portal.slug;
-            portalUrl  = `${window.location.origin}/p/${portalSlug}`;
+            portalUrl  = `${CLIENT_BASE_URL}/p/${portalSlug}`;
             console.log('ℹ️ Portal already existed, slug:', portalSlug);
           } else {
             console.warn('Portal creation failed — slug may be wrong:', portalCreateErr.message);
@@ -597,7 +603,7 @@ export default function App() {
             orderRef:    generatedRef,
             title:       payload.title,
             portalSlug,
-            portalUrl:   `${window.location.origin}/p/${portalSlug}`,
+            portalUrl:   `${CLIENT_BASE_URL}/p/${portalSlug}`,
           });
         }
       }
@@ -780,7 +786,7 @@ export default function App() {
           })()}
           {(order.status === 'inquiry' || order.status === 'ongoing') && (() => {
             const slug      = order.refNumber?.toLowerCase().replace(/[^a-z0-9]+/g, '-');
-            const portalUrl = `${window.location.origin}/p/${slug}`;
+            const portalUrl = `${CLIENT_BASE_URL}/p/${slug}`;
             const alreadySent = sentLinks[order._id];
             const justCopied  = copiedId === order._id;
             if (alreadySent) {
