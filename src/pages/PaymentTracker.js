@@ -14,20 +14,20 @@ const log = createLogger('PaymentTracker');
 
 // ── Design tokens (mirrors ClientList) ───────────────────────────────────────
 const T = {
-  navy:    '#0e1520',
-  gold:    '#b8975a',
-  gold2:   '#d4b06a',
-  offwhite:'#faf8f5',
-  text:    '#1a1a1a',
-  muted:   '#888',
-  border:  'rgba(0,0,0,0.07)',
+  navy: '#0e1520',
+  gold: '#b8975a',
+  gold2: '#d4b06a',
+  offwhite: '#faf8f5',
+  text: '#1a1a1a',
+  muted: '#888',
+  border: 'rgba(0,0,0,0.07)',
   borderG: 'rgba(184,151,90,0.18)',
-  dimBg:   'rgba(184,151,90,0.04)',
-  red:     '#dc2626',
-  green:   '#10b981',
-  blue:    '#1d4ed8',
+  dimBg: 'rgba(184,151,90,0.04)',
+  red: '#dc2626',
+  green: '#10b981',
+  blue: '#1d4ed8',
 };
-const jost  = '"Jost", sans-serif';
+const jost = '"Jost", sans-serif';
 const serif = '"Cormorant Garamond", Georgia, serif';
 
 
@@ -35,10 +35,10 @@ const serif = '"Cormorant Garamond", Georgia, serif';
 const loadScript = (src) =>
   new Promise((resolve) => {
     if (document.querySelector(`script[src="${src}"]`)) { resolve(true); return; }
-    const s    = document.createElement('script');
-    s.src      = src;
-    s.onload   = () => resolve(true);
-    s.onerror  = () => resolve(false);
+    const s = document.createElement('script');
+    s.src = src;
+    s.onload = () => resolve(true);
+    s.onerror = () => resolve(false);
     document.head.appendChild(s);
   });
 
@@ -55,14 +55,14 @@ const fmtN = (n = 0) =>
 const fmtDate = (d) =>
   d
     ? new Date(d).toLocaleDateString('en-IN', {
-        day: '2-digit', month: 'short', year: 'numeric',
-      })
+      day: '2-digit', month: 'short', year: 'numeric',
+    })
     : '—';
 
 const getFinancialDetails = (dateStr) => {
   const d = dateStr ? new Date(dateStr) : new Date();
   if (isNaN(d.getTime())) return { month: 'Unknown', fy: 'Unknown' };
-  const y  = d.getFullYear();
+  const y = d.getFullYear();
   const sh = (n) => String(n).slice(-2).padStart(2, '0');
   const fy = d.getMonth() < 3 ? `${y - 1}-${sh(y)}` : `${y}-${sh(y + 1)}`;
   return { month: d.toLocaleString('default', { month: 'long' }), fy };
@@ -84,8 +84,8 @@ const normalizeFY = (fy) => {
 // Always use these proxy routes instead: the server fetches a fresh download URL
 // from Graph API and pipes the bytes back to the browser directly.
 const proxyUrl = {
-  invoice:    (id) => `/api/payment-tracker/invoices/${id}/file`,
-  piAttach:   (id) => `/api/payment-tracker/pi/${id}/attachment`,
+  invoice: (id) => `/api/payment-tracker/invoices/${id}/file`,
+  piAttach: (id) => `/api/payment-tracker/pi/${id}/attachment`,
   payReceipt: (id) => `/api/payment-tracker/payments/${id}/screenshot`,
 };
 
@@ -93,17 +93,17 @@ const proxyUrl = {
 const compressImage = (b64) =>
   new Promise((resolve) => {
     const img = new Image();
-    img.src   = b64;
+    img.src = b64;
     img.onload = () => {
-      const c   = document.createElement('canvas');
-      let w     = img.width;
-      let h     = img.height;
-      const M   = 1600;
+      const c = document.createElement('canvas');
+      let w = img.width;
+      let h = img.height;
+      const M = 1600;
       if (w > h ? w > M : h > M) {
         if (w > h) { h = (h * M) / w; w = M; }
-        else       { w = (w * M) / h; h = M; }
+        else { w = (w * M) / h; h = M; }
       }
-      c.width  = w;
+      c.width = w;
       c.height = h;
       c.getContext('2d').drawImage(img, 0, 0, w, h);
       resolve(c.toDataURL('image/jpeg', 0.85));
@@ -114,15 +114,15 @@ const compressImage = (b64) =>
 
 // ── Status metadata ───────────────────────────────────────────────────────────
 const STATUS_META = {
-  pending:    { label: 'Pending',    color: '#f59e0b', bg: '#fef3c7' },
-  partial:    { label: 'Partial',    color: '#3b82f6', bg: '#dbeafe' },
+  pending: { label: 'Pending', color: '#f59e0b', bg: '#fef3c7' },
+  partial: { label: 'Partial', color: '#3b82f6', bg: '#dbeafe' },
   fully_paid: { label: 'Fully Paid', color: '#10b981', bg: '#d1fae5' },
-  invoiced:   { label: 'Invoiced',   color: '#8b5cf6', bg: '#ede9fe' },
-  cancelled:  { label: 'Cancelled',  color: '#6b7280', bg: '#f3f4f6' },
-  paid:       { label: 'Paid',       color: '#10b981', bg: '#d1fae5' },
-  overdue:    { label: 'Overdue',    color: '#ef4444', bg: '#fee2e2' },
-  recorded:   { label: 'Recorded',   color: '#f59e0b', bg: '#fef3c7' },
-  advance:    { label: 'Advance',    color: '#8b5cf6', bg: '#ede9fe' },
+  invoiced: { label: 'Invoiced', color: '#8b5cf6', bg: '#ede9fe' },
+  cancelled: { label: 'Cancelled', color: '#6b7280', bg: '#f3f4f6' },
+  paid: { label: 'Paid', color: '#10b981', bg: '#d1fae5' },
+  overdue: { label: 'Overdue', color: '#ef4444', bg: '#fee2e2' },
+  recorded: { label: 'Recorded', color: '#f59e0b', bg: '#fef3c7' },
+  advance: { label: 'Advance', color: '#8b5cf6', bg: '#ede9fe' },
 };
 
 
@@ -138,8 +138,8 @@ const IS = {
 
 const IShi = (hi) => ({
   ...IS,
-  border:     hi ? `1px solid ${T.gold}` : IS.border,
-  background: hi ? T.dimBg              : '#fff',
+  border: hi ? `1px solid ${T.gold}` : IS.border,
+  background: hi ? T.dimBg : '#fff',
 });
 
 
@@ -165,7 +165,7 @@ function Badge({ status }) {
 }
 
 function ProgressBar({ paid, total, height = 6 }) {
-  const pct   = total > 0 ? Math.min(100, (paid / total) * 100) : 0;
+  const pct = total > 0 ? Math.min(100, (paid / total) * 100) : 0;
   const color = pct === 100 ? '#10b981' : pct > 0 ? '#3b82f6' : '#e5e7eb';
   return (
     <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
@@ -299,7 +299,7 @@ const ERROR_MESSAGES = {
   500: 'A server error occurred. Please try again or contact support.',
   502: 'The server is temporarily unavailable. Please try again shortly.',
   503: 'This feature is temporarily disabled. Please try again later.',
-  0:   'Network error — check your internet connection and try again.',
+  0: 'Network error — check your internet connection and try again.',
 };
 
 /**
@@ -336,9 +336,9 @@ function AutoFillBanner({ count }) {
 function ScanBanner({ result, msg }) {
   if (!result) return null;
   const map = {
-    success: { bg: '#f0fdf4', bl: T.green,  c: T.green,  i: '✓' },
-    partial: { bg: T.dimBg,  bl: T.gold,   c: T.gold,   i: '⚠' },
-    error:   { bg: '#fef2f2', bl: T.red,    c: T.red,    i: '✕' },
+    success: { bg: '#f0fdf4', bl: T.green, c: T.green, i: '✓' },
+    partial: { bg: T.dimBg, bl: T.gold, c: T.gold, i: '⚠' },
+    error: { bg: '#fef2f2', bl: T.red, c: T.red, i: '✕' },
   };
   const s = map[result];
   return (
@@ -355,26 +355,36 @@ function ScanBanner({ result, msg }) {
 
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// DOC LINK — smart document viewer
-//   • Image URLs / base64  → opens an inline lightbox overlay
-//   • PDF / OneDrive URLs  → opens in a new browser tab
-//   • mimeType is used as the hint when the URL alone is ambiguous
+// DOC LINK — smart inline document viewer
+//
+//   Proxy routes (/api/payment-tracker/…) are fetched through the axios `api`
+//   instance.  The axios baseURL already ends in "/api", so we must strip the
+//   leading "/api" from the path before calling api.get() — otherwise the
+//   request goes to /api/api/… and returns a 404.
+//
+//   Everything (images AND PDFs) is shown in an inline popup — no new tab.
+//   OneDrive share-links (sharepoint / 1drv.ms) open in a new tab because
+//   they require the user to be signed into Microsoft 365.
 // ═══════════════════════════════════════════════════════════════════════════════
 function DocLink({ url, mimeType, label = 'View', style: extraStyle }) {
-  const [lightbox, setLightbox] = useState(false);
+  const [popup, setPopup] = useState(false);
+  const [blobUrl, setBlobUrl] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [fetchErr, setFetchErr] = useState(null);
 
   if (!url) return null;
 
-  const isPdf      = mimeType === 'application/pdf'
-                     || url.startsWith('data:application/pdf')
-                     || /\.pdf(\?|$)/i.test(url);
-  const isBase64   = url.startsWith('data:');
+  const isProxyUrl = url.startsWith('/api/');
+  const isBase64 = url.startsWith('data:');
   const isOneDrive = /onedrive|sharepoint|1drv\.ms/i.test(url);
-  const isImage    = !isPdf && (
-                       isBase64 ||
-                       mimeType?.startsWith('image/') ||
-                       /\.(png|jpe?g|gif|webp|bmp)(\?|$)/i.test(url)
-                     );
+  const isPdf = mimeType === 'application/pdf'
+    || url.startsWith('data:application/pdf')
+    || /\.pdf(\?|$)/i.test(url);
+  const isImage = !isPdf && (
+    isBase64 ||
+    mimeType?.startsWith('image/') ||
+    /\.(png|jpe?g|gif|webp|bmp)(\?|$)/i.test(url)
+  );
 
   const defaultStyle = {
     display: 'inline-flex', alignItems: 'center', gap: 4,
@@ -385,70 +395,112 @@ function DocLink({ url, mimeType, label = 'View', style: extraStyle }) {
   };
   const merged = { ...defaultStyle, ...(extraStyle || {}) };
 
-  // Images → lightbox
-  if (isImage) {
-    return (
-      <>
-        <button onClick={() => setLightbox(true)} style={merged}>
-          <ImageIcon size={11} /> {label}
-        </button>
+  // Strip the leading /api so axios (baseURL already ends in /api) doesn't double it.
+  // e.g.  /api/payment-tracker/pi/xxx/attachment
+  //    →  /payment-tracker/pi/xxx/attachment
+  //    →  http://localhost:5000/api/payment-tracker/pi/xxx/attachment  ✓
+  const toAxiosPath = (u) => u.replace(/^\/api/, '');
 
-        {lightbox && (
+  const fetchBlob = async () => {
+    if (blobUrl) return blobUrl;        // already cached
+    setLoading(true);
+    setFetchErr(null);
+    try {
+      const res = await api.get(toAxiosPath(url), { responseType: 'blob' });
+      const mime = res.headers['content-type'] || mimeType || 'application/octet-stream';
+      const objUrl = URL.createObjectURL(new Blob([res.data], { type: mime }));
+      setBlobUrl(objUrl);
+      setLoading(false);
+      return objUrl;
+    } catch (e) {
+      const status = e?.response?.status;
+      setFetchErr(status === 404 ? 'File not found on server.' : `Could not load document (${e.message})`);
+      setLoading(false);
+      return null;
+    }
+  };
+
+  const handleClick = async () => {
+    if (isOneDrive) { window.open(url, '_blank'); return; }
+    if (isProxyUrl) await fetchBlob();
+    setPopup(true);
+  };
+
+  // What to show inside the popup
+  const displayUrl = blobUrl || (isBase64 ? url : null);
+  const icon = isPdf ? <FileText size={11} /> : isImage ? <ImageIcon size={11} /> : <Eye size={11} />;
+
+  return (
+    <>
+      {/* ── Trigger ── */}
+      <button onClick={handleClick} disabled={loading} style={{ ...merged, opacity: loading ? 0.6 : 1 }}>
+        {loading ? '…' : <>{icon} {label}</>}
+      </button>
+
+      {/* ── Inline popup ── */}
+      {popup && (
+        <div
+          style={{
+            position: 'fixed', inset: 0, zIndex: 9999,
+            background: 'rgba(0,0,0,0.82)',
+            display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 24,
+          }}
+          onClick={() => setPopup(false)}
+        >
           <div
             style={{
-              position: 'fixed', inset: 0, zIndex: 9999,
-              background: 'rgba(0,0,0,0.88)',
-              display: 'flex', flexDirection: 'column',
-              alignItems: 'center', justifyContent: 'center', padding: 20,
+              position: 'relative', width: '90vw', maxWidth: 900,
+              maxHeight: '92vh', display: 'flex', flexDirection: 'column',
+              background: '#1e293b', borderRadius: 12,
+              boxShadow: '0 32px 80px rgba(0,0,0,0.6)',
             }}
-            onClick={() => setLightbox(false)}
+            onClick={(e) => e.stopPropagation()}
           >
-            <div
-              style={{ position: 'relative', maxWidth: '90vw', maxHeight: '90vh' }}
-              onClick={(e) => e.stopPropagation()}
-            >
-              <img
-                src={url}
-                alt="Document"
-                style={{ maxWidth: '100%', maxHeight: '85vh', objectFit: 'contain', borderRadius: 8, boxShadow: '0 25px 60px rgba(0,0,0,0.5)' }}
-              />
-              <button
-                onClick={() => setLightbox(false)}
-                style={{
-                  position: 'absolute', top: -12, right: -12,
-                  background: '#fff', border: 'none', borderRadius: '50%',
-                  width: 30, height: 30, cursor: 'pointer',
+            {/* Header */}
+            <div style={{
+              display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+              padding: '10px 16px', borderBottom: '1px solid rgba(255,255,255,0.1)', flexShrink: 0,
+            }}>
+              <span style={{ color: '#94a3b8', fontSize: 12, fontFamily: jost }}>
+                {isPdf ? '📄 PDF Document' : isImage ? '🖼 Image' : '📎 Document'}
+              </span>
+              <div style={{ display: 'flex', gap: 8 }}>
+                {displayUrl && (
+                  <a href={displayUrl} download="document" style={{
+                    display: 'inline-flex', alignItems: 'center', gap: 4,
+                    background: 'rgba(255,255,255,0.1)', color: '#fff',
+                    borderRadius: 6, padding: '4px 10px', fontSize: 11,
+                    fontWeight: 600, textDecoration: 'none', fontFamily: jost,
+                  }}>
+                    <Download size={11} /> Download
+                  </a>
+                )}
+                <button onClick={() => setPopup(false)} style={{
+                  background: 'rgba(255,255,255,0.1)', border: 'none', borderRadius: 6,
+                  width: 28, height: 28, cursor: 'pointer', color: '#fff',
                   display: 'flex', alignItems: 'center', justifyContent: 'center',
-                  boxShadow: '0 2px 8px rgba(0,0,0,0.3)',
-                }}
-              >
-                <X size={15} />
-              </button>
-              <a
-                href={url}
-                download="document"
-                style={{
-                  position: 'absolute', bottom: -40, left: '50%', transform: 'translateX(-50%)',
-                  background: 'rgba(255,255,255,0.15)', color: '#fff',
-                  borderRadius: 20, padding: '5px 14px', fontSize: 11, fontWeight: 700,
-                  textDecoration: 'none', display: 'flex', alignItems: 'center', gap: 5,
-                }}
-              >
-                <Download size={11} /> Download
-              </a>
+                }}>
+                  <X size={14} />
+                </button>
+              </div>
+            </div>
+
+            {/* Body */}
+            <div style={{ flex: 1, overflow: 'auto', display: 'flex', alignItems: 'center', justifyContent: 'center', minHeight: 0, padding: 16 }}>
+              {fetchErr ? (
+                <div style={{ color: '#f87171', fontSize: 13, textAlign: 'center', padding: 20 }}>⚠ {fetchErr}</div>
+              ) : !displayUrl ? (
+                <div style={{ color: '#94a3b8', fontSize: 13 }}>Loading…</div>
+              ) : isPdf ? (
+                <iframe src={displayUrl} style={{ width: '100%', height: '75vh', border: 'none', borderRadius: 6 }} title="PDF Document" />
+              ) : (
+                <img src={displayUrl} alt="Document" style={{ maxWidth: '100%', maxHeight: '75vh', objectFit: 'contain', borderRadius: 6 }} />
+              )}
             </div>
           </div>
-        )}
-      </>
-    );
-  }
-
-  // PDFs and OneDrive links → new tab
-  const icon = isPdf ? <FileText size={11} /> : isOneDrive ? <FolderOpen size={11} /> : <Eye size={11} />;
-  return (
-    <a href={url} target="_blank" rel="noreferrer" style={merged}>
-      {icon} {label}
-    </a>
+        </div>
+      )}
+    </>
   );
 }
 
@@ -462,14 +514,14 @@ function VendorSelect({
   onChange,
   highlighted,
   placeholder = 'Search & select vendor…',
-  showReset   = false,
+  showReset = false,
 }) {
-  const [q, setQ]       = useState('');
+  const [q, setQ] = useState('');
   const [open, setOpen] = useState(false);
-  const ref             = useRef();
-  const inputRef        = useRef();
-  const selected        = vendors.find((v) => v._id === value);
-  const filtered        = vendors.filter(
+  const ref = useRef();
+  const inputRef = useRef();
+  const selected = vendors.find((v) => v._id === value);
+  const filtered = vendors.filter(
     (v) => !q || v.companyName?.toLowerCase().includes(q.toLowerCase()),
   );
 
@@ -484,9 +536,9 @@ function VendorSelect({
     return () => document.removeEventListener('mousedown', handler);
   }, []);
 
-  const handleQ  = (e) => { setQ(e.target.value); setOpen(true); };
-  const select   = (v) => { onChange(v._id); setOpen(false); setQ(''); };
-  const clear    = (e) => {
+  const handleQ = (e) => { setQ(e.target.value); setOpen(true); };
+  const select = (v) => { onChange(v._id); setOpen(false); setQ(''); };
+  const clear = (e) => {
     e.stopPropagation();
     onChange('');
     setQ('');
@@ -584,8 +636,8 @@ function VendorSelect({
 // ═══════════════════════════════════════════════════════════════════════════════
 function UploadZone({ label, hint, accept, onFile, preview, onClear, scanning, children }) {
   const [drag, setDrag] = useState(false);
-  const ref             = useRef();
-  const handle          = (f) => f && onFile(f);
+  const ref = useRef();
+  const handle = (f) => f && onFile(f);
 
   useEffect(() => {
     const handler = (e) => {
@@ -617,10 +669,10 @@ function UploadZone({ label, hint, accept, onFile, preview, onClear, scanning, c
 
       {!preview ? (
         <div
-          onDragOver={(e)  => { e.preventDefault(); setDrag(true); }}
-          onDragLeave={()  => setDrag(false)}
-          onDrop={(e)      => { e.preventDefault(); setDrag(false); handle(e.dataTransfer.files[0]); }}
-          onClick={()      => ref.current?.click()}
+          onDragOver={(e) => { e.preventDefault(); setDrag(true); }}
+          onDragLeave={() => setDrag(false)}
+          onDrop={(e) => { e.preventDefault(); setDrag(false); handle(e.dataTransfer.files[0]); }}
+          onClick={() => ref.current?.click()}
           style={{
             border: `2px dashed ${drag ? '#3b82f6' : '#cbd5e1'}`,
             borderRadius: 12, padding: '28px 20px', textAlign: 'center',
@@ -703,7 +755,7 @@ let _geminiAvailable = null;
 async function checkGeminiQuota() {
   if (_geminiAvailable !== null) return _geminiAvailable;
   try {
-    const res        = await api.get('/payment-tracker/gemini-status');
+    const res = await api.get('/payment-tracker/gemini-status');
     _geminiAvailable = res.data.available !== false;
   } catch {
     _geminiAvailable = true; // if check fails, attempt the scan anyway
@@ -715,14 +767,14 @@ async function checkGeminiQuota() {
 // ── AI extraction via Gemini (server-side proxy) ──────────────────────────────
 async function extractViaGemini(file) {
   const b64 = await new Promise((resolve, reject) => {
-    const r    = new FileReader();
-    r.onload   = () => resolve(r.result);
-    r.onerror  = reject;
+    const r = new FileReader();
+    r.onload = () => resolve(r.result);
+    r.onerror = reject;
     r.readAsDataURL(file);
   });
-  const optimized  = file.type.startsWith('image/') ? await compressImage(b64) : b64;
+  const optimized = file.type.startsWith('image/') ? await compressImage(b64) : b64;
   const base64data = optimized.includes(',') ? optimized : b64;
-  const res        = await api.post('/payment-tracker/invoices/process', {
+  const res = await api.post('/payment-tracker/invoices/process', {
     image: base64data, mimeType: file.type,
   });
   if (res.status >= 400) throw new Error('Gemini extraction failed');
@@ -742,8 +794,8 @@ function ModeToggle({ autoRead, onChange }) {
       width: 'fit-content',
     }}>
       {[
-        { value: false, label: '✏️ Manual Entry',   desc: 'Type fields yourself' },
-        { value: true,  label: '✨ Auto Read (AI)',  desc: 'Gemini reads the document' },
+        { value: false, label: '✏️ Manual Entry', desc: 'Type fields yourself' },
+        { value: true, label: '✨ Auto Read (AI)', desc: 'Gemini reads the document' },
       ].map(({ value, label, desc }) => (
         <button
           key={String(value)}
@@ -777,18 +829,18 @@ function ModeToggle({ autoRead, onChange }) {
 // UPLOAD PI MODAL
 // ═══════════════════════════════════════════════════════════════════════════════
 function UploadPIModal({ vendors, onSave, onClose }) {
-  const [autoRead,    setAutoRead]    = useState(false);
-  const [preview,     setPreview]     = useState(null);
-  const [scanning,    setScanning]    = useState(false);
-  const [scanRes,     setScanRes]     = useState(null);
-  const [scanMsg,     setScanMsg]     = useState('');
-  const [af,          setAF]          = useState({});
-  const [saving,      setSaving]      = useState(false);
-  const [err,         setErr]         = useState('');
-  const [fileBase64,  setFileBase64]  = useState(null);
-  const [fileMime,    setFileMime]    = useState(null);
-  const [dupInfo,     setDupInfo]     = useState(null);
-  const [form,        setForm]        = useState({
+  const [autoRead, setAutoRead] = useState(false);
+  const [preview, setPreview] = useState(null);
+  const [scanning, setScanning] = useState(false);
+  const [scanRes, setScanRes] = useState(null);
+  const [scanMsg, setScanMsg] = useState('');
+  const [af, setAF] = useState({});
+  const [saving, setSaving] = useState(false);
+  const [err, setErr] = useState('');
+  const [fileBase64, setFileBase64] = useState(null);
+  const [fileMime, setFileMime] = useState(null);
+  const [dupInfo, setDupInfo] = useState(null);
+  const [form, setForm] = useState({
     piNumber: '', vendor: '',
     piDate: new Date().toISOString().split('T')[0],
     dueDate: '', totalAmount: '',
@@ -796,7 +848,7 @@ function UploadPIModal({ vendors, onSave, onClose }) {
   });
 
   const set = (k, v) => {
-    setForm((f)  => ({ ...f, [k]: v }));
+    setForm((f) => ({ ...f, [k]: v }));
     setAF((a) => { const n = { ...a }; delete n[k]; return n; });
   };
 
@@ -821,20 +873,20 @@ function UploadPIModal({ vendors, onSave, onClose }) {
     setScanning(true);
     setScanRes(null);
     try {
-      const ex     = await extractViaGemini(f);
+      const ex = await extractViaGemini(f);
       const filled = {};
-      if (ex.invoice_number) filled.piNumber    = ex.invoice_number;
-      if (ex.date)           filled.piDate      = ex.date;
-      if (ex.total_amount)   filled.totalAmount = String(ex.total_amount);
+      if (ex.invoice_number) filled.piNumber = ex.invoice_number;
+      if (ex.date) filled.piDate = ex.date;
+      if (ex.total_amount) filled.totalAmount = String(ex.total_amount);
       if (ex.vendor_name) {
         const m = vendors.find(
           (v) => v.companyName?.toLowerCase().includes(ex.vendor_name.toLowerCase()) ||
-                 ex.vendor_name.toLowerCase().includes(v.companyName?.toLowerCase()),
+            ex.vendor_name.toLowerCase().includes(v.companyName?.toLowerCase()),
         );
         if (m) filled.vendor = m._id;
       }
       const c = Object.keys(filled).length;
-      setForm((f)  => ({ ...f, ...filled }));
+      setForm((f) => ({ ...f, ...filled }));
       setAF(Object.fromEntries(Object.keys(filled).map((k) => [k, true])));
       setScanRes(c >= 2 ? 'success' : c > 0 ? 'partial' : 'error');
       setScanMsg(c >= 2 ? `${c} fields extracted.` : c > 0 ? `${c} field found.` : 'Nothing extracted — fill manually.');
@@ -849,8 +901,8 @@ function UploadPIModal({ vendors, onSave, onClose }) {
 
   const submit = async () => {
     setErr('');
-    if (!form.vendor)      { setErr('Select a vendor.'); return; }
-    if (!form.piNumber)    { setErr('PI Number required.'); return; }
+    if (!form.vendor) { setErr('Select a vendor.'); return; }
+    if (!form.piNumber) { setErr('PI Number required.'); return; }
     if (!form.totalAmount) { setErr('Total Amount required.'); return; }
 
     log.info('Saving PI', { piNumber: form.piNumber });
@@ -860,18 +912,23 @@ function UploadPIModal({ vendors, onSave, onClose }) {
       const fields = { ...form, totalAmount: parseFloat(form.totalAmount) };
       if (!fields.dueDate) delete fields.dueDate;
       Object.entries(fields).forEach(([k, v]) => {
-        if (v !== undefined && v !== null && v !== '') fd.append(k, v);
+        if (v === undefined || v === null || v === '') return;
+        if (Array.isArray(v)) {
+          if (v.length > 0) fd.append(k, JSON.stringify(v));
+          return;
+        }
+        fd.append(k, v);
       });
       if (fileBase64) {
         const [meta, data] = fileBase64.split(',');
-        const mime  = meta.match(/:(.*?);/)?.[1] || fileMime || 'application/octet-stream';
+        const mime = meta.match(/:(.*?);/)?.[1] || fileMime || 'application/octet-stream';
         const bytes = atob(data);
-        const arr   = new Uint8Array(bytes.length);
+        const arr = new Uint8Array(bytes.length);
         for (let i = 0; i < bytes.length; i++) arr[i] = bytes.charCodeAt(i);
         fd.append('attachment', new Blob([arr], { type: mime }),
           `pi-attachment${mime === 'application/pdf' ? '.pdf' : '.jpg'}`);
       }
-      const res     = await api.post('/payment-tracker/pi', fd, {
+      const res = await api.post('/payment-tracker/pi', fd, {
         headers: { 'Content-Type': 'multipart/form-data' },
       });
       const resData = res.data;
@@ -1041,10 +1098,10 @@ function UploadPIModal({ vendors, onSave, onClose }) {
           Cancel
         </button>
         {(() => {
-          const missing  = [];
-          if (!fileBase64)       missing.push('document');
-          if (!form.piNumber)    missing.push('PI number');
-          if (!form.vendor)      missing.push('vendor');
+          const missing = [];
+          if (!fileBase64) missing.push('document');
+          if (!form.piNumber) missing.push('PI number');
+          if (!form.vendor) missing.push('vendor');
           if (!form.totalAmount) missing.push('total amount');
           const disabled = saving || scanning || missing.length > 0;
           return (
@@ -1079,20 +1136,20 @@ function UploadPIModal({ vendors, onSave, onClose }) {
 // UPLOAD VENDOR INVOICE MODAL — vendor dropdown with GST auto-fill + save-back
 // ═══════════════════════════════════════════════════════════════════════════════
 function UploadInvoiceModal({ vendors, proformaInvoices, linkedPiId, onSave, onClose, refreshVendors }) {
-  const [autoRead,         setAutoRead]        = useState(false);
-  const [preview,          setPreview]         = useState(null);
-  const [scanning,         setScanning]        = useState(false);
-  const [scanRes,          setScanRes]         = useState(null);
-  const [scanMsg,          setScanMsg]         = useState('');
-  const [af,               setAF]              = useState({});
-  const [saving,           setSaving]          = useState(false);
-  const [err,              setErr]             = useState('');
-  const [gstSaved,         setGstSaved]        = useState(false);
+  const [autoRead, setAutoRead] = useState(false);
+  const [preview, setPreview] = useState(null);
+  const [scanning, setScanning] = useState(false);
+  const [scanRes, setScanRes] = useState(null);
+  const [scanMsg, setScanMsg] = useState('');
+  const [af, setAF] = useState({});
+  const [saving, setSaving] = useState(false);
+  const [err, setErr] = useState('');
+  const [gstSaved, setGstSaved] = useState(false);
   const [selectedVendorId, setSelectedVendorId] = useState('');
-  const [fileBase64,       setFileBase64]      = useState(null);
-  const [fileMime,         setFileMime]        = useState(null);
-  const [dupInfo,          setDupInfo]         = useState(null);
-  const [form,             setForm]            = useState({
+  const [fileBase64, setFileBase64] = useState(null);
+  const [fileMime, setFileMime] = useState(null);
+  const [dupInfo, setDupInfo] = useState(null);
+  const [form, setForm] = useState({
     vendor_name: '', vendor_gst: '', invoice_number: '',
     date: new Date().toISOString().split('T')[0],
     total_amount: '', cgst: '0', sgst: '0', igst: '0',
@@ -1100,7 +1157,7 @@ function UploadInvoiceModal({ vendors, proformaInvoices, linkedPiId, onSave, onC
   });
 
   const set = (k, v) => {
-    setForm((f)  => ({ ...f, [k]: v }));
+    setForm((f) => ({ ...f, [k]: v }));
     setAF((a) => { const n = { ...a }; delete n[k]; return n; });
   };
 
@@ -1112,7 +1169,7 @@ function UploadInvoiceModal({ vendors, proformaInvoices, linkedPiId, onSave, onC
     if (vendor) {
       set('vendor_name', vendor.companyName || '');
       if (vendor.gstNumber) { set('vendor_gst', vendor.gstNumber); setGstSaved(true); }
-      else                   { set('vendor_gst', ''); setGstSaved(false); }
+      else { set('vendor_gst', ''); setGstSaved(false); }
     }
   };
 
@@ -1145,18 +1202,18 @@ function UploadInvoiceModal({ vendors, proformaInvoices, linkedPiId, onSave, onC
     setScanning(true);
     setScanRes(null);
     try {
-      const ex     = await extractViaGemini(f);
+      const ex = await extractViaGemini(f);
       const filled = {};
-      ['vendor_name','vendor_gst','invoice_number','date','financialYear','month'].forEach(
+      ['vendor_name', 'vendor_gst', 'invoice_number', 'date', 'financialYear', 'month'].forEach(
         (k) => { if (ex[k]) filled[k] = ex[k]; },
       );
-      ['total_amount','cgst','sgst','igst'].forEach(
+      ['total_amount', 'cgst', 'sgst', 'igst'].forEach(
         (k) => { if (ex[k] != null) filled[k] = String(ex[k]); },
       );
       if (ex.vendor_name && !ex.vendor_gst) {
         const match = vendors.find(
           (v) => v.companyName?.toLowerCase().includes(ex.vendor_name.toLowerCase()) ||
-                 ex.vendor_name.toLowerCase().includes(v.companyName?.toLowerCase()),
+            ex.vendor_name.toLowerCase().includes(v.companyName?.toLowerCase()),
         );
         if (match) {
           setSelectedVendorId(match._id);
@@ -1164,7 +1221,7 @@ function UploadInvoiceModal({ vendors, proformaInvoices, linkedPiId, onSave, onC
         }
       }
       const c = Object.keys(filled).length;
-      setForm((f)  => ({ ...f, ...filled }));
+      setForm((f) => ({ ...f, ...filled }));
       setAF(Object.fromEntries(Object.keys(filled).map((k) => [k, true])));
       setScanRes(c >= 4 ? 'success' : c > 0 ? 'partial' : 'error');
       setScanMsg(c >= 4 ? `${c} fields extracted.` : c > 0 ? `${c} fields found — verify and fill remaining fields manually.` : 'Nothing extracted — please fill all fields manually.');
@@ -1193,7 +1250,7 @@ function UploadInvoiceModal({ vendors, proformaInvoices, linkedPiId, onSave, onC
   const submit = async () => {
     setErr('');
     if (!form.invoice_number) { setErr('Invoice number required.'); return; }
-    if (!form.total_amount)   { setErr('Total amount required.'); return; }
+    if (!form.total_amount) { setErr('Total amount required.'); return; }
     if (selectedVendorId && form.vendor_gst && !gstSaved) await saveGstToVendor();
 
     log.info('Saving vendor invoice', { invoiceNumber: form.invoice_number });
@@ -1203,29 +1260,34 @@ function UploadInvoiceModal({ vendors, proformaInvoices, linkedPiId, onSave, onC
       const fd = new FormData();
       const fields = {
         ...form,
-        total_amount:  parseFloat(form.total_amount),
-        cgst:          parseFloat(form.cgst) || 0,
-        sgst:          parseFloat(form.sgst) || 0,
-        igst:          parseFloat(form.igst) || 0,
-        mimeType:      fileMime   || 'image/jpeg',
-        receivedVia:   'manual_upload',
+        total_amount: parseFloat(form.total_amount),
+        cgst: parseFloat(form.cgst) || 0,
+        sgst: parseFloat(form.sgst) || 0,
+        igst: parseFloat(form.igst) || 0,
+        mimeType: fileMime || 'image/jpeg',
+        receivedVia: 'manual_upload',
         financialYear: form.financialYear || fy,
-        month:         form.month || month,
-        notes:         form.notes || 'Uploaded via Payment Tracker',
+        month: form.month || month,
+        notes: form.notes || 'Uploaded via Payment Tracker',
       };
       Object.entries(fields).forEach(([k, v]) => {
-        if (v !== undefined && v !== null && v !== '') fd.append(k, v);
+        if (v === undefined || v === null || v === '') return;
+        if (Array.isArray(v)) {
+          if (v.length > 0) fd.append(k, JSON.stringify(v));
+          return;
+        }
+        fd.append(k, v);
       });
       if (fileBase64) {
         const [meta, data] = fileBase64.split(',');
-        const mime  = meta.match(/:(.*?);/)?.[1] || fileMime || 'image/jpeg';
+        const mime = meta.match(/:(.*?);/)?.[1] || fileMime || 'image/jpeg';
         const bytes = atob(data);
-        const arr   = new Uint8Array(bytes.length);
+        const arr = new Uint8Array(bytes.length);
         for (let i = 0; i < bytes.length; i++) arr[i] = bytes.charCodeAt(i);
         fd.append('file', new Blob([arr], { type: mime }),
           `invoice${mime === 'application/pdf' ? '.pdf' : '.jpg'}`);
       }
-      const res     = await api.post('/payment-tracker/invoices', fd, {
+      const res = await api.post('/payment-tracker/invoices', fd, {
         headers: { 'Content-Type': 'multipart/form-data' },
       });
       const resData = res.data;
@@ -1236,7 +1298,7 @@ function UploadInvoiceModal({ vendors, proformaInvoices, linkedPiId, onSave, onC
       }
       if (res.status >= 400) throw new Error(resData.error || resData.message || 'Save failed');
       if (form.linkedPi) {
-        await api.patch(`/payment-tracker/pi/${form.linkedPi}`, { status: 'invoiced' }).catch(() => {});
+        await api.patch(`/payment-tracker/pi/${form.linkedPi}`, { status: 'invoiced' }).catch(() => { });
       }
       log.info('Vendor invoice saved', { invoiceNumber: form.invoice_number });
       onSave(resData);
@@ -1352,7 +1414,7 @@ function UploadInvoiceModal({ vendors, proformaInvoices, linkedPiId, onSave, onC
               style={{
                 ...IS, marginTop: 6, fontSize: 13,
                 background: af.vendor_name ? '#eff6ff' : '#fff',
-                border:     af.vendor_name ? '1.5px solid #3b82f6' : '1.5px solid #e2e8f0',
+                border: af.vendor_name ? '1.5px solid #3b82f6' : '1.5px solid #e2e8f0',
               }}
               value={form.vendor_name}
               onChange={(e) => set('vendor_name', e.target.value)}
@@ -1404,10 +1466,10 @@ function UploadInvoiceModal({ vendors, proformaInvoices, linkedPiId, onSave, onC
 
       {/* GST breakdown — CGST/SGST for intra-state, IGST for inter-state */}
       {(() => {
-        const gst     = form.vendor_gst?.trim() || '';
+        const gst = form.vendor_gst?.trim() || '';
         const isIntra = gst.length >= 2 && gst.startsWith('29');
         const isInter = gst.length >= 2 && !isIntra;
-        const dim     = { opacity: 0.35, pointerEvents: 'none', userSelect: 'none' };
+        const dim = { opacity: 0.35, pointerEvents: 'none', userSelect: 'none' };
         return (
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr 1fr', gap: '0 12px' }}>
             <Field label="Total Amount" required>
@@ -1461,22 +1523,22 @@ function UploadInvoiceModal({ vendors, proformaInvoices, linkedPiId, onSave, onC
           Cancel
         </button>
         {(() => {
-          const gst      = form.vendor_gst?.trim() || '';
-          const isIntra  = gst.length >= 2 && gst.startsWith('29');
-          const isInter  = gst.length >= 2 && !isIntra;
-          const cgst     = parseFloat(form.cgst) || 0;
-          const sgst     = parseFloat(form.sgst) || 0;
-          const igst     = parseFloat(form.igst) || 0;
-          const taxOk    = isIntra ? (cgst > 0 && sgst > 0)
-                         : isInter ? (igst > 0)
-                         : (cgst > 0 && sgst > 0) || igst > 0;
+          const gst = form.vendor_gst?.trim() || '';
+          const isIntra = gst.length >= 2 && gst.startsWith('29');
+          const isInter = gst.length >= 2 && !isIntra;
+          const cgst = parseFloat(form.cgst) || 0;
+          const sgst = parseFloat(form.sgst) || 0;
+          const igst = parseFloat(form.igst) || 0;
+          const taxOk = isIntra ? (cgst > 0 && sgst > 0)
+            : isInter ? (igst > 0)
+              : (cgst > 0 && sgst > 0) || igst > 0;
           const vendorOk = !!(selectedVendorId || form.vendor_name?.trim());
-          const missing  = [];
-          if (!fileBase64)              missing.push('document');
-          if (!form.invoice_number)     missing.push('invoice number');
-          if (!vendorOk)                missing.push('vendor name');
+          const missing = [];
+          if (!fileBase64) missing.push('document');
+          if (!form.invoice_number) missing.push('invoice number');
+          if (!vendorOk) missing.push('vendor name');
           if (!form.vendor_gst?.trim()) missing.push('GSTIN');
-          if (!form.total_amount)       missing.push('total amount');
+          if (!form.total_amount) missing.push('total amount');
           if (!taxOk) missing.push(isInter ? 'IGST' : 'CGST & SGST');
           const disabled = saving || scanning || missing.length > 0;
           return (
@@ -1511,19 +1573,19 @@ function UploadInvoiceModal({ vendors, proformaInvoices, linkedPiId, onSave, onC
 // RECORD PAYMENT MODAL
 // ═══════════════════════════════════════════════════════════════════════════════
 function RecordPaymentModal({ vendors, proformaInvoices, vendorInvoices, payments, onSave, onClose }) {
-  const [autoRead,    setAutoRead]    = useState(false);
-  const [preview,     setPreview]     = useState(null);
-  const [scanning,    setScanning]    = useState(false);
-  const [scanRes,     setScanRes]     = useState(null);
-  const [scanMsg,     setScanMsg]     = useState('');
-  const [af,          setAF]          = useState({});
-  const [saving,      setSaving]      = useState(false);
-  const [err,         setErr]         = useState('');
-  const [fileBase64,  setFileBase64]  = useState(null);
-  const [fileMime,    setFileMime]    = useState(null);
-  const [piSearch,    setPiSearch]    = useState('');
-  const [invSearch,   setInvSearch]   = useState('');
-  const [form,        setForm]        = useState({
+  const [autoRead, setAutoRead] = useState(false);
+  const [preview, setPreview] = useState(null);
+  const [scanning, setScanning] = useState(false);
+  const [scanRes, setScanRes] = useState(null);
+  const [scanMsg, setScanMsg] = useState('');
+  const [af, setAF] = useState({});
+  const [saving, setSaving] = useState(false);
+  const [err, setErr] = useState('');
+  const [fileBase64, setFileBase64] = useState(null);
+  const [fileMime, setFileMime] = useState(null);
+  const [piSearch, setPiSearch] = useState('');
+  const [invSearch, setInvSearch] = useState('');
+  const [form, setForm] = useState({
     vendor: '', paymentDate: new Date().toISOString().split('T')[0],
     amount: '', currency: 'INR', paymentMode: 'neft',
     bankRef: '', remarks: '', mappedTo: 'advance',
@@ -1531,7 +1593,7 @@ function RecordPaymentModal({ vendors, proformaInvoices, vendorInvoices, payment
   });
 
   const set = (k, v) => {
-    setForm((f)  => ({ ...f, [k]: v }));
+    setForm((f) => ({ ...f, [k]: v }));
     setAF((a) => { const n = { ...a }; delete n[k]; return n; });
   };
 
@@ -1543,8 +1605,8 @@ function RecordPaymentModal({ vendors, proformaInvoices, vendorInvoices, payment
   // Compute total already paid per invoice
   const paidByInvoice = (payments || []).reduce((acc, p) => {
     if (p.mappedTo === 'vendor_invoice' && p.vendorInvoice) {
-      const id   = String(p.vendorInvoice?._id || p.vendorInvoice);
-      acc[id]    = (acc[id] || 0) + p.amount;
+      const id = String(p.vendorInvoice?._id || p.vendorInvoice);
+      acc[id] = (acc[id] || 0) + p.amount;
     }
     return acc;
   }, {});
@@ -1576,19 +1638,19 @@ function RecordPaymentModal({ vendors, proformaInvoices, vendorInvoices, payment
     setScanning(true);
     setScanRes(null);
     try {
-      const ex     = await extractViaGemini(f);
+      const ex = await extractViaGemini(f);
       const filled = {};
-      if (ex.total_amount) filled.amount      = String(ex.total_amount);
-      if (ex.date)         filled.paymentDate = ex.date;
+      if (ex.total_amount) filled.amount = String(ex.total_amount);
+      if (ex.date) filled.paymentDate = ex.date;
       if (ex.vendor_name) {
         const m = vendors.find(
           (v) => v.companyName?.toLowerCase().includes(ex.vendor_name.toLowerCase()) ||
-                 ex.vendor_name.toLowerCase().includes(v.companyName?.toLowerCase()),
+            ex.vendor_name.toLowerCase().includes(v.companyName?.toLowerCase()),
         );
         if (m) filled.vendor = m._id;
       }
       const c = Object.keys(filled).length;
-      setForm((f)  => ({ ...f, ...filled }));
+      setForm((f) => ({ ...f, ...filled }));
       setAF(Object.fromEntries(Object.keys(filled).map((k) => [k, true])));
       setScanRes(c >= 2 ? 'success' : c > 0 ? 'partial' : 'error');
       setScanMsg(c >= 2 ? `${c} fields extracted.` : c > 0 ? `${c} field found.` : 'Nothing extracted.');
@@ -1605,7 +1667,7 @@ function RecordPaymentModal({ vendors, proformaInvoices, vendorInvoices, payment
     setErr('');
     if (!form.amount || !form.paymentDate) { setErr('Amount and date required.'); return; }
     if (form.mappedTo === 'proforma_invoice' && !form.proformaInvoice) { setErr('Select a PI.'); return; }
-    if (form.mappedTo === 'vendor_invoice'   && !form.vendorInvoice)   { setErr('Select an Invoice.'); return; }
+    if (form.mappedTo === 'vendor_invoice' && !form.vendorInvoice) { setErr('Select an Invoice.'); return; }
 
     log.info('Recording payment', { amount: form.amount, mappedTo: form.mappedTo });
     setSaving(true);
@@ -1613,16 +1675,21 @@ function RecordPaymentModal({ vendors, proformaInvoices, vendorInvoices, payment
       const fd = new FormData();
       const payload = { ...form, amount: parseFloat(form.amount) };
       if (payload.mappedTo !== 'proforma_invoice') delete payload.proformaInvoice;
-      if (payload.mappedTo !== 'vendor_invoice')   delete payload.vendorInvoice;
-      if (!payload.vendor)                          delete payload.vendor;
+      if (payload.mappedTo !== 'vendor_invoice') delete payload.vendorInvoice;
+      if (!payload.vendor) delete payload.vendor;
       Object.entries(payload).forEach(([k, v]) => {
-        if (v !== undefined && v !== null && v !== '') fd.append(k, v);
+        if (v === undefined || v === null || v === '') return;
+        if (Array.isArray(v)) {
+          if (v.length > 0) fd.append(k, JSON.stringify(v));
+          return;
+        }
+        fd.append(k, v);
       });
       if (fileBase64) {
         const [meta, data] = fileBase64.split(',');
-        const mime  = meta.match(/:(.*?);/)?.[1] || fileMime || 'image/jpeg';
+        const mime = meta.match(/:(.*?);/)?.[1] || fileMime || 'image/jpeg';
         const bytes = atob(data);
-        const arr   = new Uint8Array(bytes.length);
+        const arr = new Uint8Array(bytes.length);
         for (let i = 0; i < bytes.length; i++) arr[i] = bytes.charCodeAt(i);
         fd.append('screenshot', new Blob([arr], { type: mime }),
           `payment-screenshot${mime === 'application/pdf' ? '.pdf' : '.jpg'}`);
@@ -1676,9 +1743,9 @@ function RecordPaymentModal({ vendors, proformaInvoices, vendorInvoices, payment
       <Field label="Map Payment Against" required>
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 8 }}>
           {[
-            ['advance',          '💰 Advance',          'Map later'],
-            ['proforma_invoice', '📋 Against PI',        'PI exists'],
-            ['vendor_invoice',   '🧾 Against Invoice',   'Final invoice received'],
+            ['advance', '💰 Advance', 'Map later'],
+            ['proforma_invoice', '📋 Against PI', 'PI exists'],
+            ['vendor_invoice', '🧾 Against Invoice', 'Final invoice received'],
           ].map(([val, lbl, sub]) => (
             <button
               key={val}
@@ -1701,12 +1768,12 @@ function RecordPaymentModal({ vendors, proformaInvoices, vendorInvoices, payment
 
       {/* Proforma Invoice selector */}
       {form.mappedTo === 'proforma_invoice' && (() => {
-        const openPIs     = filteredPIs.filter((p) => p.status !== 'cancelled' && p.amountDue > 0);
+        const openPIs = filteredPIs.filter((p) => p.status !== 'cancelled' && p.amountDue > 0);
         const searchedPIs = piSearch
           ? openPIs.filter((pi) =>
-              pi.piNumber?.toLowerCase().includes(piSearch.toLowerCase()) ||
-              pi.vendor?.companyName?.toLowerCase().includes(piSearch.toLowerCase()),
-            )
+            pi.piNumber?.toLowerCase().includes(piSearch.toLowerCase()) ||
+            pi.vendor?.companyName?.toLowerCase().includes(piSearch.toLowerCase()),
+          )
           : openPIs;
 
         return (
@@ -1738,8 +1805,8 @@ function RecordPaymentModal({ vendors, proformaInvoices, vendorInvoices, payment
                   style={{
                     padding: '10px 14px', cursor: 'pointer',
                     borderBottom: '1px solid #f1f5f9',
-                    background:   form.proformaInvoice === pi._id ? '#eff6ff' : '#fff',
-                    borderLeft:   form.proformaInvoice === pi._id ? '3px solid #3b82f6' : '3px solid transparent',
+                    background: form.proformaInvoice === pi._id ? '#eff6ff' : '#fff',
+                    borderLeft: form.proformaInvoice === pi._id ? '3px solid #3b82f6' : '3px solid transparent',
                   }}
                   onMouseEnter={(e) => { if (form.proformaInvoice !== pi._id) e.currentTarget.style.background = '#f8fafc'; }}
                   onMouseLeave={(e) => { if (form.proformaInvoice !== pi._id) e.currentTarget.style.background = '#fff'; }}
@@ -1775,18 +1842,18 @@ function RecordPaymentModal({ vendors, proformaInvoices, vendorInvoices, payment
 
       {/* Vendor Invoice selector */}
       {form.mappedTo === 'vendor_invoice' && (() => {
-        const payAmt          = parseFloat(form.amount) || 0;
+        const payAmt = parseFloat(form.amount) || 0;
         const amountMatchedInvs = payAmt > 0
           ? invoicesWithDue.filter((vi) => {
-              const due = vi.total_amount - (paidByInvoice[String(vi._id)] || 0);
-              return Math.abs(due - payAmt) <= 2;
-            })
+            const due = vi.total_amount - (paidByInvoice[String(vi._id)] || 0);
+            return Math.abs(due - payAmt) <= 2;
+          })
           : invoicesWithDue;
         const searchedInvs = invSearch
           ? amountMatchedInvs.filter((vi) =>
-              vi.invoice_number?.toLowerCase().includes(invSearch.toLowerCase()) ||
-              vi.vendor_name?.toLowerCase().includes(invSearch.toLowerCase()),
-            )
+            vi.invoice_number?.toLowerCase().includes(invSearch.toLowerCase()) ||
+            vi.vendor_name?.toLowerCase().includes(invSearch.toLowerCase()),
+          )
           : amountMatchedInvs;
         const selectedInv = invoicesWithDue.find((vi) => vi._id === form.vendorInvoice);
 
@@ -1827,7 +1894,7 @@ function RecordPaymentModal({ vendors, proformaInvoices, vendorInvoices, payment
               )}
               {searchedInvs.map((vi) => {
                 const paid = paidByInvoice[String(vi._id)] || 0;
-                const due  = vi.total_amount - paid;
+                const due = vi.total_amount - paid;
                 return (
                   <div
                     key={vi._id}
@@ -1835,8 +1902,8 @@ function RecordPaymentModal({ vendors, proformaInvoices, vendorInvoices, payment
                     style={{
                       padding: '10px 14px', cursor: 'pointer',
                       borderBottom: '1px solid #f1f5f9',
-                      background:   form.vendorInvoice === vi._id ? '#eff6ff' : '#fff',
-                      borderLeft:   form.vendorInvoice === vi._id ? '3px solid #0891b2' : '3px solid transparent',
+                      background: form.vendorInvoice === vi._id ? '#eff6ff' : '#fff',
+                      borderLeft: form.vendorInvoice === vi._id ? '3px solid #0891b2' : '3px solid transparent',
                     }}
                     onMouseEnter={(e) => { if (form.vendorInvoice !== vi._id) e.currentTarget.style.background = '#f8fafc'; }}
                     onMouseLeave={(e) => { if (form.vendorInvoice !== vi._id) e.currentTarget.style.background = '#fff'; }}
@@ -1860,9 +1927,9 @@ function RecordPaymentModal({ vendors, proformaInvoices, vendorInvoices, payment
             {selectedInv && (
               <div style={{ marginTop: 8, display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 6 }}>
                 {[
-                  ['Total', fmt(selectedInv.total_amount),                                               '#0f172a'],
-                  ['Paid',  fmt(paidByInvoice[String(selectedInv._id)] || 0),                           '#10b981'],
-                  ['Due',   fmt(selectedInv.total_amount - (paidByInvoice[String(selectedInv._id)] || 0)), '#ef4444'],
+                  ['Total', fmt(selectedInv.total_amount), '#0f172a'],
+                  ['Paid', fmt(paidByInvoice[String(selectedInv._id)] || 0), '#10b981'],
+                  ['Due', fmt(selectedInv.total_amount - (paidByInvoice[String(selectedInv._id)] || 0)), '#ef4444'],
                 ].map(([l, v, c]) => (
                   <div key={l} style={{ padding: '7px 10px', background: '#f8fafc', borderRadius: 8 }}>
                     <div style={{ fontSize: 10, color: '#94a3b8', textTransform: 'uppercase', fontWeight: 700 }}>{l}</div>
@@ -1896,7 +1963,7 @@ function RecordPaymentModal({ vendors, proformaInvoices, vendorInvoices, payment
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0 16px' }}>
         <Field label="Payment Mode">
           <select style={IShi(af.paymentMode)} value={form.paymentMode} onChange={(e) => set('paymentMode', e.target.value)}>
-            {['neft','rtgs','imps','upi','cheque','cash','other'].map((m) => (
+            {['neft', 'rtgs', 'imps', 'upi', 'cheque', 'cash', 'other'].map((m) => (
               <option key={m} value={m}>{m.toUpperCase()}</option>
             ))}
           </select>
@@ -1947,22 +2014,22 @@ function RecordPaymentModal({ vendors, proformaInvoices, vendorInvoices, payment
 // MAP ADVANCE MODAL
 // ═══════════════════════════════════════════════════════════════════════════════
 function MapAdvanceModal({ payment, proformaInvoices, vendorInvoices, onSave, onClose }) {
-  const [mt,     setMt]     = useState('proforma_invoice');
-  const [piId,   setPiId]   = useState('');
-  const [viId,   setViId]   = useState('');
+  const [mt, setMt] = useState('proforma_invoice');
+  const [piId, setPiId] = useState('');
+  const [viId, setViId] = useState('');
   const [saving, setSaving] = useState(false);
-  const [err,    setErr]    = useState('');
+  const [err, setErr] = useState('');
 
-  const vendorPIs  = proformaInvoices.filter(
+  const vendorPIs = proformaInvoices.filter(
     (pi) => (!payment.vendor || pi.vendor?._id === payment.vendor?._id) &&
-            pi.amountDue > 0 && pi.status !== 'cancelled',
+      pi.amountDue > 0 && pi.status !== 'cancelled',
   );
   const selectedPI = proformaInvoices.find((p) => p._id === piId);
 
   const submit = async () => {
     setErr('');
     if (mt === 'proforma_invoice' && !piId) { setErr('Select a PI.'); return; }
-    if (mt === 'vendor_invoice'   && !viId) { setErr('Select an Invoice.'); return; }
+    if (mt === 'vendor_invoice' && !viId) { setErr('Select an Invoice.'); return; }
 
     log.info('Mapping advance payment', { paymentId: payment._id, mappedTo: mt });
     setSaving(true);
@@ -1970,7 +2037,7 @@ function MapAdvanceModal({ payment, proformaInvoices, vendorInvoices, onSave, on
       const res = await api.patch(`/payment-tracker/payments/${payment._id}/map`, {
         mappedTo: mt,
         proformaInvoice: piId || undefined,
-        vendorInvoice:   viId || undefined,
+        vendorInvoice: viId || undefined,
       });
       if (res.status >= 400) throw new Error(res.data.error);
       log.info('Advance payment mapped successfully');
@@ -1991,11 +2058,11 @@ function MapAdvanceModal({ payment, proformaInvoices, vendorInvoices, onSave, on
         display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 8,
       }}>
         {[
-          ['Ref',    payment.paymentRef,                    '#1d4ed8'],
-          ['Amount', fmt(payment.amount),                   '#10b981'],
-          ['Vendor', payment.vendor?.companyName || '—',   '#0f172a'],
-          ['Date',   fmtDate(payment.paymentDate),          '#475569'],
-          ['Mode',   payment.paymentMode?.toUpperCase(),    '#475569'],
+          ['Ref', payment.paymentRef, '#1d4ed8'],
+          ['Amount', fmt(payment.amount), '#10b981'],
+          ['Vendor', payment.vendor?.companyName || '—', '#0f172a'],
+          ['Date', fmtDate(payment.paymentDate), '#475569'],
+          ['Mode', payment.paymentMode?.toUpperCase(), '#475569'],
         ].map(([l, v, c]) => (
           <div key={l}>
             <div style={{ fontSize: 11, color: '#94a3b8', textTransform: 'uppercase', fontWeight: 700 }}>{l}</div>
@@ -2106,9 +2173,9 @@ function MapAdvanceModal({ payment, proformaInvoices, vendorInvoices, onSave, on
 // PI FLOW MODAL — visual backtrack: PI → Payments → Invoice
 // ═══════════════════════════════════════════════════════════════════════════════
 function PIFlowModal({ pi: piProp, payments, invoices, onMapPayment, onUploadInvoice, onClose, onRefresh }) {
-  const [pi,        setPi]        = React.useState(piProp);
+  const [pi, setPi] = React.useState(piProp);
   const [linkingId, setLinkingId] = React.useState(null);
-  const [linkErr,   setLinkErr]   = React.useState('');
+  const [linkErr, setLinkErr] = React.useState('');
 
   React.useEffect(() => { setPi(piProp); }, [piProp]);
 
@@ -2123,19 +2190,19 @@ function PIFlowModal({ pi: piProp, payments, invoices, onMapPayment, onUploadInv
   // Linked final invoice
   const linkedInvoice = pi.finalInvoice
     ? invoices.find((inv) => {
-        const fiId = String(pi.finalInvoice?._id || pi.finalInvoice);
-        return fiId === String(inv._id);
-      }) || null
+      const fiId = String(pi.finalInvoice?._id || pi.finalInvoice);
+      return fiId === String(inv._id);
+    }) || null
     : null;
 
   // Unlinked invoices from same vendor that could be linked
   const suggestedInvoices = !linkedInvoice
     ? invoices.filter((inv) =>
-        inv.vendor_name && pi.vendor?.companyName &&
-        (inv.vendor_name.toLowerCase().includes(pi.vendor.companyName.toLowerCase()) ||
-         pi.vendor.companyName.toLowerCase().includes(inv.vendor_name.toLowerCase())) &&
-        Math.abs(inv.total_amount - pi.totalAmount) < pi.totalAmount * 0.5,
-      )
+      inv.vendor_name && pi.vendor?.companyName &&
+      (inv.vendor_name.toLowerCase().includes(pi.vendor.companyName.toLowerCase()) ||
+        pi.vendor.companyName.toLowerCase().includes(inv.vendor_name.toLowerCase())) &&
+      Math.abs(inv.total_amount - pi.totalAmount) < pi.totalAmount * 0.5,
+    )
     : [];
 
   const advances = payments.filter((p) =>
@@ -2267,13 +2334,23 @@ function PIFlowModal({ pi: piProp, payments, invoices, onMapPayment, onUploadInv
               <div style={{ fontSize: 13, opacity: 0.9, marginBottom: 6 }}>{linkedInvoice.invoice_number}</div>
               <div style={{ fontSize: 11, opacity: 0.75, marginBottom: 10 }}>{fmtDate(linkedInvoice.date)}</div>
               {(linkedInvoice.cgst || linkedInvoice.sgst || linkedInvoice.igst) && (
-                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 6, borderTop: '1px solid rgba(255,255,255,0.2)', paddingTop: 8 }}>
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 6, borderTop: '1px solid rgba(255,255,255,0.2)', paddingTop: 8, marginBottom: 10 }}>
                   {[['CGST', linkedInvoice.cgst], ['SGST', linkedInvoice.sgst], ['IGST', linkedInvoice.igst]].map(([l, v]) => (
                     <div key={l} style={{ textAlign: 'center' }}>
                       <div style={{ fontSize: 9, opacity: 0.7, textTransform: 'uppercase', fontWeight: 700 }}>{l}</div>
                       <div style={{ fontSize: 12, fontWeight: 700 }}>{fmt(v)}</div>
                     </div>
                   ))}
+                </div>
+              )}
+              {(linkedInvoice.oneDriveFileId || linkedInvoice.image) && (
+                <div style={{ borderTop: '1px solid rgba(255,255,255,0.2)', paddingTop: 10 }}>
+                  <DocLink
+                    url={linkedInvoice.oneDriveFileId ? proxyUrl.invoice(linkedInvoice._id) : linkedInvoice.image}
+                    mimeType={linkedInvoice.mimeType}
+                    label="View Invoice"
+                    style={{ background: 'rgba(255,255,255,0.15)', color: '#fff' }}
+                  />
                 </div>
               )}
             </div>
@@ -2369,12 +2446,22 @@ function PIFlowModal({ pi: piProp, payments, invoices, onMapPayment, onUploadInv
           {piPayments.map((pay, i) => {
             const pct = pi.totalAmount > 0 ? (pay.amount / pi.totalAmount) * 100 : 0;
             return (
-              <div key={pay._id || i} style={{ display: 'grid', gridTemplateColumns: '120px 1fr 100px', alignItems: 'center', gap: 12, marginBottom: 8 }}>
+              <div key={pay._id || i} style={{ display: 'grid', gridTemplateColumns: '120px 1fr 100px auto', alignItems: 'center', gap: 12, marginBottom: 8 }}>
                 <div style={{ fontSize: 11, color: '#64748b' }}>{fmtDate(pay.paymentDate)}</div>
                 <div style={{ height: 10, borderRadius: 99, background: '#e2e8f0', overflow: 'hidden' }}>
                   <div style={{ width: `${pct}%`, height: '100%', background: i % 2 === 0 ? '#10b981' : '#3b82f6', borderRadius: 99 }} />
                 </div>
                 <div style={{ fontSize: 12, fontWeight: 700, color: '#10b981', textAlign: 'right' }}>{fmt(pay.amount)}</div>
+                <div style={{ minWidth: 64 }}>
+                  {pay.screenshotFileId && (
+                    <DocLink
+                      url={proxyUrl.payReceipt(pay._id)}
+                      mimeType={pay.screenshotMime}
+                      label="Receipt"
+                      style={{ background: '#f0fdf4', color: '#15803d', fontSize: 10, padding: '3px 8px' }}
+                    />
+                  )}
+                </div>
               </div>
             );
           })}
@@ -2395,6 +2482,73 @@ function PIFlowModal({ pi: piProp, payments, invoices, onMapPayment, onUploadInv
 
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// BLOB PREVIEW — fetches a proxy URL via axios (correct port) and renders
+// the result inline as an iframe (PDF) or img (image).
+// Used by InvoiceViewerModal right panel to avoid the localhost:3000 trap.
+// ═══════════════════════════════════════════════════════════════════════════════
+function BlobPreview({ url, mimeType }) {
+  const [blobUrl, setBlobUrl] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [err, setErr] = useState(null);
+
+  useEffect(() => {
+    if (!url) return;
+    // base64 data URIs don't need fetching
+    if (url.startsWith('data:')) { setBlobUrl(url); return; }
+    let revoked = false;
+    setLoading(true);
+    setErr(null);
+    // Strip /api prefix — axios baseURL already ends in /api
+    const axiosPath = url.replace(/^\/api/, '');
+    api.get(axiosPath, { responseType: 'blob' })
+      .then((res) => {
+        if (revoked) return;
+        const mime = res.headers['content-type'] || mimeType || 'application/octet-stream';
+        const objUrl = URL.createObjectURL(new Blob([res.data], { type: mime }));
+        setBlobUrl(objUrl);
+        setLoading(false);
+      })
+      .catch((e) => {
+        if (revoked) return;
+        setErr(e?.response?.status === 404 ? 'File not found on server.' : 'Could not load document.');
+        setLoading(false);
+      });
+    return () => {
+      revoked = true;
+      // Revoke on unmount to free memory
+      setBlobUrl((prev) => { if (prev && prev.startsWith('blob:')) URL.revokeObjectURL(prev); return null; });
+    };
+  }, [url]);
+
+  const isPdf = mimeType === 'application/pdf' || blobUrl?.startsWith('blob:') && mimeType === 'application/pdf';
+
+  return (
+    <div style={{ background: '#f1f5f9', borderRadius: 16, overflow: 'hidden', minHeight: 400, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+      {!url ? (
+        <div style={{ textAlign: 'center', color: '#94a3b8' }}>
+          <div style={{ fontSize: 40, marginBottom: 8 }}>📄</div>
+          <div style={{ fontSize: 13, fontWeight: 600 }}>No document attached</div>
+        </div>
+      ) : loading ? (
+        <div style={{ textAlign: 'center', color: '#94a3b8' }}>
+          <div style={{ width: 28, height: 28, border: '2px solid #e2e8f0', borderTop: '2px solid #6366f1', borderRadius: '50%', animation: 'spin 0.8s linear infinite', margin: '0 auto 10px' }} />
+          <div style={{ fontSize: 12 }}>Loading document…</div>
+        </div>
+      ) : err ? (
+        <div style={{ textAlign: 'center', color: '#ef4444', fontSize: 13, padding: 20 }}>⚠ {err}</div>
+      ) : mimeType === 'application/pdf' ? (
+        <iframe src={blobUrl} style={{ width: '100%', height: 500, border: 'none' }} title="PDF" />
+      ) : (
+        <div style={{ overflowY: 'auto', maxHeight: 600, width: '100%' }}>
+          <img src={blobUrl} style={{ width: '100%' }} alt="Invoice" />
+        </div>
+      )}
+    </div>
+  );
+}
+
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // INVOICE VIEWER MODAL
 // ═══════════════════════════════════════════════════════════════════════════════
 function InvoiceViewerModal({ invoice, onClose }) {
@@ -2406,13 +2560,13 @@ function InvoiceViewerModal({ invoice, onClose }) {
         <div>
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginBottom: 18 }}>
             {[
-              ['Vendor',  invoice.vendor_name    || '—'],
-              ['GSTIN',   invoice.vendor_gst     || 'N/A'],
+              ['Vendor', invoice.vendor_name || '—'],
+              ['GSTIN', invoice.vendor_gst || 'N/A'],
               ['Invoice #', invoice.invoice_number],
-              ['Date',    fmtDate(invoice.date)],
-              ['FY',      invoice.financialYear  || '—'],
-              ['Month',   invoice.month          || '—'],
-              ['Source',  invoice.receivedVia    || '—'],
+              ['Date', fmtDate(invoice.date)],
+              ['FY', invoice.financialYear || '—'],
+              ['Month', invoice.month || '—'],
+              ['Source', invoice.receivedVia || '—'],
             ].map(([l, v]) => (
               <div key={l} style={{ padding: '10px 14px', background: '#f8fafc', borderRadius: 10 }}>
                 <div style={{ fontSize: 10, color: '#94a3b8', textTransform: 'uppercase', fontWeight: 700, marginBottom: 3 }}>{l}</div>
@@ -2429,9 +2583,9 @@ function InvoiceViewerModal({ invoice, onClose }) {
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr 1fr', gap: 8 }}>
               {[
                 ['Total', fmt(invoice.total_amount), '#1d4ed8'],
-                ['CGST',  fmt(invoice.cgst),         '#475569'],
-                ['SGST',  fmt(invoice.sgst),         '#475569'],
-                ['IGST',  fmt(invoice.igst),         '#475569'],
+                ['CGST', fmt(invoice.cgst), '#475569'],
+                ['SGST', fmt(invoice.sgst), '#475569'],
+                ['IGST', fmt(invoice.igst), '#475569'],
               ].map(([l, v, c]) => (
                 <div key={l} style={{ textAlign: 'center', padding: '10px 6px', background: '#fff', borderRadius: 10, border: '1px solid #dbeafe' }}>
                   <div style={{ fontSize: 10, color: '#94a3b8', textTransform: 'uppercase', fontWeight: 700 }}>{l}</div>
@@ -2520,41 +2674,21 @@ function InvoiceViewerModal({ invoice, onClose }) {
               ))}
 
               {!invoice.oneDriveFileId && !invoice.image &&
-               !invoice._linkedPI?.attachmentFileId &&
-               !invoice._linkedPayments?.some((p) => p.screenshotFileId) && (
-                <div style={{ textAlign: 'center', color: '#94a3b8', fontSize: 12, padding: '10px 0' }}>
-                  No documents attached
-                </div>
-              )}
+                !invoice._linkedPI?.attachmentFileId &&
+                !invoice._linkedPayments?.some((p) => p.screenshotFileId) && (
+                  <div style={{ textAlign: 'center', color: '#94a3b8', fontSize: 12, padding: '10px 0' }}>
+                    No documents attached
+                  </div>
+                )}
             </div>
           </div>
         </div>
 
-        {/* Right column — document preview */}
-        <div style={{ background: '#f1f5f9', borderRadius: 16, overflow: 'hidden', minHeight: 400, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-          {invoice.oneDriveFileId ? (
-            invoice.mimeType === 'application/pdf'
-              ? <iframe
-                  src={proxyUrl.invoice(invoice._id)}
-                  style={{ width: '100%', height: 500, border: 'none' }}
-                  title="PDF"
-                />
-              : <div style={{ overflowY: 'auto', maxHeight: 600, width: '100%' }}>
-                  <img src={proxyUrl.invoice(invoice._id)} style={{ width: '100%' }} alt="Invoice" />
-                </div>
-          ) : invoice.image ? (
-            invoice.mimeType === 'application/pdf'
-              ? <iframe src={invoice.image} style={{ width: '100%', height: 500, border: 'none' }} title="PDF" />
-              : <div style={{ overflowY: 'auto', maxHeight: 600 }}>
-                  <img src={invoice.image} style={{ width: '100%' }} alt="Invoice" />
-                </div>
-          ) : (
-            <div style={{ textAlign: 'center', color: '#94a3b8' }}>
-              <div style={{ fontSize: 40, marginBottom: 8 }}>📄</div>
-              <div style={{ fontSize: 13, fontWeight: 600 }}>No document image</div>
-            </div>
-          )}
-        </div>
+        {/* Right column — document preview (fetched via axios to avoid port mismatch) */}
+        <BlobPreview
+          url={invoice.oneDriveFileId ? proxyUrl.invoice(invoice._id) : invoice.image || null}
+          mimeType={invoice.mimeType}
+        />
       </div>
     </Modal>
   );
@@ -2565,19 +2699,19 @@ function InvoiceViewerModal({ invoice, onClose }) {
 // INVOICE VAULT TAB — FY/Month hierarchy with payment backtrack
 // ═══════════════════════════════════════════════════════════════════════════════
 function InvoiceVaultTab({ invoices, payments, proformaInvoices, vendors, onDelete, onViewInvoice, onUpload, onToast }) {
-  const [search,          setSearch]     = useState('');
-  const [filterVendorName, setFVN]       = useState('');
-  const [expandedFY,      setExpandedFY] = useState(null);
-  const [expandedMo,      setExpandedMo] = useState(null);
-  const [expandedInv,     setExpandedInv] = useState(null);
-  const [zipLoading,      setZipLoading] = useState(false);
-  const [zipProgress,     setZipProgress] = useState(null); // { current, total }
-  const [docList,         setDocList]    = useState(null);
+  const [search, setSearch] = useState('');
+  const [filterVendorName, setFVN] = useState('');
+  const [expandedFY, setExpandedFY] = useState(null);
+  const [expandedMo, setExpandedMo] = useState(null);
+  const [expandedInv, setExpandedInv] = useState(null);
+  const [zipLoading, setZipLoading] = useState(false);
+  const [zipProgress, setZipProgress] = useState(null); // { current, total }
+  const [docList, setDocList] = useState(null);
 
   // Vendor name filter dropdown
-  const [vq,    setVq]    = useState('');
+  const [vq, setVq] = useState('');
   const [vOpen, setVOpen] = useState(false);
-  const vRef              = useRef();
+  const vRef = useRef();
 
   useEffect(() => {
     const handler = (e) => { if (vRef.current && !vRef.current.contains(e.target)) setVOpen(false); };
@@ -2585,12 +2719,12 @@ function InvoiceVaultTab({ invoices, payments, proformaInvoices, vendors, onDele
     return () => document.removeEventListener('mousedown', handler);
   }, []);
 
-  const vendorNames     = [...new Set(invoices.map((i) => i.vendor_name).filter(Boolean))].sort();
-  const filteredVNames  = vendorNames.filter((n) => !vq || n.toLowerCase().includes(vq.toLowerCase()));
+  const vendorNames = [...new Set(invoices.map((i) => i.vendor_name).filter(Boolean))].sort();
+  const filteredVNames = vendorNames.filter((n) => !vq || n.toLowerCase().includes(vq.toLowerCase()));
 
   const filteredInvoices = invoices.filter((inv) => {
-    const s           = search.toLowerCase();
-    const textMatch   = !s || inv.vendor_name?.toLowerCase().includes(s) || inv.invoice_number?.toLowerCase().includes(s);
+    const s = search.toLowerCase();
+    const textMatch = !s || inv.vendor_name?.toLowerCase().includes(s) || inv.invoice_number?.toLowerCase().includes(s);
     const vendorMatch = !filterVendorName || inv.vendor_name === filterVendorName;
     return textMatch && vendorMatch;
   });
@@ -2598,7 +2732,7 @@ function InvoiceVaultTab({ invoices, payments, proformaInvoices, vendors, onDele
   const hierarchy = filteredInvoices.reduce((acc, inv) => {
     const fy = normalizeFY(inv.financialYear || 'Other');
     const mo = inv.month || 'Other';
-    if (!acc[fy])     acc[fy]     = {};
+    if (!acc[fy]) acc[fy] = {};
     if (!acc[fy][mo]) acc[fy][mo] = [];
     acc[fy][mo].push(inv);
     return acc;
@@ -2608,23 +2742,23 @@ function InvoiceVaultTab({ invoices, payments, proformaInvoices, vendors, onDele
     items.reduce(
       (s, i) => ({
         total: s.total + (Number(i.total_amount) || 0),
-        cgst:  s.cgst  + (Number(i.cgst)         || 0),
-        sgst:  s.sgst  + (Number(i.sgst)         || 0),
-        igst:  s.igst  + (Number(i.igst)         || 0),
+        cgst: s.cgst + (Number(i.cgst) || 0),
+        sgst: s.sgst + (Number(i.sgst) || 0),
+        igst: s.igst + (Number(i.igst) || 0),
       }),
       { total: 0, cgst: 0, sgst: 0, igst: 0 },
     );
 
   const exportCSV = (label, items) => {
-    const hdr  = ['Date','Vendor Name','GSTIN','Invoice Number','CGST','SGST','IGST','Total Amount'];
+    const hdr = ['Date', 'Vendor Name', 'GSTIN', 'Invoice Number', 'CGST', 'SGST', 'IGST', 'Total Amount'];
     const rows = items.map((inv) => [
       inv.date,
       `"${(inv.vendor_name || '').replace(/"/g, '""')}"`,
       inv.vendor_gst, inv.invoice_number,
       inv.cgst || 0, inv.sgst || 0, inv.igst || 0, inv.total_amount || 0,
     ]);
-    const a    = document.createElement('a');
-    a.href     = URL.createObjectURL(new Blob([[hdr, ...rows].map((r) => r.join(',')).join('\n')], { type: 'text/csv' }));
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(new Blob([[hdr, ...rows].map((r) => r.join(',')).join('\n')], { type: 'text/csv' }));
     a.download = `Invoices_${label}.csv`;
     a.click();
     log.debug('CSV exported', { label, count: items.length });
@@ -2645,39 +2779,42 @@ function InvoiceVaultTab({ invoices, payments, proformaInvoices, vendors, onDele
     setZipLoading(true);
     setZipProgress({ current: 0, total: downloadable.length });
 
-    const zip  = new J();
+    const zip = new J();
     const root = zip.folder(label);
-    let done   = 0;
+    let done = 0;
 
     try {
       for (const inv of downloadable) {
         const mime = inv.mimeType
           || (inv.image?.startsWith('data:application/pdf') ? 'application/pdf' : 'image/jpeg');
-        const ext  = mime === 'application/pdf' ? 'pdf' : 'jpg';
+        const ext = mime === 'application/pdf' ? 'pdf' : 'jpg';
 
         // Filename = {invoice_number}_{vendor_name}.{ext}
-        const safeNo   = (inv.invoice_number || 'UNKNOWN').replace(/[^a-z0-9_\-]/gi, '_');
-        const safeVend = (inv.vendor_name    || '').replace(/[^a-z0-9_\-]/gi, '_').replace(/_+/g, '_').replace(/^_|_$/g, '');
-        const name     = safeVend ? `${safeNo}_${safeVend}` : safeNo;
+        const safeNo = (inv.invoice_number || 'UNKNOWN').replace(/[^a-z0-9_\-]/gi, '_');
+        const safeVend = (inv.vendor_name || '').replace(/[^a-z0-9_\-]/gi, '_').replace(/_+/g, '_').replace(/^_|_$/g, '');
+        const name = safeVend ? `${safeNo}_${safeVend}` : safeNo;
 
         // For FY zips, put each invoice in a {Month} subfolder
         const folder = isYearly
           ? root.folder(inv.month || (() => {
-              const d = new Date(inv.date);
-              return !isNaN(d.getTime())
-                ? d.toLocaleString('default', { month: 'long' })
-                : 'Unknown';
-            })())
+            const d = new Date(inv.date);
+            return !isNaN(d.getTime())
+              ? d.toLocaleString('default', { month: 'long' })
+              : 'Unknown';
+          })())
           : root;
 
         // Prefer proxy route (authenticated server-side fetch), fall back to base64 image
         if (inv.oneDriveFileId) {
           try {
-            const blob = await fetch(proxyUrl.invoice(inv._id)).then((r) => {
-              if (!r.ok) throw new Error(`HTTP ${r.status}`);
-              return r.blob();
-            });
-            folder.file(`${name}.${ext}`, blob);
+            // const blob = await fetch(proxyUrl.invoice(inv._id)).then((r) => {
+            //   if (!r.ok) throw new Error(`HTTP ${r.status}`);
+            //   return r.blob();
+            // });
+            // folder.file(`${name}.${ext}`, blob);
+            const axiosPath = proxyUrl.invoice(inv._id).replace(/^\/api/, '');
+            const res = await api.get(axiosPath, { responseType: 'blob' });
+            folder.file(`${name}.${ext}`, res.data);
           } catch (fetchErr) {
             // Proxy failed — try base64 fallback
             if (inv.image) {
@@ -2686,7 +2823,7 @@ function InvoiceVaultTab({ invoices, payments, proformaInvoices, vendors, onDele
               } else {
                 try {
                   folder.file(`${name}.${ext}`, await fetch(inv.image).then((r) => r.blob()));
-                } catch {}
+                } catch { }
               }
             }
             log.warn('Proxy fetch failed for zip, used fallback', { invoice: inv.invoice_number, error: fetchErr.message });
@@ -2697,7 +2834,7 @@ function InvoiceVaultTab({ invoices, payments, proformaInvoices, vendors, onDele
           } else {
             try {
               folder.file(`${name}.${ext}`, await fetch(inv.image).then((r) => r.blob()));
-            } catch {}
+            } catch { }
           }
         }
 
@@ -2719,23 +2856,23 @@ function InvoiceVaultTab({ invoices, payments, proformaInvoices, vendors, onDele
 
   // Build payment backtrack for an invoice: Invoice → PI → Payments
   const getInvoicePayments = (inv) => {
-    const invId  = String(inv._id);
+    const invId = String(inv._id);
     const direct = payments.filter((p) =>
       p.mappedTo === 'vendor_invoice' && (
         String(p.vendorInvoice?._id) === invId ||
-        String(p.vendorInvoice)      === invId
+        String(p.vendorInvoice) === invId
       ),
     );
     const matchedPI = proformaInvoices.find((pi) =>
       String(pi.finalInvoice?._id) === invId ||
-      String(pi.finalInvoice)      === invId,
+      String(pi.finalInvoice) === invId,
     );
-    const piId      = matchedPI ? String(matchedPI._id) : null;
+    const piId = matchedPI ? String(matchedPI._id) : null;
     const piPayments = piId
       ? payments.filter((p) => {
-          const pPiId = String(p.proformaInvoice?._id || p.proformaInvoice || '');
-          return p.mappedTo === 'proforma_invoice' && pPiId === piId;
-        })
+        const pPiId = String(p.proformaInvoice?._id || p.proformaInvoice || '');
+        return p.mappedTo === 'proforma_invoice' && pPiId === piId;
+      })
       : [];
     return { direct, matchedPI, piPayments };
   };
@@ -2830,9 +2967,9 @@ function InvoiceVaultTab({ invoices, payments, proformaInvoices, vendors, onDele
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4,1fr)', gap: 12, marginBottom: 18 }}>
         {[
           ['Total Invoiced', fmt(grandT.total), '#1d4ed8'],
-          ['Total CGST',     fmt(grandT.cgst),  '#475569'],
-          ['Total SGST',     fmt(grandT.sgst),  '#475569'],
-          ['Total IGST',     fmt(grandT.igst),  '#475569'],
+          ['Total CGST', fmt(grandT.cgst), '#475569'],
+          ['Total SGST', fmt(grandT.sgst), '#475569'],
+          ['Total IGST', fmt(grandT.igst), '#475569'],
         ].map(([l, v, c]) => (
           <div key={l} style={{ padding: '14px 16px', background: '#fff', borderRadius: 12, boxShadow: '0 1px 4px rgba(0,0,0,0.06)' }}>
             <div style={{ fontSize: 10, color: '#94a3b8', textTransform: 'uppercase', fontWeight: 700, marginBottom: 4 }}>{l}</div>
@@ -2915,7 +3052,7 @@ function InvoiceVaultTab({ invoices, payments, proformaInvoices, vendors, onDele
       <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
         {Object.entries(hierarchy).sort().reverse().map(([fy, months]) => {
           const allFYItems = Object.values(months).flat();
-          const fyT        = getTotals(allFYItems);
+          const fyT = getTotals(allFYItems);
 
           return (
             <div key={fy} style={{ background: '#fff', borderRadius: 14, border: '1px solid #e2e8f0', overflow: 'hidden', boxShadow: '0 1px 4px rgba(0,0,0,0.05)' }}>
@@ -2962,7 +3099,7 @@ function InvoiceVaultTab({ invoices, payments, proformaInvoices, vendors, onDele
                 <div style={{ padding: '10px 14px', display: 'flex', flexDirection: 'column', gap: 8 }}>
                   {Object.entries(months).map(([month, items]) => {
                     const moKey = `${fy}-${month}`;
-                    const moT   = getTotals(items);
+                    const moT = getTotals(items);
 
                     return (
                       <div key={month} style={{ border: '1px solid #f1f5f9', borderRadius: 12, overflow: 'hidden' }}>
@@ -3003,9 +3140,9 @@ function InvoiceVaultTab({ invoices, payments, proformaInvoices, vendors, onDele
                         {expandedMo === moKey && (
                           <div style={{ padding: '10px 14px' }}>
                             {items.map((inv) => {
-                              const invKey                     = `${moKey}-${inv._id}`;
+                              const invKey = `${moKey}-${inv._id}`;
                               const { direct, matchedPI, piPayments } = getInvoicePayments(inv);
-                              const hasPayments                = direct.length > 0 || piPayments.length > 0 || !!matchedPI;
+                              const hasPayments = direct.length > 0 || piPayments.length > 0 || !!matchedPI;
 
                               return (
                                 <div key={inv._id} style={{ background: '#fff', border: '1px solid #e2e8f0', borderRadius: 12, marginBottom: 8, overflow: 'hidden' }}>
@@ -3228,25 +3365,25 @@ function InvoiceVaultTab({ invoices, payments, proformaInvoices, vendors, onDele
 // Shown on small screens — capture, upload, or manually enter invoices
 // ═══════════════════════════════════════════════════════════════════════════════
 function MobileInvoicePage({ vendors, proformaInvoices, onSaved }) {
-  const [step,             setStep]             = useState('home'); // "home" | "upload" | "camera" | "manual"
-  const [preview,          setPreview]          = useState(null);
-  const [scanning,         setScanning]         = useState(false);
-  const [scanRes,          setScanRes]          = useState(null);
-  const [scanMsg,          setScanMsg]          = useState('');
-  const [af,               setAF]               = useState({});
-  const [saving,           setSaving]           = useState(false);
-  const [err,              setErr]              = useState('');
-  const [gstSaved,         setGstSaved]         = useState(false);
+  const [step, setStep] = useState('home'); // "home" | "upload" | "camera" | "manual"
+  const [preview, setPreview] = useState(null);
+  const [scanning, setScanning] = useState(false);
+  const [scanRes, setScanRes] = useState(null);
+  const [scanMsg, setScanMsg] = useState('');
+  const [af, setAF] = useState({});
+  const [saving, setSaving] = useState(false);
+  const [err, setErr] = useState('');
+  const [gstSaved, setGstSaved] = useState(false);
   const [selectedVendorId, setSelectedVendorId] = useState('');
-  const [fileBase64,       setFileBase64]       = useState(null);
-  const [fileMime,         setFileMime]         = useState(null);
-  const [dupInfo,          setDupInfo]          = useState(null);
-  const [done,             setDone]             = useState(null);
-  const [camActive,        setCamActive]        = useState(false);
+  const [fileBase64, setFileBase64] = useState(null);
+  const [fileMime, setFileMime] = useState(null);
+  const [dupInfo, setDupInfo] = useState(null);
+  const [done, setDone] = useState(null);
+  const [camActive, setCamActive] = useState(false);
 
-  const videoRef  = useRef();
+  const videoRef = useRef();
   const canvasRef = useRef();
-  const fileRef   = useRef();
+  const fileRef = useRef();
 
   const [form, setForm] = useState({
     vendor_name: '', vendor_gst: '', invoice_number: '',
@@ -3256,7 +3393,7 @@ function MobileInvoicePage({ vendors, proformaInvoices, onSaved }) {
   });
 
   const set = (k, v) => {
-    setForm((f)  => ({ ...f, [k]: v }));
+    setForm((f) => ({ ...f, [k]: v }));
     setAF((a) => { const n = { ...a }; delete n[k]; return n; });
   };
 
@@ -3267,7 +3404,7 @@ function MobileInvoicePage({ vendors, proformaInvoices, onSaved }) {
     if (v) {
       set('vendor_name', v.companyName || '');
       if (v.gstNumber) { set('vendor_gst', v.gstNumber); setGstSaved(true); }
-      else              { set('vendor_gst', ''); setGstSaved(false); }
+      else { set('vendor_gst', ''); setGstSaved(false); }
     }
   };
 
@@ -3284,18 +3421,18 @@ function MobileInvoicePage({ vendors, proformaInvoices, onSaved }) {
 
     log.debug('Mobile: scanning invoice with Gemini');
     try {
-      const ex     = await extractViaGemini(f);
+      const ex = await extractViaGemini(f);
       const filled = {};
-      ['vendor_name','vendor_gst','invoice_number','date','financialYear','month'].forEach(
+      ['vendor_name', 'vendor_gst', 'invoice_number', 'date', 'financialYear', 'month'].forEach(
         (k) => { if (ex[k]) filled[k] = ex[k]; },
       );
-      ['total_amount','cgst','sgst','igst'].forEach(
+      ['total_amount', 'cgst', 'sgst', 'igst'].forEach(
         (k) => { if (ex[k] != null) filled[k] = String(ex[k]); },
       );
       if (ex.vendor_name) {
         const m = vendors.find(
           (v) => v.companyName?.toLowerCase().includes(ex.vendor_name.toLowerCase()) ||
-                 ex.vendor_name.toLowerCase().includes(v.companyName?.toLowerCase()),
+            ex.vendor_name.toLowerCase().includes(v.companyName?.toLowerCase()),
         );
         if (m) {
           setSelectedVendorId(m._id);
@@ -3303,7 +3440,7 @@ function MobileInvoicePage({ vendors, proformaInvoices, onSaved }) {
         }
       }
       const c = Object.keys(filled).length;
-      setForm((f)  => ({ ...f, ...filled }));
+      setForm((f) => ({ ...f, ...filled }));
       setAF(Object.fromEntries(Object.keys(filled).map((k) => [k, true])));
       setScanRes(c >= 3 ? 'success' : c > 0 ? 'partial' : 'error');
       setScanMsg(c >= 3 ? `${c} fields extracted — verify below` : c > 0 ? `${c} fields found — fill the rest` : "Couldn't read — fill manually");
@@ -3339,7 +3476,7 @@ function MobileInvoicePage({ vendors, proformaInvoices, onSaved }) {
   const capturePhoto = async () => {
     const v = videoRef.current;
     const c = canvasRef.current;
-    c.width  = v.videoWidth;
+    c.width = v.videoWidth;
     c.height = v.videoHeight;
     c.getContext('2d').drawImage(v, 0, 0);
     stopCamera();
@@ -3360,7 +3497,7 @@ function MobileInvoicePage({ vendors, proformaInvoices, onSaved }) {
   const submit = async () => {
     setErr('');
     if (!form.invoice_number) { setErr('Invoice number required'); return; }
-    if (!form.total_amount)   { setErr('Total amount required'); return; }
+    if (!form.total_amount) { setErr('Total amount required'); return; }
     if (selectedVendorId && form.vendor_gst && !gstSaved) await saveGstToVendor();
 
     log.info('Mobile: saving invoice', { invoiceNumber: form.invoice_number });
@@ -3370,23 +3507,28 @@ function MobileInvoicePage({ vendors, proformaInvoices, onSaved }) {
       const fd = new FormData();
       const fields = {
         ...form,
-        total_amount:  parseFloat(form.total_amount),
-        cgst:          parseFloat(form.cgst)  || 0,
-        sgst:          parseFloat(form.sgst)  || 0,
-        igst:          parseFloat(form.igst)  || 0,
-        mimeType:      fileMime || 'image/jpeg',
-        receivedVia:   'manual_upload',
+        total_amount: parseFloat(form.total_amount),
+        cgst: parseFloat(form.cgst) || 0,
+        sgst: parseFloat(form.sgst) || 0,
+        igst: parseFloat(form.igst) || 0,
+        mimeType: fileMime || 'image/jpeg',
+        receivedVia: 'manual_upload',
         financialYear: form.financialYear || fy,
-        month:         form.month         || month,
+        month: form.month || month,
       };
       Object.entries(fields).forEach(([k, v]) => {
-        if (v !== undefined && v !== null && v !== '') fd.append(k, v);
+        if (v === undefined || v === null || v === '') return;
+        if (Array.isArray(v)) {
+          if (v.length > 0) fd.append(k, JSON.stringify(v));
+          return;
+        }
+        fd.append(k, v);
       });
       if (fileBase64) {
         const [meta, data] = fileBase64.split(',');
-        const mime  = meta.match(/:(.*?);/)?.[1] || fileMime || 'image/jpeg';
+        const mime = meta.match(/:(.*?);/)?.[1] || fileMime || 'image/jpeg';
         const bytes = atob(data);
-        const arr   = new Uint8Array(bytes.length);
+        const arr = new Uint8Array(bytes.length);
         for (let i = 0; i < bytes.length; i++) arr[i] = bytes.charCodeAt(i);
         fd.append('file', new Blob([arr], { type: mime }),
           `invoice${mime === 'application/pdf' ? '.pdf' : '.jpg'}`);
@@ -3394,7 +3536,7 @@ function MobileInvoicePage({ vendors, proformaInvoices, onSaved }) {
       const res = await api.post('/payment-tracker/invoices', fd, {
         headers: { 'Content-Type': 'multipart/form-data' },
       });
-      const d   = res.data;
+      const d = res.data;
       if (res.status === 409 && d.duplicate) {
         setDupInfo({ invoice_number: d.invoice_number, vendor_name: d.vendor_name });
         setSaving(false);
@@ -3432,9 +3574,9 @@ function MobileInvoicePage({ vendors, proformaInvoices, onSaved }) {
   };
 
   // Local mobile styles
-  const IS2  = { width: '100%', padding: '12px 14px', border: '1.5px solid #e2e8f0', borderRadius: 10, fontSize: 15, outline: 'none', boxSizing: 'border-box', fontFamily: 'inherit', background: '#fff' };
+  const IS2 = { width: '100%', padding: '12px 14px', border: '1.5px solid #e2e8f0', borderRadius: 10, fontSize: 15, outline: 'none', boxSizing: 'border-box', fontFamily: 'inherit', background: '#fff' };
   const ISh2 = (hi) => ({ ...IS2, border: hi ? '1.5px solid #3b82f6' : IS2.border, background: hi ? '#eff6ff' : '#fff' });
-  const Lbl  = ({ children, req }) => (
+  const Lbl = ({ children, req }) => (
     <div style={{ fontSize: 12, fontWeight: 700, color: '#475569', textTransform: 'uppercase', letterSpacing: 0.4, marginBottom: 5 }}>
       {children}{req && <span style={{ color: '#ef4444' }}> *</span>}
     </div>
@@ -3446,9 +3588,9 @@ function MobileInvoicePage({ vendors, proformaInvoices, onSaved }) {
       style={{
         display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8,
         width: '100%', padding: '15px 20px', borderRadius: 14,
-        border:       outline ? `2px solid ${color}` : 'none',
-        background:   disabled ? '#94a3b8' : outline ? '#fff' : color,
-        color:        disabled ? '#fff'    : outline ? color  : '#fff',
+        border: outline ? `2px solid ${color}` : 'none',
+        background: disabled ? '#94a3b8' : outline ? '#fff' : color,
+        color: disabled ? '#fff' : outline ? color : '#fff',
         fontWeight: 700, fontSize: 16, cursor: disabled ? 'not-allowed' : 'pointer',
         marginBottom: 12,
         boxShadow: outline ? 'none' : '0 4px 14px rgba(0,0,0,0.15)',
@@ -3631,7 +3773,7 @@ function MobileInvoicePage({ vendors, proformaInvoices, onSaved }) {
           <input type="number" style={ISh2(af.total_amount)} value={form.total_amount} onChange={(e) => set('total_amount', e.target.value)} placeholder="0" inputMode="decimal" />
         </div>
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '0 10px', marginBottom: 16 }}>
-          {['cgst','sgst','igst'].map((k) => (
+          {['cgst', 'sgst', 'igst'].map((k) => (
             <div key={k}>
               <Lbl>{k.toUpperCase()}</Lbl>
               <input type="number" style={ISh2(af[k])} value={form[k]} onChange={(e) => set(k, e.target.value)} placeholder="0" inputMode="decimal" />
@@ -3675,16 +3817,16 @@ export default function PaymentTracker() {
   // Mobile detection — show stripped-down invoice-only page on phones
   const isMobile = typeof window !== 'undefined' && window.matchMedia('(max-width: 768px)').matches;
 
-  const [tab,             setTab]             = useState('pi');
-  const [data,            setData]            = useState({ pi: [], payments: [], invoices: [] });
-  const [vendors,         setVendors]         = useState([]);
-  const [loading,         setLoading]         = useState(true);
-  const [modal,           setModal]           = useState(null);
-  const [selected,        setSelected]        = useState(null);
-  const [linkedPiId,      setLinkedPiId]      = useState(null);
+  const [tab, setTab] = useState('pi');
+  const [data, setData] = useState({ pi: [], payments: [], invoices: [] });
+  const [vendors, setVendors] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [modal, setModal] = useState(null);
+  const [selected, setSelected] = useState(null);
+  const [linkedPiId, setLinkedPiId] = useState(null);
   const [pendingPiFlowId, setPendingPiFlowId] = useState(null);
-  const [filterVendor,    setFilterVendor]    = useState('');
-  const [filterStatus,    setFilterStatus]    = useState('');
+  const [filterVendor, setFilterVendor] = useState('');
+  const [filterStatus, setFilterStatus] = useState('');
 
   const { showToast: _showToast, confirm, Toast, ConfirmDialog } = usePopup();
   const showToast = (msg, type = 'success') => _showToast(type, msg);
@@ -3709,15 +3851,15 @@ export default function PaymentTracker() {
       ]);
       const [piD, payD, invD] = [piR.data, payR.data, invR.data];
       setData({
-        pi:           piD.data  || [],
-        payments:     payD.data || [],
-        invoices:     invD.invoices || (Array.isArray(invD) ? invD : []),
-        invoiceFYs:   invD.financialYears || [],
+        pi: piD.data || [],
+        payments: payD.data || [],
+        invoices: invD.invoices || (Array.isArray(invD) ? invD : []),
+        invoiceFYs: invD.financialYears || [],
       });
       log.info('PaymentTracker data loaded', {
-        piCount:       piD.data?.length,
-        paymentCount:  payD.data?.length,
-        invoiceCount:  invD.invoices?.length,
+        piCount: piD.data?.length,
+        paymentCount: payD.data?.length,
+        invoiceCount: invD.invoices?.length,
       });
     } catch (e) {
       log.error('Failed to load PaymentTracker data', e.message);
@@ -3765,25 +3907,25 @@ export default function PaymentTracker() {
     return isAdvance && p.status === filterStatus;
   });
 
-  const advanceCount   = data.payments.filter((p) => p.mappedTo === 'advance').length;
-  const activePICount  = data.pi.filter((p) => !(p.status === 'invoiced' && p.amountDue <= 0)).length;
+  const advanceCount = data.payments.filter((p) => p.mappedTo === 'advance').length;
+  const activePICount = data.pi.filter((p) => !(p.status === 'invoiced' && p.amountDue <= 0)).length;
 
   const statCards = [
-    { label: 'Total PI Value', value: fmt(data.pi.reduce((s, p) => s + p.totalAmount, 0)),                                           sub: `${data.pi.length} PIs`,                              color: '#6366f1' },
-    { label: 'Total Paid',     value: fmt(data.payments.filter((p) => p.mappedTo !== 'advance').reduce((s, p) => s + p.amount, 0)), sub: `${data.payments.length} payments · ${advanceCount} unmapped`, color: '#10b981' },
-    { label: 'Outstanding',    value: fmt(data.pi.reduce((s, p) => s + p.amountDue, 0)),                                             sub: 'Across all PIs',                                     color: '#f59e0b' },
-    { label: 'Invoice Vault',  value: String(data.invoices.length),                                                                   sub: `${advanceCount} advances unmapped`,                  color: advanceCount > 0 ? '#ef4444' : '#0891b2' },
+    { label: 'Total PI Value', value: fmt(data.pi.reduce((s, p) => s + p.totalAmount, 0)), sub: `${data.pi.length} PIs`, color: '#6366f1' },
+    { label: 'Total Paid', value: fmt(data.payments.filter((p) => p.mappedTo !== 'advance').reduce((s, p) => s + p.amount, 0)), sub: `${data.payments.length} payments · ${advanceCount} unmapped`, color: '#10b981' },
+    { label: 'Outstanding', value: fmt(data.pi.reduce((s, p) => s + p.amountDue, 0)), sub: 'Across all PIs', color: '#f59e0b' },
+    { label: 'Invoice Vault', value: String(data.invoices.length), sub: `${advanceCount} advances unmapped`, color: advanceCount > 0 ? '#ef4444' : '#0891b2' },
   ];
 
   const tabs = [
-    { key: 'pi',       label: '📋 Proforma Invoices', count: activePICount,          total: data.pi.length },
-    { key: 'payments', label: '💳 Payments',           count: advanceCount,           alert: advanceCount   },
-    { key: 'invoices', label: '🧾 Invoice Vault',      count: data.invoices.length                          },
+    { key: 'pi', label: '📋 Proforma Invoices', count: activePICount, total: data.pi.length },
+    { key: 'payments', label: '💳 Payments', count: advanceCount, alert: advanceCount },
+    { key: 'invoices', label: '🧾 Invoice Vault', count: data.invoices.length },
   ];
 
   const statusOptions = tab === 'pi'
-    ? ['pending','partial','fully_paid','invoiced','cancelled']
-    : ['recorded','verified','reconciled','advance'];
+    ? ['pending', 'partial', 'fully_paid', 'invoiced', 'cancelled']
+    : ['recorded', 'verified', 'reconciled', 'advance'];
 
   return (
     <div style={{ minHeight: '100vh', background: T.offwhite, fontFamily: jost, padding: '56px 48px' }}>
@@ -4027,28 +4169,25 @@ export default function PaymentTracker() {
                             <Badge status={pi.status} />
                           </td>
                           <td style={{ padding: '16px 18px', textAlign: 'right' }}
-                              onClick={(e) => e.stopPropagation()}
+                            onClick={(e) => e.stopPropagation()}
                           >
                             <div style={{ display: 'flex', alignItems: 'center', gap: 10, justifyContent: 'flex-end' }}>
 
                               {/* PI document chip */}
                               {pi.attachmentFileId && (
-                                <a
-                                  href={proxyUrl.piAttach(pi._id)}
-                                  target="_blank"
-                                  rel="noopener noreferrer"
-                                  title="View PI Document"
-                                  onClick={(e) => e.stopPropagation()}
-                                  style={{
-                                    display: 'inline-flex', alignItems: 'center', gap: 4,
-                                    fontFamily: jost, fontSize: 9, fontWeight: 400,
-                                    letterSpacing: '0.12em', textTransform: 'uppercase',
-                                    color: '#6d28d9', textDecoration: 'none',
-                                    padding: '3px 8px', border: '1px solid #ede9fe', borderRadius: 4,
-                                  }}
-                                >
-                                  <FileText size={10} /> PI
-                                </a>
+                                <span onClick={(e) => e.stopPropagation()}>
+                                  <DocLink
+                                    url={proxyUrl.piAttach(pi._id)}
+                                    mimeType={pi.attachmentMime}
+                                    label="PI"
+                                    style={{
+                                      fontFamily: jost, fontSize: 9, fontWeight: 400,
+                                      letterSpacing: '0.12em', textTransform: 'uppercase',
+                                      color: '#6d28d9', background: 'transparent',
+                                      padding: '3px 8px', border: '1px solid #ede9fe', borderRadius: 4,
+                                    }}
+                                  />
+                                </span>
                               )}
 
                               {/* Payment receipt chips — one per payment that has a screenshot */}
@@ -4060,23 +4199,19 @@ export default function PaymentTracker() {
                                     && p.screenshotFileId;
                                 })
                                 .map((pay, i) => (
-                                  <a
-                                    key={pay._id || i}
-                                    href={proxyUrl.payReceipt(pay._id)}
-                                    target="_blank"
-                                    rel="noopener noreferrer"
-                                    title={`Payment receipt — ${fmt(pay.amount)}`}
-                                    onClick={(e) => e.stopPropagation()}
-                                    style={{
-                                      display: 'inline-flex', alignItems: 'center', gap: 4,
-                                      fontFamily: jost, fontSize: 9, fontWeight: 400,
-                                      letterSpacing: '0.12em', textTransform: 'uppercase',
-                                      color: '#15803d', textDecoration: 'none',
-                                      padding: '3px 8px', border: '1px solid #bbf7d0', borderRadius: 4,
-                                    }}
-                                  >
-                                    <CreditCard size={10} /> {fmt(pay.amount)}
-                                  </a>
+                                  <span key={pay._id || i} onClick={(e) => e.stopPropagation()}>
+                                    <DocLink
+                                      url={proxyUrl.payReceipt(pay._id)}
+                                      mimeType={pay.screenshotMime}
+                                      label={fmt(pay.amount)}
+                                      style={{
+                                        fontFamily: jost, fontSize: 9, fontWeight: 400,
+                                        letterSpacing: '0.12em', textTransform: 'uppercase',
+                                        color: '#15803d', background: 'transparent',
+                                        padding: '3px 8px', border: '1px solid #bbf7d0', borderRadius: 4,
+                                      }}
+                                    />
+                                  </span>
                                 ))
                               }
 
@@ -4278,7 +4413,7 @@ export default function PaymentTracker() {
                     pi.invoices?.includes(inv._id) ||
                     (inv.vendor_name && pi.vendor?.companyName &&
                       (inv.vendor_name.toLowerCase().includes(pi.vendor.companyName.toLowerCase()) ||
-                       pi.vendor.companyName.toLowerCase().includes(inv.vendor_name.toLowerCase())) &&
+                        pi.vendor.companyName.toLowerCase().includes(inv.vendor_name.toLowerCase())) &&
                       Math.abs((inv.total_amount || 0) - (pi.totalAmount || 0)) < (pi.totalAmount || 1) * 0.5),
                   );
                   const linkedPayments = [
