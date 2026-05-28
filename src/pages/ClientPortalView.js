@@ -1516,7 +1516,7 @@ const ProductBento = ({ items, onZoom, wishlisted=new Set(), onToggleWish=()=>{}
                               <div style={{fontSize:isMobile?11:12,fontWeight:400,color:'#1a1a1a',lineHeight:1.2,flex:1,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap',fontFamily:"'Jost',sans-serif",letterSpacing:'0.04em'}}>
                                 {item.name}
                               </div>
-                              <div style={{fontSize:isMobile?13:14,fontWeight:300,color:'#b8975a',fontFamily:"'Cormorant Garamond',Georgia,serif",flexShrink:0,fontStyle:'italic'}}>
+                              <div style={{fontSize:isMobile?13:18,fontWeight:300,color:'#1a1a1a',fontFamily:"'Cormorant Garamond',Georgia,serif",flexShrink:0,fontStyle:'italic'}}>
                                 {toINR(item.price)}
                               </div>
                             </div>
