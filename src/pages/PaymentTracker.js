@@ -78,6 +78,17 @@ const normalizeFY = (fy) => {
 };
 
 
+// ── Proxy URL builders ────────────────────────────────────────────────────────
+// OneDrive webUrl is a SharePoint page — it requires the user to be signed into
+// Microsoft 365 in the browser and returns 401 when used as <img src> or <a href>.
+// Always use these proxy routes instead: the server fetches a fresh download URL
+// from Graph API and pipes the bytes back to the browser directly.
+const proxyUrl = {
+  invoice:    (id) => `/api/payment-tracker/invoices/${id}/file`,
+  piAttach:   (id) => `/api/payment-tracker/pi/${id}/attachment`,
+  payReceipt: (id) => `/api/payment-tracker/payments/${id}/screenshot`,
+};
+
 // ── Image compression ─────────────────────────────────────────────────────────
 const compressImage = (b64) =>
   new Promise((resolve) => {
@@ -845,14 +856,24 @@ function UploadPIModal({ vendors, onSave, onClose }) {
     log.info('Saving PI', { piNumber: form.piNumber });
     setSaving(true);
     try {
-      const payload = {
-        ...form,
-        totalAmount:    parseFloat(form.totalAmount),
-        attachment:     fileBase64 || undefined,
-        attachmentMime: fileMime   || undefined,
-      };
-      if (!payload.dueDate) delete payload.dueDate;
-      const res     = await api.post('/payment-tracker/pi', payload);
+      const fd = new FormData();
+      const fields = { ...form, totalAmount: parseFloat(form.totalAmount) };
+      if (!fields.dueDate) delete fields.dueDate;
+      Object.entries(fields).forEach(([k, v]) => {
+        if (v !== undefined && v !== null && v !== '') fd.append(k, v);
+      });
+      if (fileBase64) {
+        const [meta, data] = fileBase64.split(',');
+        const mime  = meta.match(/:(.*?);/)?.[1] || fileMime || 'application/octet-stream';
+        const bytes = atob(data);
+        const arr   = new Uint8Array(bytes.length);
+        for (let i = 0; i < bytes.length; i++) arr[i] = bytes.charCodeAt(i);
+        fd.append('attachment', new Blob([arr], { type: mime }),
+          `pi-attachment${mime === 'application/pdf' ? '.pdf' : '.jpg'}`);
+      }
+      const res     = await api.post('/payment-tracker/pi', fd, {
+        headers: { 'Content-Type': 'multipart/form-data' },
+      });
       const resData = res.data;
       if (res.status === 409 && resData.duplicate) {
         setDupInfo({ piNumber: resData.piNumber });
@@ -1179,20 +1200,34 @@ function UploadInvoiceModal({ vendors, proformaInvoices, linkedPiId, onSave, onC
     setSaving(true);
     try {
       const { month, fy } = getFinancialDetails(form.date);
-      const payload = {
+      const fd = new FormData();
+      const fields = {
         ...form,
         total_amount:  parseFloat(form.total_amount),
         cgst:          parseFloat(form.cgst) || 0,
         sgst:          parseFloat(form.sgst) || 0,
         igst:          parseFloat(form.igst) || 0,
-        image:         fileBase64 || undefined,
         mimeType:      fileMime   || 'image/jpeg',
         receivedVia:   'manual_upload',
         financialYear: form.financialYear || fy,
         month:         form.month || month,
         notes:         form.notes || 'Uploaded via Payment Tracker',
       };
-      const res     = await api.post('/payment-tracker/invoices', payload);
+      Object.entries(fields).forEach(([k, v]) => {
+        if (v !== undefined && v !== null && v !== '') fd.append(k, v);
+      });
+      if (fileBase64) {
+        const [meta, data] = fileBase64.split(',');
+        const mime  = meta.match(/:(.*?);/)?.[1] || fileMime || 'image/jpeg';
+        const bytes = atob(data);
+        const arr   = new Uint8Array(bytes.length);
+        for (let i = 0; i < bytes.length; i++) arr[i] = bytes.charCodeAt(i);
+        fd.append('file', new Blob([arr], { type: mime }),
+          `invoice${mime === 'application/pdf' ? '.pdf' : '.jpg'}`);
+      }
+      const res     = await api.post('/payment-tracker/invoices', fd, {
+        headers: { 'Content-Type': 'multipart/form-data' },
+      });
       const resData = res.data;
       if (res.status === 409 && resData.duplicate) {
         setDupInfo({ invoice_number: resData.invoice_number, vendor_name: resData.vendor_name });
@@ -1575,16 +1610,26 @@ function RecordPaymentModal({ vendors, proformaInvoices, vendorInvoices, payment
     log.info('Recording payment', { amount: form.amount, mappedTo: form.mappedTo });
     setSaving(true);
     try {
-      const payload = {
-        ...form,
-        amount:         parseFloat(form.amount),
-        screenshot:     fileBase64 || undefined,
-        screenshotMime: fileMime   || undefined,
-      };
+      const fd = new FormData();
+      const payload = { ...form, amount: parseFloat(form.amount) };
       if (payload.mappedTo !== 'proforma_invoice') delete payload.proformaInvoice;
       if (payload.mappedTo !== 'vendor_invoice')   delete payload.vendorInvoice;
       if (!payload.vendor)                          delete payload.vendor;
-      const res = await api.post('/payment-tracker/payments', payload);
+      Object.entries(payload).forEach(([k, v]) => {
+        if (v !== undefined && v !== null && v !== '') fd.append(k, v);
+      });
+      if (fileBase64) {
+        const [meta, data] = fileBase64.split(',');
+        const mime  = meta.match(/:(.*?);/)?.[1] || fileMime || 'image/jpeg';
+        const bytes = atob(data);
+        const arr   = new Uint8Array(bytes.length);
+        for (let i = 0; i < bytes.length; i++) arr[i] = bytes.charCodeAt(i);
+        fd.append('screenshot', new Blob([arr], { type: mime }),
+          `payment-screenshot${mime === 'application/pdf' ? '.pdf' : '.jpg'}`);
+      }
+      const res = await api.post('/payment-tracker/payments', fd, {
+        headers: { 'Content-Type': 'multipart/form-data' },
+      });
       if (res.status >= 400) throw new Error(res.data.error);
       log.info('Payment recorded successfully');
       onSave(res.data);
@@ -2121,10 +2166,10 @@ function PIFlowModal({ pi: piProp, payments, invoices, onMapPayment, onUploadInv
               {pi.bankDetails}
             </div>
           )}
-          {(pi.attachmentUrl || pi.attachment) && (
+          {pi.attachmentFileId && (
             <div style={{ marginTop: 8 }}>
               <DocLink
-                url={pi.attachmentUrl || pi.attachment}
+                url={proxyUrl.piAttach(pi._id)}
                 mimeType={pi.attachmentMime}
                 label="PI Document"
                 style={{ background: 'rgba(255,255,255,0.15)', color: '#fff' }}
@@ -2156,10 +2201,10 @@ function PIFlowModal({ pi: piProp, payments, invoices, onMapPayment, onUploadInv
                 {pay.bankRef && (
                   <div style={{ fontSize: 11, color: '#94a3b8', fontFamily: 'monospace' }}>Ref: {pay.bankRef}</div>
                 )}
-                {(pay.screenshotUrl || pay.screenshot) && (
+                {pay.screenshotFileId && (
                   <div style={{ marginTop: 4 }}>
                     <DocLink
-                      url={pay.screenshotUrl || pay.screenshot}
+                      url={proxyUrl.payReceipt(pay._id)}
                       mimeType={pay.screenshotMime}
                       label="Screenshot"
                       style={{ background: '#f0fdf4', color: '#15803d' }}
@@ -2410,22 +2455,22 @@ function InvoiceViewerModal({ invoice, onClose }) {
             <div style={{ display: 'flex', flexDirection: 'column', gap: 7 }}>
 
               {/* Invoice document */}
-              {(invoice.oneDriveUrl || invoice.image) && (
+              {(invoice.oneDriveFileId || invoice.image) && (
                 <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '8px 12px', background: '#fff', border: '1px solid #e2e8f0', borderRadius: 8 }}>
                   <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                     <span style={{ fontSize: 16 }}>{invoice.mimeType === 'application/pdf' ? '📄' : '🖼'}</span>
                     <div>
                       <div style={{ fontSize: 12, fontWeight: 700, color: '#0f172a' }}>Invoice Document</div>
                       <div style={{ fontSize: 10, color: '#94a3b8' }}>
-                        {invoice.fileName || invoice.invoice_number}{invoice.oneDriveUrl ? ' · OneDrive' : ''}
+                        {invoice.fileName || invoice.invoice_number}{invoice.oneDriveFileId ? ' · OneDrive' : ''}
                       </div>
                     </div>
                   </div>
                   <div style={{ display: 'flex', gap: 6 }}>
                     <DocLink
-                      url={invoice.oneDriveUrl || invoice.image}
+                      url={invoice.oneDriveFileId ? proxyUrl.invoice(invoice._id) : invoice.image}
                       mimeType={invoice.mimeType}
-                      label={invoice.oneDriveUrl ? 'Open in OneDrive' : 'View'}
+                      label="View"
                       style={{ background: '#eff6ff', color: '#1d4ed8' }}
                     />
                   </div>
@@ -2433,50 +2478,50 @@ function InvoiceViewerModal({ invoice, onClose }) {
               )}
 
               {/* Linked PI document */}
-              {(invoice._linkedPI?.attachmentUrl || invoice._linkedPI?.attachment) && (
+              {invoice._linkedPI?.attachmentFileId && (
                 <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '8px 12px', background: '#fff', border: '1px solid #e2e8f0', borderRadius: 8 }}>
                   <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                     <span style={{ fontSize: 16 }}>📋</span>
                     <div>
                       <div style={{ fontSize: 12, fontWeight: 700, color: '#6366f1' }}>Proforma Invoice</div>
                       <div style={{ fontSize: 10, color: '#94a3b8' }}>
-                        {invoice._linkedPI.piNumber}{invoice._linkedPI.attachmentUrl ? ' · OneDrive' : ''}
+                        {invoice._linkedPI.piNumber} · OneDrive
                       </div>
                     </div>
                   </div>
                   <DocLink
-                    url={invoice._linkedPI.attachmentUrl || invoice._linkedPI.attachment}
+                    url={proxyUrl.piAttach(invoice._linkedPI._id)}
                     mimeType={invoice._linkedPI.attachmentMime}
-                    label={invoice._linkedPI.attachmentUrl ? 'Open in OneDrive' : 'View'}
+                    label="View"
                     style={{ background: '#ede9fe', color: '#6d28d9' }}
                   />
                 </div>
               )}
 
               {/* Payment receipts */}
-              {invoice._linkedPayments?.filter((p) => p.screenshotUrl || p.screenshot).map((p, i) => (
+              {invoice._linkedPayments?.filter((p) => p.screenshotFileId).map((p, i) => (
                 <div key={p._id || i} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '8px 12px', background: '#fff', border: '1px solid #e2e8f0', borderRadius: 8 }}>
                   <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                     <span style={{ fontSize: 16 }}>💳</span>
                     <div>
                       <div style={{ fontSize: 12, fontWeight: 700, color: '#10b981' }}>Payment Receipt — {fmt(p.amount)}</div>
                       <div style={{ fontSize: 10, color: '#94a3b8' }}>
-                        {p.paymentRef} · {fmtDate(p.paymentDate)}{p.screenshotUrl ? ' · OneDrive' : ''}
+                        {p.paymentRef} · {fmtDate(p.paymentDate)} · OneDrive
                       </div>
                     </div>
                   </div>
                   <DocLink
-                    url={p.screenshotUrl || p.screenshot}
+                    url={proxyUrl.payReceipt(p._id)}
                     mimeType={p.screenshotMime}
-                    label={p.screenshotUrl ? 'Open in OneDrive' : 'View'}
+                    label="View"
                     style={{ background: '#f0fdf4', color: '#15803d' }}
                   />
                 </div>
               ))}
 
-              {!invoice.oneDriveUrl && !invoice.image &&
-               !invoice._linkedPI?.attachmentUrl && !invoice._linkedPI?.attachment &&
-               !invoice._linkedPayments?.some((p) => p.screenshotUrl || p.screenshot) && (
+              {!invoice.oneDriveFileId && !invoice.image &&
+               !invoice._linkedPI?.attachmentFileId &&
+               !invoice._linkedPayments?.some((p) => p.screenshotFileId) && (
                 <div style={{ textAlign: 'center', color: '#94a3b8', fontSize: 12, padding: '10px 0' }}>
                   No documents attached
                 </div>
@@ -2487,7 +2532,17 @@ function InvoiceViewerModal({ invoice, onClose }) {
 
         {/* Right column — document preview */}
         <div style={{ background: '#f1f5f9', borderRadius: 16, overflow: 'hidden', minHeight: 400, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-          {invoice.image ? (
+          {invoice.oneDriveFileId ? (
+            invoice.mimeType === 'application/pdf'
+              ? <iframe
+                  src={proxyUrl.invoice(invoice._id)}
+                  style={{ width: '100%', height: 500, border: 'none' }}
+                  title="PDF"
+                />
+              : <div style={{ overflowY: 'auto', maxHeight: 600, width: '100%' }}>
+                  <img src={proxyUrl.invoice(invoice._id)} style={{ width: '100%' }} alt="Invoice" />
+                </div>
+          ) : invoice.image ? (
             invoice.mimeType === 'application/pdf'
               ? <iframe src={invoice.image} style={{ width: '100%', height: 500, border: 'none' }} title="PDF" />
               : <div style={{ overflowY: 'auto', maxHeight: 600 }}>
@@ -2580,8 +2635,8 @@ function InvoiceVaultTab({ invoices, payments, proformaInvoices, vendors, onDele
     const S = window.saveAs;
     if (!J || !S) { onToast('Zip libraries are still loading — please try again in a moment.', 'warning'); return; }
 
-    // Invoices that have either a OneDrive URL or embedded image
-    const downloadable = items.filter((inv) => inv.oneDriveUrl || inv.image);
+    // Invoices that have a file in OneDrive or embedded image
+    const downloadable = items.filter((inv) => inv.oneDriveFileId || inv.image);
     if (downloadable.length === 0) {
       onToast('No invoice documents found to zip for this period.', 'warning'); return;
     }
@@ -2615,16 +2670,16 @@ function InvoiceVaultTab({ invoices, payments, proformaInvoices, vendors, onDele
             })())
           : root;
 
-        // Prefer OneDrive URL (permanent link), fall back to base64 image
-        if (inv.oneDriveUrl) {
+        // Prefer proxy route (authenticated server-side fetch), fall back to base64 image
+        if (inv.oneDriveFileId) {
           try {
-            const blob = await fetch(inv.oneDriveUrl).then((r) => {
+            const blob = await fetch(proxyUrl.invoice(inv._id)).then((r) => {
               if (!r.ok) throw new Error(`HTTP ${r.status}`);
               return r.blob();
             });
             folder.file(`${name}.${ext}`, blob);
           } catch (fetchErr) {
-            // OneDrive fetch failed (CORS / expired token) — try base64 fallback
+            // Proxy failed — try base64 fallback
             if (inv.image) {
               if (inv.image.startsWith('data:')) {
                 folder.file(`${name}.${ext}`, inv.image.split(',')[1], { base64: true });
@@ -2634,7 +2689,7 @@ function InvoiceVaultTab({ invoices, payments, proformaInvoices, vendors, onDele
                 } catch {}
               }
             }
-            log.warn('OneDrive fetch failed for zip, used fallback', { invoice: inv.invoice_number, error: fetchErr.message });
+            log.warn('Proxy fetch failed for zip, used fallback', { invoice: inv.invoice_number, error: fetchErr.message });
           }
         } else if (inv.image) {
           if (inv.image.startsWith('data:')) {
@@ -2755,9 +2810,9 @@ function InvoiceVaultTab({ invoices, payments, proformaInvoices, vendors, onDele
                     <button onClick={() => { onViewInvoice(inv); setDocList(null); }} style={{ display: 'flex', alignItems: 'center', gap: 5, padding: '6px 12px', borderRadius: 7, border: 'none', background: '#eff6ff', color: '#1d4ed8', fontWeight: 700, fontSize: 11, cursor: 'pointer' }}>
                       <Eye size={12} /> View
                     </button>
-                    {(inv.oneDriveUrl || inv.image) && (
+                    {(inv.oneDriveFileId || inv.image) && (
                       <DocLink
-                        url={inv.oneDriveUrl || inv.image}
+                        url={inv.oneDriveFileId ? proxyUrl.invoice(inv._id) : inv.image}
                         mimeType={inv.mimeType}
                         label="⬇"
                         style={{ padding: '6px 12px', borderRadius: 7, background: '#f1f5f9', color: '#475569', fontSize: 11 }}
@@ -2889,7 +2944,7 @@ function InvoiceVaultTab({ invoices, payments, proformaInvoices, vendors, onDele
                     ))}
                   </div>
                   <div style={{ display: 'flex', gap: 6 }}>
-                    <button onClick={(e) => { e.stopPropagation(); setDocList({ title: `FY ${fy} Vault`, items: allFYItems.filter((i) => i.image) }); }} style={{ display: 'flex', alignItems: 'center', gap: 5, padding: '5px 10px', borderRadius: 6, border: '1px solid #e2e8f0', background: '#fff', fontSize: 11, fontWeight: 700, cursor: 'pointer' }}>
+                    <button onClick={(e) => { e.stopPropagation(); setDocList({ title: `FY ${fy} Vault`, items: allFYItems.filter((i) => i.oneDriveFileId || i.image) }); }} style={{ display: 'flex', alignItems: 'center', gap: 5, padding: '5px 10px', borderRadius: 6, border: '1px solid #e2e8f0', background: '#fff', fontSize: 11, fontWeight: 700, cursor: 'pointer' }}>
                       <Link2 size={12} /> Links
                     </button>
                     <button onClick={(e) => { e.stopPropagation(); downloadZip(`FY_${fy}`, allFYItems, true); }} style={{ display: 'flex', alignItems: 'center', gap: 5, padding: '5px 10px', borderRadius: 6, border: '1px solid #e2e8f0', background: '#fff', fontSize: 11, fontWeight: 700, cursor: 'pointer' }}>
@@ -3040,9 +3095,9 @@ function InvoiceVaultTab({ invoices, payments, proformaInvoices, vendors, onDele
                                                 </span>
                                               </div>
                                             </div>
-                                            {matchedPI.attachment && (
+                                            {matchedPI.attachmentFileId && (
                                               <DocLink
-                                                url={matchedPI.attachmentUrl || matchedPI.attachment}
+                                                url={proxyUrl.piAttach(matchedPI._id)}
                                                 mimeType={matchedPI.attachmentMime}
                                                 label="PI Doc"
                                                 style={{ background: '#ede9fe', color: '#6d28d9', padding: '4px 9px', fontSize: 10 }}
@@ -3067,9 +3122,9 @@ function InvoiceVaultTab({ invoices, payments, proformaInvoices, vendors, onDele
                                                   </div>
                                                   <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
                                                     <span style={{ fontSize: 11, color: '#94a3b8', fontFamily: 'monospace' }}>{p.paymentRef}</span>
-                                                    {(p.screenshotUrl || p.screenshot) && (
+                                                    {p.screenshotFileId && (
                                                       <DocLink
-                                                        url={p.screenshotUrl || p.screenshot}
+                                                        url={proxyUrl.payReceipt(p._id)}
                                                         mimeType={p.screenshotMime}
                                                         label="Receipt"
                                                         style={{ background: '#ddd6fe', color: '#5b21b6', padding: '3px 7px', fontSize: 10 }}
@@ -3105,9 +3160,9 @@ function InvoiceVaultTab({ invoices, payments, proformaInvoices, vendors, onDele
                                               </div>
                                               <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
                                                 <span style={{ fontSize: 11, color: '#94a3b8', fontFamily: 'monospace' }}>{p.paymentRef}</span>
-                                                {(p.screenshotUrl || p.screenshot) && (
+                                                {p.screenshotFileId && (
                                                   <DocLink
-                                                    url={p.screenshotUrl || p.screenshot}
+                                                    url={proxyUrl.payReceipt(p._id)}
                                                     mimeType={p.screenshotMime}
                                                     label="Receipt"
                                                     style={{ background: '#bfdbfe', color: '#1d4ed8', padding: '3px 7px', fontSize: 10 }}
@@ -3312,19 +3367,33 @@ function MobileInvoicePage({ vendors, proformaInvoices, onSaved }) {
     setSaving(true);
     try {
       const { month, fy } = getFinancialDetails(form.date);
-      const payload = {
+      const fd = new FormData();
+      const fields = {
         ...form,
         total_amount:  parseFloat(form.total_amount),
-        cgst:          parseFloat(form.cgst)         || 0,
-        sgst:          parseFloat(form.sgst)         || 0,
-        igst:          parseFloat(form.igst)         || 0,
-        image:         fileBase64                    || undefined,
-        mimeType:      fileMime                      || 'image/jpeg',
+        cgst:          parseFloat(form.cgst)  || 0,
+        sgst:          parseFloat(form.sgst)  || 0,
+        igst:          parseFloat(form.igst)  || 0,
+        mimeType:      fileMime || 'image/jpeg',
         receivedVia:   'manual_upload',
-        financialYear: form.financialYear            || fy,
-        month:         form.month                   || month,
+        financialYear: form.financialYear || fy,
+        month:         form.month         || month,
       };
-      const res = await api.post('/payment-tracker/invoices', payload);
+      Object.entries(fields).forEach(([k, v]) => {
+        if (v !== undefined && v !== null && v !== '') fd.append(k, v);
+      });
+      if (fileBase64) {
+        const [meta, data] = fileBase64.split(',');
+        const mime  = meta.match(/:(.*?);/)?.[1] || fileMime || 'image/jpeg';
+        const bytes = atob(data);
+        const arr   = new Uint8Array(bytes.length);
+        for (let i = 0; i < bytes.length; i++) arr[i] = bytes.charCodeAt(i);
+        fd.append('file', new Blob([arr], { type: mime }),
+          `invoice${mime === 'application/pdf' ? '.pdf' : '.jpg'}`);
+      }
+      const res = await api.post('/payment-tracker/invoices', fd, {
+        headers: { 'Content-Type': 'multipart/form-data' },
+      });
       const d   = res.data;
       if (res.status === 409 && d.duplicate) {
         setDupInfo({ invoice_number: d.invoice_number, vendor_name: d.vendor_name });
@@ -3960,7 +4029,57 @@ export default function PaymentTracker() {
                           <td style={{ padding: '16px 18px', textAlign: 'right' }}
                               onClick={(e) => e.stopPropagation()}
                           >
-                            <div style={{ display: 'flex', alignItems: 'center', gap: 14, justifyContent: 'flex-end' }}>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 10, justifyContent: 'flex-end' }}>
+
+                              {/* PI document chip */}
+                              {pi.attachmentFileId && (
+                                <a
+                                  href={proxyUrl.piAttach(pi._id)}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  title="View PI Document"
+                                  onClick={(e) => e.stopPropagation()}
+                                  style={{
+                                    display: 'inline-flex', alignItems: 'center', gap: 4,
+                                    fontFamily: jost, fontSize: 9, fontWeight: 400,
+                                    letterSpacing: '0.12em', textTransform: 'uppercase',
+                                    color: '#6d28d9', textDecoration: 'none',
+                                    padding: '3px 8px', border: '1px solid #ede9fe', borderRadius: 4,
+                                  }}
+                                >
+                                  <FileText size={10} /> PI
+                                </a>
+                              )}
+
+                              {/* Payment receipt chips — one per payment that has a screenshot */}
+                              {data.payments
+                                .filter((p) => {
+                                  const pPiId = String(p.proformaInvoice?._id || p.proformaInvoice || '');
+                                  return p.mappedTo === 'proforma_invoice'
+                                    && pPiId === String(pi._id)
+                                    && p.screenshotFileId;
+                                })
+                                .map((pay, i) => (
+                                  <a
+                                    key={pay._id || i}
+                                    href={proxyUrl.payReceipt(pay._id)}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    title={`Payment receipt — ${fmt(pay.amount)}`}
+                                    onClick={(e) => e.stopPropagation()}
+                                    style={{
+                                      display: 'inline-flex', alignItems: 'center', gap: 4,
+                                      fontFamily: jost, fontSize: 9, fontWeight: 400,
+                                      letterSpacing: '0.12em', textTransform: 'uppercase',
+                                      color: '#15803d', textDecoration: 'none',
+                                      padding: '3px 8px', border: '1px solid #bbf7d0', borderRadius: 4,
+                                    }}
+                                  >
+                                    <CreditCard size={10} /> {fmt(pay.amount)}
+                                  </a>
+                                ))
+                              }
+
                               <span style={{
                                 fontFamily: jost, fontSize: 9, fontWeight: 400,
                                 letterSpacing: '0.18em', textTransform: 'uppercase', color: T.gold,
@@ -4073,9 +4192,9 @@ export default function PaymentTracker() {
                           </td>
                           <td style={{ padding: '14px 18px', textAlign: 'right' }}>
                             <div style={{ display: 'flex', alignItems: 'center', gap: 10, justifyContent: 'flex-end' }}>
-                              {(pay.screenshotUrl || pay.screenshot) && (
+                              {pay.screenshotFileId && (
                                 <DocLink
-                                  url={pay.screenshotUrl || pay.screenshot}
+                                  url={proxyUrl.payReceipt(pay._id)}
                                   mimeType={pay.screenshotMime}
                                   label="Receipt"
                                   style={{ fontFamily: jost, fontSize: 9, fontWeight: 400, letterSpacing: '0.18em', textTransform: 'uppercase', color: T.muted, background: 'none', padding: '0' }}

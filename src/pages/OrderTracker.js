@@ -1013,7 +1013,9 @@ export default function OrderTracker() {
 
         // Create portal to get the real server-generated slug
         const savedOrder = res.data;
-        let portalSlug   = generatedRef.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+        const genRandomSlug = () => Array.from({length: 10}, () => 'abcdefghijklmnopqrstuvwxyz0123456789'[Math.floor(Math.random() * 36)]).join('');
+        //let portalSlug   = generatedRef.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+        let portalSlug   = genRandomSlug();
         let portalUrl    = `${CLIENT_BASE_URL}/p/${portalSlug}`;
 
         try {
