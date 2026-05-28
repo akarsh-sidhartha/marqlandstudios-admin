@@ -43,6 +43,78 @@ const ClientPortalEditor = ({ order, onClose }) => {
   const pollTimer          = useRef(null);
   const prevClientMsgCount = useRef(0);
 
+  // ── Price override state (product gifting) ─────────────────────────────────
+  // { [itemId]: { editing: bool, value: string } }
+  const [priceEdits, setPriceEdits] = useState({});
+
+  const startPriceEdit = (itemId, currentPrice) =>
+    setPriceEdits(p => ({ ...p, [itemId]: { editing: true, value: String(currentPrice ?? '') } }));
+
+  const cancelPriceEdit = (itemId) =>
+    setPriceEdits(p => { const n = { ...p }; delete n[itemId]; return n; });
+
+  const savePriceOverride = async (itemId) => {
+    const raw = priceEdits[itemId]?.value ?? '';
+    const price = raw === '' ? null : Number(raw);
+    if (price !== null && isNaN(price)) return;
+    const calcState = portal.calculatorState || {};
+    const cur = calcState[itemId] || {};
+    const newState = {
+      ...calcState,
+      [itemId]: {
+        ...cur,
+        priceOverride: price === null ? undefined : price,
+      },
+    };
+    // Remove undefined key cleanly
+    if (price === null) delete newState[itemId].priceOverride;
+    try {
+      await api.put(`/portal/${portal.slug}/calculator`, { calculatorState: newState });
+      setPortal(p => ({ ...p, calculatorState: newState }));
+    } catch (e) { console.error('price override save failed', e); }
+    cancelPriceEdit(itemId);
+  };
+
+  // ── Custom add-on state (offsite) ──────────────────────────────────────────
+  // { [itemId]: { show: bool, name: '', price: '', pricingType: 'flat'|'per_person' } }
+  const [addonForms, setAddonForms] = useState({});
+
+  const openAddonForm = (itemId) =>
+    setAddonForms(p => ({ ...p, [itemId]: { show: true, name: '', price: '', pricingType: 'flat' } }));
+
+  const closeAddonForm = (itemId) =>
+    setAddonForms(p => { const n = { ...p }; delete n[itemId]; return n; });
+
+  const saveCustomAddon = async (itemId) => {
+    const form = addonForms[itemId];
+    if (!form?.name?.trim()) return;
+    const price = form.price !== '' ? Number(form.price) : 0;
+    const calcState = portal.calculatorState || {};
+    const cur = calcState[itemId] || {};
+    const existing = cur.portalCustomAddons || [];
+    const newAddon = { name: form.name.trim(), price, pricingType: form.pricingType || 'flat' };
+    const newState = {
+      ...calcState,
+      [itemId]: { ...cur, portalCustomAddons: [...existing, newAddon] },
+    };
+    try {
+      await api.put(`/portal/${portal.slug}/calculator`, { calculatorState: newState });
+      setPortal(p => ({ ...p, calculatorState: newState }));
+    } catch (e) { console.error('custom addon save failed', e); }
+    closeAddonForm(itemId);
+  };
+
+  const removeCustomAddon = async (itemId, addonIdx) => {
+    const calcState = portal.calculatorState || {};
+    const cur = calcState[itemId] || {};
+    const updated = (cur.portalCustomAddons || []).filter((_, i) => i !== addonIdx);
+    const newState = { ...calcState, [itemId]: { ...cur, portalCustomAddons: updated } };
+    try {
+      await api.put(`/portal/${portal.slug}/calculator`, { calculatorState: newState });
+      setPortal(p => ({ ...p, calculatorState: newState }));
+    } catch (e) { console.error('custom addon remove failed', e); }
+  };
+
   // ── Custom item form state ──────────────────────────────────────────────────
   const [showCustomForm, setShowCustomForm] = useState(false);
   const [customForm, setCustomForm]         = useState({ name:'', description:'', price:'' });
@@ -403,7 +475,64 @@ const ClientPortalEditor = ({ order, onClose }) => {
                               </div>
                               <div className="flex-1 min-w-0">
                                 <div className="font-bold text-sm text-slate-800 truncate">{item.name}</div>
-                                <div className="text-[11px] text-slate-500 mt-0.5">₹{Number(item.price||0).toLocaleString('en-IN')}</div>
+
+                                {/* ── Per-order price override ── */}
+                                {(() => {
+                                  const calcState = portal.calculatorState || {};
+                                  const override  = calcState[item._id]?.priceOverride;
+                                  const editing   = priceEdits[item._id];
+                                  const basePrice = Number(item.price || 0);
+                                  const displayPrice = override != null ? Number(override) : basePrice;
+
+                                  if (editing) {
+                                    return (
+                                      <div className="flex items-center gap-1.5 mt-0.5">
+                                        <span className="text-[11px] text-slate-400 font-bold">₹</span>
+                                        <input
+                                          type="number" min="0" autoFocus
+                                          value={editing.value}
+                                          onChange={e => setPriceEdits(p => ({ ...p, [item._id]: { ...p[item._id], value: e.target.value } }))}
+                                          onKeyDown={e => { if (e.key === 'Enter') savePriceOverride(item._id); if (e.key === 'Escape') cancelPriceEdit(item._id); }}
+                                          className="w-24 border border-indigo-300 rounded px-1.5 py-0.5 text-xs font-bold text-slate-700 outline-none focus:ring-1 focus:ring-indigo-400"
+                                        />
+                                        <button onClick={() => savePriceOverride(item._id)} className="p-0.5 text-emerald-500 hover:text-emerald-700"><Check size={12}/></button>
+                                        <button onClick={() => cancelPriceEdit(item._id)} className="p-0.5 text-slate-300 hover:text-slate-500"><X size={12}/></button>
+                                      </div>
+                                    );
+                                  }
+                                  return (
+                                    <div className="flex items-center gap-1.5 mt-0.5">
+                                      <span className={`text-[11px] font-bold ${override != null ? 'text-amber-600' : 'text-slate-500'}`}>
+                                        ₹{displayPrice.toLocaleString('en-IN')}
+                                      </span>
+                                      {override != null && (
+                                        <span className="text-[9px] text-slate-400 line-through">₹{basePrice.toLocaleString('en-IN')}</span>
+                                      )}
+                                      <button
+                                        onClick={() => startPriceEdit(item._id, displayPrice)}
+                                        title="Override price for this order"
+                                        className="p-0.5 text-slate-300 hover:text-indigo-500 transition-colors"
+                                      ><Edit3 size={11}/></button>
+                                      {override != null && (
+                                        <button
+                                          onClick={async () => {
+                                            const calcState2 = portal.calculatorState || {};
+                                            const cur2 = { ...(calcState2[item._id] || {}) };
+                                            delete cur2.priceOverride;
+                                            const ns = { ...calcState2, [item._id]: cur2 };
+                                            try {
+                                              await api.put(`/portal/${portal.slug}/calculator`, { calculatorState: ns });
+                                              setPortal(p => ({ ...p, calculatorState: ns }));
+                                            } catch(e) { console.error(e); }
+                                          }}
+                                          title="Reset to catalogue price"
+                                          className="text-[9px] text-amber-400 hover:text-amber-600 font-bold leading-none"
+                                        >reset</button>
+                                      )}
+                                    </div>
+                                  );
+                                })()}
+
                                 <div className="flex items-center gap-2 mt-1 flex-wrap">
                                   {(item.additionalImages||[]).length > 0 && (
                                     <span className="text-[9px] bg-violet-100 text-violet-600 font-black px-1.5 py-0.5 rounded-full uppercase">
@@ -718,6 +847,89 @@ const ClientPortalEditor = ({ order, onClose }) => {
                             </div>
                           </div>
                         )}
+
+                        {/* ── Portal-only custom add-ons (offsite) ── */}
+                        {(() => {
+                          const customAddons = itemState.portalCustomAddons || [];
+                          const addonForm = addonForms[item._id];
+                          return (
+                            <div>
+                              <div className="text-[9px] font-black text-slate-400 uppercase tracking-widest mb-1.5">
+                                Custom Add-ons <span className="font-normal normal-case tracking-normal text-slate-300">— order-specific, not saved to property</span>
+                              </div>
+
+                              {/* Existing custom addons list */}
+                              {customAddons.length > 0 && (
+                                <div className="flex flex-col gap-1.5 mb-2">
+                                  {customAddons.map((ca, ci) => (
+                                    <div key={ci} className="flex items-center gap-2 bg-violet-50 border border-violet-100 rounded-lg px-2.5 py-1.5">
+                                      <div className="flex-1 min-w-0">
+                                        <span className="text-[11px] font-bold text-slate-700 truncate">{ca.name}</span>
+                                        <span className="text-[10px] text-slate-400 ml-2">
+                                          ₹{Number(ca.price).toLocaleString('en-IN')} · {ca.pricingType === 'per_person' ? 'per person' : 'flat rate'}
+                                        </span>
+                                      </div>
+                                      <button onClick={() => removeCustomAddon(item._id, ci)}
+                                        className="text-slate-300 hover:text-red-400 shrink-0 p-0.5 transition-colors">
+                                        <Trash2 size={11} />
+                                      </button>
+                                    </div>
+                                  ))}
+                                </div>
+                              )}
+
+                              {/* Add form */}
+                              {addonForm ? (
+                                <div className="border border-violet-200 rounded-lg p-2.5 space-y-2 bg-violet-50/50">
+                                  <input
+                                    type="text" autoFocus
+                                    placeholder="Add-on name *"
+                                    value={addonForm.name}
+                                    onChange={e => setAddonForms(p => ({ ...p, [item._id]: { ...p[item._id], name: e.target.value } }))}
+                                    className="w-full border border-slate-200 rounded-lg px-2.5 py-1.5 text-xs font-bold outline-none focus:border-violet-400 focus:ring-1 focus:ring-violet-200 placeholder:font-normal placeholder:text-slate-300"
+                                  />
+                                  <div className="flex gap-2 items-center">
+                                    <span className="text-xs font-bold text-slate-400 shrink-0">₹</span>
+                                    <input
+                                      type="number" min="0"
+                                      placeholder="Price"
+                                      value={addonForm.price}
+                                      onChange={e => setAddonForms(p => ({ ...p, [item._id]: { ...p[item._id], price: e.target.value } }))}
+                                      className="flex-1 border border-slate-200 rounded-lg px-2.5 py-1.5 text-xs outline-none focus:border-violet-400 focus:ring-1 focus:ring-violet-200 placeholder:text-slate-300"
+                                    />
+                                    {/* Flat / Per Person toggle */}
+                                    <div className="flex rounded-lg border border-slate-200 overflow-hidden shrink-0">
+                                      {[{ v: 'flat', l: 'Flat' }, { v: 'per_person', l: '/person' }].map(opt => (
+                                        <button key={opt.v}
+                                          onClick={() => setAddonForms(p => ({ ...p, [item._id]: { ...p[item._id], pricingType: opt.v } }))}
+                                          className={`px-2 py-1.5 text-[10px] font-black transition-colors ${addonForm.pricingType === opt.v ? 'bg-violet-600 text-white' : 'bg-white text-slate-400 hover:bg-violet-50'}`}>
+                                          {opt.l}
+                                        </button>
+                                      ))}
+                                    </div>
+                                  </div>
+                                  <div className="flex gap-1.5">
+                                    <button
+                                      onClick={() => saveCustomAddon(item._id)}
+                                      disabled={!addonForm.name?.trim()}
+                                      className="flex-1 flex items-center justify-center gap-1.5 py-1.5 bg-violet-600 hover:bg-violet-700 text-white text-[10px] font-black uppercase tracking-widest rounded-lg transition-all disabled:opacity-40">
+                                      <Check size={11} /> Save Add-on
+                                    </button>
+                                    <button onClick={() => closeAddonForm(item._id)}
+                                      className="px-3 py-1.5 bg-white border border-slate-200 text-slate-400 rounded-lg text-[10px] hover:bg-slate-50 transition-colors">
+                                      <X size={11} />
+                                    </button>
+                                  </div>
+                                </div>
+                              ) : (
+                                <button onClick={() => openAddonForm(item._id)}
+                                  className="w-full flex items-center justify-center gap-1.5 py-1.5 text-[10px] font-black uppercase tracking-widest text-slate-400 hover:text-violet-600 hover:bg-violet-50 border border-dashed border-slate-200 hover:border-violet-300 rounded-lg transition-all">
+                                  <Plus size={11} /> Add Custom Add-on
+                                </button>
+                              )}
+                            </div>
+                          );
+                        })()}
                       </div>
                     </div>
                   );
@@ -1132,7 +1344,11 @@ const ClientPortalEditor = ({ order, onClose }) => {
                         <div className="font-bold text-sm text-slate-800 truncate">{item.name}</div>
                         <div className="text-[11px] text-slate-500 mt-0.5">
                           {portal.type === 'product'
-                            ? `₹${Number(item.price||0).toLocaleString('en-IN')}${item.category ? ` · ${item.category}` : ''}`
+                            ? (() => {
+                                const ov = portal.calculatorState?.[item._id]?.priceOverride;
+                                const p  = ov != null ? Number(ov) : Number(item.price || 0);
+                                return `₹${p.toLocaleString('en-IN')}${ov != null ? ' (overridden)' : ''}${item.category ? ` · ${item.category}` : ''}`;
+                              })()
                             : `${item.location || ''}${item.doublePrice > 0 ? ` · ₹${Number(item.doublePrice).toLocaleString('en-IN')}/double` : ''}`
                           }
                         </div>

@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import api from '../api';
 import { createLogger } from '../utils/logger';
 import { SkeletonList } from '../components/PageLoader';
@@ -6,7 +6,7 @@ import {
   Download, Plus, Search, ChevronDown, ChevronRight,
   Paperclip, FileText, Image as ImageIcon, Video, X, Building2,
 } from 'lucide-react';
-import { INDIA_STATES, SearchableSelect } from '../utils/indiaLocations';
+import { INDIA_STATES, CITIES_BY_STATE, SearchableSelect } from '../utils/indiaLocations';
 
 const log = createLogger('VendorList');
 
@@ -73,6 +73,87 @@ const FocusTextarea = ({ value, onChange, placeholder, rows = 3 }) => {
   );
 };
 
+// ── Sub Category autocomplete input ──────────────────────────────────────────
+// Renders a plain text input; when the user types, shows a dropdown of
+// previously-used sub categories that match. Clicking a suggestion fills
+// the field. Pressing Escape or clicking outside closes the dropdown.
+const SubCategoryInput = ({ value, onChange, suggestions = [], placeholder }) => {
+  const [focused,  setFocused]  = useState(false);
+  const [open,     setOpen]     = useState(false);
+  const containerRef            = useRef(null);
+
+  // Filter suggestions: match typed text (case-insensitive), exclude exact match
+  const filtered = useMemo(() => {
+    if (!value.trim()) return suggestions;
+    const q = value.toLowerCase();
+    return suggestions.filter(s => s.toLowerCase().includes(q) && s.toLowerCase() !== q);
+  }, [value, suggestions]);
+
+  const showDropdown = open && filtered.length > 0;
+
+  // Close on outside click
+  useEffect(() => {
+    const handler = (e) => {
+      if (containerRef.current && !containerRef.current.contains(e.target)) {
+        setOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, []);
+
+  const handleSelect = (s) => {
+    onChange(s);
+    setOpen(false);
+  };
+
+  return (
+    <div ref={containerRef} style={{ position: 'relative' }}>
+      <input
+        type="text"
+        value={value}
+        onChange={e => { onChange(e.target.value); setOpen(true); }}
+        onFocus={() => { setFocused(true); setOpen(true); }}
+        onBlur={() => setFocused(false)}
+        onKeyDown={e => { if (e.key === 'Escape') setOpen(false); }}
+        placeholder={placeholder}
+        style={inputStyle(focused)}
+      />
+      {showDropdown && (
+        <div style={{
+          position: 'absolute', top: 'calc(100% + 4px)', left: 0, right: 0,
+          background: 'white',
+          border: `1px solid ${T.borderG}`,
+          boxShadow: '0 8px 24px rgba(0,0,0,0.08)',
+          zIndex: 400,
+          maxHeight: 180,
+          overflowY: 'auto',
+        }}>
+          {filtered.map((s, i) => (
+            <button
+              key={i}
+              type="button"
+              onMouseDown={e => { e.preventDefault(); handleSelect(s); }}
+              style={{
+                display: 'block', width: '100%', textAlign: 'left',
+                padding: '9px 14px',
+                background: 'none', border: 'none', cursor: 'pointer',
+                fontFamily: jost, fontSize: 12, fontWeight: 300, color: T.text,
+                borderBottom: i < filtered.length - 1 ? `1px solid ${T.border}` : 'none',
+                transition: 'background 0.15s',
+              }}
+              onMouseEnter={e => e.currentTarget.style.background = T.dimBg}
+              onMouseLeave={e => e.currentTarget.style.background = 'none'}
+            >
+              {s}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+};
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
 const fmtSize = (bytes = 0) =>
   bytes < 1_048_576
@@ -126,6 +207,7 @@ const VendorList = () => {
     state:            '',
     city:             '',
     category:         '',
+    subCategory:      '',
     suppliedProducts: '',
     contacts: [{ name: '', phone: '', email: '' }],
   });
@@ -148,6 +230,16 @@ const VendorList = () => {
   };
 
   // ── Derived data ──────────────────────────────────────────────────────────
+  // Collect all non-empty sub categories saved across vendors, deduplicated and sorted
+  const knownSubCategories = useMemo(() => {
+    const set = new Set(
+      vendors
+        .map(v => v.subCategory?.trim())
+        .filter(Boolean)
+    );
+    return [...set].sort((a, b) => a.localeCompare(b));
+  }, [vendors]);
+
   const filteredVendors = useMemo(() => {
     const s = searchTerm.toLowerCase();
     return vendors
@@ -205,16 +297,41 @@ const VendorList = () => {
     log.debug('Scanning business card…');
     setIsScanning(true);
     try {
+      // Build a combined prompt with whichever sides are available
+      const imagesToScan = [];
+      if (cardImages.front) imagesToScan.push({ side: 'front', data: cardImages.front });
+      if (cardImages.back)  imagesToScan.push({ side: 'back',  data: cardImages.back  });
+
+      // Use the first available image as primary; fall back gracefully
+      const primaryImage = cardImages.front || cardImages.back;
       const res = await api.post('/vendors/scan-card', {
-        image: cardImages.front,
+        image:    primaryImage,
+        backImage: cardImages.back || null,
         mimeType: 'image/jpeg',
       });
       const data = res.data;
       setFormData(prev => ({
         ...prev,
         companyName: data.company_name || data.vendor_name || prev.companyName,
-        contacts: [{ name: data.name || '', phone: data.phone || '', email: data.email || '' }],
+        contacts: [{
+          name:  data.name  || data.person_name  || '',
+          phone: data.phone || data.phone_number || '',
+          email: data.email || data.email_address || '',
+        }],
       }));
+
+      // Convert scanned card image(s) to File objects and add as attachments
+      const cardFiles = [];
+      for (const { side, data: dataUrl } of imagesToScan) {
+        const res2 = await fetch(dataUrl);
+        const blob = await res2.blob();
+        const ext  = blob.type === 'image/png' ? 'png' : 'jpg';
+        cardFiles.push(new File([blob], `business-card-${side}.${ext}`, { type: blob.type }));
+      }
+      if (cardFiles.length > 0) {
+        setNewMediaFiles(prev => [...prev, ...cardFiles]);
+      }
+
       if (data._provider && data._provider !== 'gemini') {
         log.info('Card scanned via fallback provider', { provider: data._provider });
       } else {
@@ -252,6 +369,7 @@ const VendorList = () => {
       state:            v.state            || '',
       city:             v.city             || '',
       category:         v.category         || '',
+      subCategory:      v.subCategory      || '',
       suppliedProducts: v.suppliedProducts || '',
       contacts: v.contacts?.length > 0 ? [...v.contacts] : [{ name: '', phone: '', email: '' }],
     });
@@ -282,6 +400,7 @@ const VendorList = () => {
       fd.append('state',            formData.state);
       fd.append('city',             formData.city);
       fd.append('category',         formData.category);
+      fd.append('subCategory',      formData.subCategory || '');
       fd.append('suppliedProducts', formData.suppliedProducts);
       fd.append('contacts',         JSON.stringify(formData.contacts));
       if (isEditing) fd.append('keepMediaIds', keepMediaIds.join(','));
@@ -305,7 +424,7 @@ const VendorList = () => {
   };
 
   const resetForm = () => {
-    setFormData({ companyName: '', state: '', city: '', category: '', suppliedProducts: '', contacts: [{ name: '', phone: '', email: '' }] });
+    setFormData({ companyName: '', state: '', city: '', category: '', subCategory: '', suppliedProducts: '', contacts: [{ name: '', phone: '', email: '' }] });
     setCardImages({ front: null, back: null });
     setIsEditing(false);
     setCurrentId(null);
@@ -914,7 +1033,7 @@ const VendorList = () => {
                   </label>
                 ))}
               </div>
-              {cardImages.front && (
+              {(cardImages.front || cardImages.back) && (
                 <button
                   onClick={handleScanCard}
                   disabled={isScanning}
@@ -965,8 +1084,28 @@ const VendorList = () => {
                   <option value="">Select category…</option>
                   <option value="Gifting">Gifting</option>
                   <option value="Travel">Travel</option>
+                  <option value="Events">Events</option>
                 </select>
               </div>
+            </div>
+
+            {/* Sub Category */}
+            <div style={{ marginBottom: 20 }}>
+              <label style={{
+                display: 'block', fontFamily: jost, fontSize: 9, fontWeight: 400,
+                letterSpacing: '0.25em', textTransform: 'uppercase', color: T.muted, marginBottom: 8,
+              }}>
+                Sub Category
+                <span style={{ marginLeft: 8, fontWeight: 300, textTransform: 'none', letterSpacing: 0, color: T.muted, fontSize: 9 }}>
+                  (optional)
+                </span>
+              </label>
+              <SubCategoryInput
+                value={formData.subCategory}
+                onChange={val => setFormData({ ...formData, subCategory: val })}
+                suggestions={knownSubCategories}
+                placeholder="Type sub category…"
+              />
             </div>
 
             {/* State */}
@@ -992,11 +1131,18 @@ const VendorList = () => {
                 letterSpacing: '0.25em', textTransform: 'uppercase', color: T.muted, marginBottom: 8,
               }}>
                 City
+                {!formData.state && (
+                  <span style={{ marginLeft: 8, fontWeight: 300, textTransform: 'none', letterSpacing: 0, fontSize: 9 }}>
+                    — select a state first
+                  </span>
+                )}
               </label>
-              <FocusInput
+              <SearchableSelect
                 value={formData.city}
-                onChange={e => setFormData({ ...formData, city: e.target.value })}
-                placeholder="Enter city…"
+                onChange={city => setFormData({ ...formData, city })}
+                options={formData.state ? (CITIES_BY_STATE[formData.state] || []) : []}
+                placeholder={formData.state ? 'Select city…' : 'Select state first…'}
+                disabled={!formData.state}
               />
             </div>
 
