@@ -443,6 +443,18 @@ const ProductList = () => {
   // ── Image Gallery & Video modal ──────────────────────────────────────────────
   const [galleryProduct, setGalleryProduct] = useState(null);
 
+  // ── Client visit mode (hides cost/markup from view) ──────────────────────────
+  // Persisted in localStorage so the setting survives navigation away and back.
+  const [clientMode, setClientMode] = useState(
+    () => localStorage.getItem('productList_clientMode') === 'true'
+  );
+  const toggleClientMode = () =>
+    setClientMode(prev => {
+      const next = !prev;
+      localStorage.setItem('productList_clientMode', String(next));
+      return next;
+    });
+
   // ── Popups (toast + confirm from AppPopups) ──────────────────────────────────
   const { showToast, confirm, Toast, ConfirmDialog } = usePopup();
 
@@ -878,7 +890,32 @@ const ProductList = () => {
     }
   };
 
-  // ─── Filtering & grouping ────────────────────────────────────────────────────
+  // ─── Duplicate product detection ────────────────────────────────────────────
+  // Checks name similarity against products with the same brand+category+subCategory.
+  // Runs purely against the already-fetched `products` array — no extra API call.
+  const duplicateMatches = React.useMemo(() => {
+    if (isEditing) return [];                         // skip check when editing
+    const name = formData.name.trim().toLowerCase();
+    if (name.length < 2) return [];                   // don\'t fire on 1 char
+
+    const brand    = formData.brand.trim().toLowerCase();
+    const category = formData.category.trim().toLowerCase();
+    const subCat   = formData.subCategory.trim().toLowerCase();
+
+    return products.filter(p => {
+      // Must share brand + category (subCategory optional — match if either is blank)
+      const sameBrand  = !brand    || (p.brand    || '').toLowerCase() === brand;
+      const sameCat    = !category || (p.category || '').toLowerCase() === category;
+      const sameSubCat = !subCat   || !(p.subCategory) || (p.subCategory || '').toLowerCase() === subCat;
+      if (!sameBrand || !sameCat || !sameSubCat) return false;
+
+      const existing = (p.name || '').toLowerCase();
+      // Flag if the existing name contains the typed name or vice-versa
+      return existing.includes(name) || name.includes(existing);
+    });
+  }, [formData.name, formData.brand, formData.category, formData.subCategory, products, isEditing]);
+
+    // ─── Filtering & grouping ────────────────────────────────────────────────────
   const filteredProducts = products.filter(p => {
     const sPrice = parseFloat(calculateSellingPrice(p.purchasePrice, p.markupPercent));
     const min    = filters.minPrice === '' ? 0        : parseFloat(filters.minPrice);
@@ -1144,6 +1181,37 @@ const ProductList = () => {
             >
               <Sparkles size={14} />
             </button>
+
+            {/* Client Mode toggle — hides cost/markup during client visits */}
+            <button
+              onClick={toggleClientMode}
+              title={clientMode ? 'Client Mode ON — click to show cost & markup' : 'Client Mode OFF — click to hide cost & markup'}
+              style={{
+                display: 'inline-flex', alignItems: 'center', gap: 6,
+                background: clientMode ? T.navy : 'transparent',
+                border: `1px solid ${clientMode ? T.navy : T.border}`,
+                padding: '9px 14px', borderRadius: 2,
+                fontFamily: jost, fontSize: 10, fontWeight: 400,
+                letterSpacing: '0.18em', textTransform: 'uppercase',
+                color: clientMode ? T.offwhite : T.muted,
+                cursor: 'pointer', transition: 'all 0.2s',
+              }}
+              onMouseEnter={e => {
+                if (!clientMode) {
+                  e.currentTarget.style.borderColor = T.navy;
+                  e.currentTarget.style.color = T.navy;
+                }
+              }}
+              onMouseLeave={e => {
+                if (!clientMode) {
+                  e.currentTarget.style.borderColor = T.border;
+                  e.currentTarget.style.color = T.muted;
+                }
+              }}
+            >
+              {clientMode ? <CheckSquare size={13} /> : <Square size={13} />}
+              Client Mode
+            </button>
           </div>
         </div>
       </div>
@@ -1283,21 +1351,23 @@ const ProductList = () => {
                                 {p.name}
                               </h3>
 
-                              {/* Cost / Markup */}
-                              <div style={{
-                                display: 'flex', justifyContent: 'space-between',
-                                background: T.offwhite, border: `1px solid ${T.border}`,
-                                padding: '6px 8px', marginBottom: 8,
-                              }}>
-                                <div>
-                                  <span style={{ display: 'block', fontFamily: jost, fontSize: 7, fontWeight: 400, letterSpacing: '0.2em', textTransform: 'uppercase', color: T.muted }}>Cost</span>
-                                  <span style={{ fontFamily: jost, fontSize: 11, fontWeight: 400, color: T.text }}>₹{p.purchasePrice}</span>
+                              {/* Cost / Markup — hidden in client mode */}
+                              {!clientMode && (
+                                <div style={{
+                                  display: 'flex', justifyContent: 'space-between',
+                                  background: T.offwhite, border: `1px solid ${T.border}`,
+                                  padding: '6px 8px', marginBottom: 8,
+                                }}>
+                                  <div>
+                                    <span style={{ display: 'block', fontFamily: jost, fontSize: 7, fontWeight: 400, letterSpacing: '0.2em', textTransform: 'uppercase', color: T.muted }}>Cost</span>
+                                    <span style={{ fontFamily: jost, fontSize: 11, fontWeight: 400, color: T.text }}>₹{p.purchasePrice}</span>
+                                  </div>
+                                  <div style={{ textAlign: 'right' }}>
+                                    <span style={{ display: 'block', fontFamily: jost, fontSize: 7, fontWeight: 400, letterSpacing: '0.2em', textTransform: 'uppercase', color: T.muted }}>Markup</span>
+                                    <span style={{ fontFamily: jost, fontSize: 11, fontWeight: 500, color: T.indigo }}>+{p.markupPercent}%</span>
+                                  </div>
                                 </div>
-                                <div style={{ textAlign: 'right' }}>
-                                  <span style={{ display: 'block', fontFamily: jost, fontSize: 7, fontWeight: 400, letterSpacing: '0.2em', textTransform: 'uppercase', color: T.muted }}>Markup</span>
-                                  <span style={{ fontFamily: jost, fontSize: 11, fontWeight: 500, color: T.indigo }}>+{p.markupPercent}%</span>
-                                </div>
-                              </div>
+                              )}
                             </div>
 
                             {/* Sale price + actions */}
@@ -1679,6 +1749,24 @@ const ProductList = () => {
                     onFocus={e => { e.currentTarget.style.borderColor = T.gold; }}
                     onBlur={e => { e.currentTarget.style.borderColor = T.border; }}
                   />
+                  {/* Duplicate warning */}
+                  {duplicateMatches.length > 0 && (
+                    <div style={{
+                      marginTop: 6, padding: '8px 10px',
+                      background: '#fffbeb', border: '1px solid rgba(217,119,6,0.3)',
+                      display: 'flex', flexDirection: 'column', gap: 4,
+                    }}>
+                      <span style={{ fontFamily: jost, fontSize: 9, fontWeight: 500, letterSpacing: '0.2em', textTransform: 'uppercase', color: T.amber, display: 'flex', alignItems: 'center', gap: 5 }}>
+                        <AlertCircle size={10} /> Similar product{duplicateMatches.length > 1 ? 's' : ''} already exist{duplicateMatches.length === 1 ? 's' : ''}
+                      </span>
+                      {duplicateMatches.map(m => (
+                        <span key={m._id} style={{ fontFamily: jost, fontSize: 10, fontWeight: 300, color: T.text, paddingLeft: 15 }}>
+                          • {m.brand} — {m.name}
+                          {m.subCategory ? <span style={{ color: T.muted }}> ({m.subCategory})</span> : null}
+                        </span>
+                      ))}
+                    </div>
+                  )}
                 </div>
               </div>
 

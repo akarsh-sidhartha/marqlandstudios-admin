@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import api from '../api';
 import { createLogger } from '../utils/logger';
 import { SectionLoader, SkeletonList } from '../components/PageLoader';
@@ -56,6 +56,7 @@ const ClientList = () => {
   const [showModal, setShowModal]       = useState(false);
   const [isEditing, setIsEditing]       = useState(false);
   const [currentId, setCurrentId]       = useState(null);
+  const [highlightId, setHighlightId]   = useState(null);   // briefly highlights a matched row
   const [sortOrder, setSortOrder]       = useState('asc');
   const [searchFocused, setSearchFocused] = useState(false);
 
@@ -168,6 +169,41 @@ const ClientList = () => {
     setFormData({ companyName: '', contacts: [{ name: '', phone: '', email: '' }] });
     setIsEditing(false);
     setCurrentId(null);
+  };
+
+  // ── Duplicate client detection ─────────────────────────────────────────────
+  // Active only when adding (not editing). Flags clients whose name is "close"
+  // to what is being typed via substring match or shared meaningful tokens.
+  const NOISE_WORDS = /^(pvt|ltd|llp|inc|corp|co|and|the|a|of|enterprises?|solutions?|services?|india|group)$/i;
+  const nameTokens  = (str) =>
+    str.toLowerCase().split(/[\s,.()\/\-]+/).filter(w => w.length > 1 && !NOISE_WORDS.test(w));
+
+  const duplicateMatches = useMemo(() => {
+    if (isEditing) return [];
+    const raw = formData.companyName.trim();
+    if (raw.length < 3) return [];
+    const inputLow    = raw.toLowerCase();
+    const inputToks   = nameTokens(raw);
+    return clients.filter(c => {
+      const nameLow  = c.companyName?.toLowerCase() ?? '';
+      const nameToks = nameTokens(c.companyName ?? '');
+      if (nameLow.includes(inputLow) || inputLow.includes(nameLow)) return true;
+      return inputToks.length > 0 && nameToks.length > 0 &&
+        inputToks.some(t => nameToks.includes(t));
+    });
+  }, [formData.companyName, clients, isEditing]);
+
+  // Close modal, set search to the matched client, scroll + flash the row.
+  const handleJumpToClient = (client) => {
+    setShowModal(false);
+    resetForm();
+    setSearchTerm(client.companyName);
+    setHighlightId(client._id);
+    setTimeout(() => {
+      const el = document.getElementById(`client-row-${client._id}`);
+      if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }, 80);
+    setTimeout(() => setHighlightId(null), 2500);
   };
 
   return (
@@ -336,15 +372,20 @@ const ClientList = () => {
               return (
                 <React.Fragment key={c._id}>
                   <tr
+                    id={`client-row-${c._id}`}
                     onClick={() => toggleRow(c._id)}
                     style={{
                       cursor: 'pointer',
                       borderBottom: `1px solid ${T.border}`,
-                      background: isExpanded ? T.dimBg : 'transparent',
-                      transition: 'background 0.2s',
+                      background: highlightId === c._id
+                        ? '#fffbeb'
+                        : isExpanded ? T.dimBg : 'transparent',
+                      outline: highlightId === c._id ? '2px solid #f59e0b' : 'none',
+                      outlineOffset: -2,
+                      transition: 'background 0.4s, outline 0.4s',
                     }}
-                    onMouseEnter={e => { if (!isExpanded) e.currentTarget.style.background = 'rgba(0,0,0,0.015)'; }}
-                    onMouseLeave={e => { if (!isExpanded) e.currentTarget.style.background = 'transparent'; }}
+                    onMouseEnter={e => { if (!isExpanded && highlightId !== c._id) e.currentTarget.style.background = 'rgba(0,0,0,0.015)'; }}
+                    onMouseLeave={e => { if (!isExpanded && highlightId !== c._id) e.currentTarget.style.background = isExpanded ? T.dimBg : 'transparent'; }}
                   >
                     <td style={{ padding: '14px 16px', textAlign: 'center', width: 44 }}>
                       {isExpanded
@@ -542,6 +583,67 @@ const ClientList = () => {
                 placeholder="Company name"
               />
             </div>
+
+            {/* ── Duplicate client warning ── */}
+            {!isEditing && duplicateMatches.length > 0 && (
+              <div style={{
+                marginBottom: 20,
+                background: '#fffbeb',
+                border: '1px solid #f59e0b',
+                padding: '12px 14px',
+                display: 'flex', gap: 10, alignItems: 'flex-start',
+              }}>
+                <span style={{ fontSize: 16, lineHeight: 1, flexShrink: 0, marginTop: 1 }}>⚠️</span>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <p style={{
+                    margin: '0 0 8px', fontFamily: jost, fontSize: 11, fontWeight: 500,
+                    color: '#92400e', letterSpacing: '0.02em',
+                  }}>
+                    {duplicateMatches.length === 1
+                      ? 'A similar client may already exist'
+                      : `${duplicateMatches.length} similar clients may already exist`}
+                  </p>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
+                    {duplicateMatches.map(c => (
+                      <div key={c._id} style={{
+                        display: 'flex', alignItems: 'center',
+                        justifyContent: 'space-between', gap: 8,
+                      }}>
+                        <span style={{
+                          fontFamily: jost, fontSize: 11, fontWeight: 300, color: '#78350f',
+                          minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                        }}>
+                          {c.companyName}
+                          {c.contacts?.[0]?.name
+                            ? <span style={{ color: '#a16207', marginLeft: 6 }}>· {c.contacts[0].name}</span>
+                            : null}
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => handleJumpToClient(c)}
+                          style={{
+                            flexShrink: 0,
+                            background: 'none', border: '1px solid #f59e0b',
+                            color: '#92400e', cursor: 'pointer',
+                            fontFamily: jost, fontSize: 9, fontWeight: 500,
+                            letterSpacing: '0.15em', textTransform: 'uppercase',
+                            padding: '3px 10px', whiteSpace: 'nowrap',
+                            transition: 'background 0.15s',
+                          }}
+                          onMouseEnter={e => e.currentTarget.style.background = '#fef3c7'}
+                          onMouseLeave={e => e.currentTarget.style.background = 'none'}
+                        >
+                          View
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                  <p style={{ margin: '8px 0 0', fontFamily: jost, fontSize: 10, fontWeight: 300, color: '#a16207' }}>
+                    You can still proceed if this is a different client.
+                  </p>
+                </div>
+              </div>
+            )}
 
             {/* Contacts */}
             <div style={{ borderTop: `1px solid ${T.border}`, paddingTop: 24 }}>

@@ -190,6 +190,7 @@ const VendorList = () => {
   const [showModal,     setShowModal]     = useState(false);
   const [isEditing,     setIsEditing]     = useState(false);
   const [currentId,     setCurrentId]     = useState(null);
+  const [highlightId,   setHighlightId]   = useState(null);   // briefly highlight a vendor row
   const [sortOrder,     setSortOrder]     = useState('asc');
   const [filterCategory, setFilterCategory] = useState('');
   const [filterState,    setFilterState]    = useState('');
@@ -239,6 +240,38 @@ const VendorList = () => {
     );
     return [...set].sort((a, b) => a.localeCompare(b));
   }, [vendors]);
+
+  // ── Duplicate vendor detection ────────────────────────────────────────────
+  // Only active when adding a new vendor (not editing).
+  // Returns vendors whose name is "close" to what's being typed:
+  //   • exact substring match (fastest, catches most cases), OR
+  //   • token overlap: ≥1 significant word in common (ignores Pvt/Ltd/etc.)
+  const duplicateMatches = useMemo(() => {
+    if (isEditing) return [];
+    const raw = formData.companyName.trim();
+    if (raw.length < 3) return [];
+
+    const NOISE = /^(pvt|ltd|llp|inc|corp|co|and|&|the|a|of|enterprises?|solutions?|services?|india|group)$/i;
+    const tokens = (str) =>
+      str.toLowerCase().split(/[\s,.()/\-]+/).filter(w => w.length > 1 && !NOISE.test(w));
+
+    const inputLow    = raw.toLowerCase();
+    const inputTokens = tokens(raw);
+
+    return vendors.filter(v => {
+      const nameLow    = v.companyName?.toLowerCase() ?? '';
+      const nameTokens = tokens(v.companyName ?? '');
+
+      // Substring match
+      if (nameLow.includes(inputLow) || inputLow.includes(nameLow)) return true;
+
+      // Token overlap — at least one meaningful word in common
+      if (inputTokens.length > 0 && nameTokens.length > 0) {
+        return inputTokens.some(t => nameTokens.includes(t));
+      }
+      return false;
+    });
+  }, [formData.companyName, vendors, isEditing]);
 
   const filteredVendors = useMemo(() => {
     const s = searchTerm.toLowerCase();
@@ -343,6 +376,20 @@ const VendorList = () => {
     } finally {
       setIsScanning(false);
     }
+  };
+
+  // Jump to a vendor in the list: close modal, set search to the company name,
+  // scroll to that row and flash a highlight for 2 seconds.
+  const handleJumpToVendor = (vendor) => {
+    resetForm();
+    setShowModal(false);
+    setSearchTerm(vendor.companyName);
+    setHighlightId(vendor._id);
+    setTimeout(() => {
+      const el = document.getElementById(`vendor-row-${vendor._id}`);
+      if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }, 80);
+    setTimeout(() => setHighlightId(null), 2500);
   };
 
   const handleDeleteMedia = async (vendorId, mediaId, e) => {
@@ -664,15 +711,20 @@ const VendorList = () => {
                 <React.Fragment key={v._id}>
                   {/* ── Row ── */}
                   <tr
+                    id={`vendor-row-${v._id}`}
                     onClick={() => toggleRow(v._id)}
                     style={{
                       cursor: 'pointer',
                       borderBottom: `1px solid ${T.border}`,
-                      background: isExpanded ? T.dimBg : 'transparent',
-                      transition: 'background 0.2s',
+                      background: highlightId === v._id
+                        ? '#fffbeb'
+                        : isExpanded ? T.dimBg : 'transparent',
+                      outline: highlightId === v._id ? '2px solid #f59e0b' : 'none',
+                      outlineOffset: -2,
+                      transition: 'background 0.4s, outline 0.4s',
                     }}
-                    onMouseEnter={e => { if (!isExpanded) e.currentTarget.style.background = 'rgba(0,0,0,0.015)'; }}
-                    onMouseLeave={e => { if (!isExpanded) e.currentTarget.style.background = isExpanded ? T.dimBg : 'transparent'; }}
+                    onMouseEnter={e => { if (!isExpanded && highlightId !== v._id) e.currentTarget.style.background = 'rgba(0,0,0,0.015)'; }}
+                    onMouseLeave={e => { if (!isExpanded && highlightId !== v._id) e.currentTarget.style.background = isExpanded ? T.dimBg : 'transparent'; }}
                   >
                     {/* Expand chevron */}
                     <td style={{ padding: '14px 16px', textAlign: 'center', width: 44 }}>
@@ -1088,6 +1140,65 @@ const VendorList = () => {
                 </select>
               </div>
             </div>
+
+            {/* ── Duplicate vendor warning ── */}
+            {!isEditing && duplicateMatches.length > 0 && (
+              <div style={{
+                marginBottom: 20,
+                background: '#fffbeb',
+                border: '1px solid #f59e0b',
+                padding: '12px 14px',
+                display: 'flex', gap: 10, alignItems: 'flex-start',
+              }}>
+                {/* Warning icon */}
+                <span style={{ fontSize: 16, lineHeight: 1, flexShrink: 0, marginTop: 1 }}>⚠️</span>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <p style={{
+                    margin: '0 0 8px', fontFamily: jost, fontSize: 11, fontWeight: 500,
+                    color: '#92400e', letterSpacing: '0.02em',
+                  }}>
+                    {duplicateMatches.length === 1
+                      ? 'A similar vendor may already exist'
+                      : `${duplicateMatches.length} similar vendors may already exist`}
+                  </p>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
+                    {duplicateMatches.map(v => (
+                      <div key={v._id} style={{
+                        display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                        gap: 8,
+                      }}>
+                        <span style={{ fontFamily: jost, fontSize: 11, fontWeight: 300, color: '#78350f', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                          {v.companyName}
+                          {v.state ? <span style={{ color: '#a16207', marginLeft: 6 }}>· {v.state}</span> : null}
+                          {v.category ? <span style={{ color: '#a16207', marginLeft: 6 }}>· {v.category}</span> : null}
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => handleJumpToVendor(v)}
+                          style={{
+                            flexShrink: 0,
+                            background: 'none', border: '1px solid #f59e0b',
+                            color: '#92400e', cursor: 'pointer',
+                            fontFamily: jost, fontSize: 9, fontWeight: 500,
+                            letterSpacing: '0.15em', textTransform: 'uppercase',
+                            padding: '3px 10px',
+                            whiteSpace: 'nowrap',
+                            transition: 'background 0.15s',
+                          }}
+                          onMouseEnter={e => e.currentTarget.style.background = '#fef3c7'}
+                          onMouseLeave={e => e.currentTarget.style.background = 'none'}
+                        >
+                          View
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                  <p style={{ margin: '8px 0 0', fontFamily: jost, fontSize: 10, fontWeight: 300, color: '#a16207' }}>
+                    You can still proceed if this is a different vendor.
+                  </p>
+                </div>
+              </div>
+            )}
 
             {/* Sub Category */}
             <div style={{ marginBottom: 20 }}>
