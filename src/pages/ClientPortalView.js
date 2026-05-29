@@ -874,7 +874,7 @@ const ClientPortalView = () => {
           items.length===0
             ? <EmptyState icon="📋" title="Options being curated" sub="The Marqland team will update this shortly."/>
             : portal.type==='product'
-              ? <ProductBento items={items} onZoom={setLightbox} wishlisted={wishlisted} onToggleWish={toggleWish}/>
+              ? <ProductBento items={items} onZoom={setLightbox} wishlisted={wishlisted} onToggleWish={toggleWish} portal={portal}/>
               : <OffsiteCards items={items} onZoom={setLightbox} portal={portal}/>
         )}
 
@@ -1305,7 +1305,7 @@ const ClientPortalView = () => {
 
 
 
-const ProductBento = ({ items, onZoom, wishlisted=new Set(), onToggleWish=()=>{} }) => {
+const ProductBento = ({ items, onZoom, wishlisted=new Set(), onToggleWish=()=>{}, portal=null }) => {
   const [activeCategory, setActiveCategory] = React.useState(null);
   const [activeSubCat,   setActiveSubCat]   = React.useState(null);
   const [imgSpans,  setImgSpans]  = React.useState({});
