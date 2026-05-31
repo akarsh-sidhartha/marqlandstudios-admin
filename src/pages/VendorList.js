@@ -192,8 +192,9 @@ const VendorList = () => {
   const [currentId,     setCurrentId]     = useState(null);
   const [highlightId,   setHighlightId]   = useState(null);   // briefly highlight a vendor row
   const [sortOrder,     setSortOrder]     = useState('asc');
-  const [filterCategory, setFilterCategory] = useState('');
-  const [filterState,    setFilterState]    = useState('');
+  const [filterCategory,    setFilterCategory]    = useState('');
+  const [filterSubCategory, setFilterSubCategory] = useState('');
+  const [filterState,       setFilterState]       = useState('');
 
   // Card scanner
   const [cardImages,    setCardImages]    = useState({ front: null, back: null });
@@ -231,15 +232,33 @@ const VendorList = () => {
   };
 
   // ── Derived data ──────────────────────────────────────────────────────────
-  // Collect all non-empty sub categories saved across vendors, deduplicated and sorted
-  const knownSubCategories = useMemo(() => {
-    const set = new Set(
-      vendors
-        .map(v => v.subCategory?.trim())
-        .filter(Boolean)
-    );
-    return [...set].sort((a, b) => a.localeCompare(b));
+  // Map of category → sorted unique sub-categories seen across all vendors
+  const subCategoriesByCategory = useMemo(() => {
+    const map = {};
+    for (const v of vendors) {
+      const cat = v.category?.trim();
+      const sub = v.subCategory?.trim();
+      if (cat && sub) {
+        if (!map[cat]) map[cat] = new Set();
+        map[cat].add(sub);
+      }
+    }
+    const result = {};
+    for (const [cat, set] of Object.entries(map)) {
+      result[cat] = [...set].sort((a, b) => a.localeCompare(b));
+    }
+    return result;
   }, [vendors]);
+
+  // Sub-categories available for the currently-selected category (modal form)
+  const availableSubCategories = formData.category
+    ? (subCategoriesByCategory[formData.category] || [])
+    : [];
+
+  // Sub-categories for the active filter category (filter bar)
+  const filterSubCategoryOptions = filterCategory
+    ? (subCategoriesByCategory[filterCategory] || [])
+    : Object.values(subCategoriesByCategory).flat().filter((v, i, a) => a.indexOf(v) === i).sort();
 
   // ── Duplicate vendor detection ────────────────────────────────────────────
   // Only active when adding a new vendor (not editing).
@@ -277,20 +296,32 @@ const VendorList = () => {
     const s = searchTerm.toLowerCase();
     return vendors
       .filter(v => {
-        const matchesSearch =
-          v.companyName?.toLowerCase().includes(s) ||
+        const matchesSearch = !s || (
+          v.companyName?.toLowerCase().includes(s)      ||
           v.suppliedProducts?.toLowerCase().includes(s) ||
-          v.contacts?.some(c => c.name?.toLowerCase().includes(s));
-        const matchesCat   = !filterCategory || v.category === filterCategory;
-        const matchesState = !filterState    || v.state    === filterState;
-        return matchesSearch && matchesCat && matchesState;
+          v.category?.toLowerCase().includes(s)         ||
+          v.subCategory?.toLowerCase().includes(s)      ||
+          v.state?.toLowerCase().includes(s)            ||
+          v.city?.toLowerCase().includes(s)             ||
+          v.gstNumber?.toLowerCase().includes(s)        ||
+          v.description?.toLowerCase().includes(s)      ||
+          v.contacts?.some(c =>
+            c.name?.toLowerCase().includes(s)  ||
+            c.phone?.toLowerCase().includes(s) ||
+            c.email?.toLowerCase().includes(s)
+          )
+        );
+        const matchesCat    = !filterCategory    || v.category    === filterCategory;
+        const matchesSub    = !filterSubCategory || v.subCategory === filterSubCategory;
+        const matchesState  = !filterState       || v.state       === filterState;
+        return matchesSearch && matchesCat && matchesSub && matchesState;
       })
       .sort((a, b) => {
         const na = a.companyName?.toLowerCase() ?? '';
         const nb = b.companyName?.toLowerCase() ?? '';
         return sortOrder === 'asc' ? na.localeCompare(nb) : nb.localeCompare(na);
       });
-  }, [vendors, searchTerm, filterCategory, filterState, sortOrder]);
+  }, [vendors, searchTerm, filterCategory, filterSubCategory, filterState, sortOrder]);
 
   // ── Handlers ──────────────────────────────────────────────────────────────
   const toggleSort = () => setSortOrder(p => (p === 'asc' ? 'desc' : 'asc'));
@@ -300,6 +331,7 @@ const VendorList = () => {
   const handleResetFilters = () => {
     setSearchTerm('');
     setFilterCategory('');
+    setFilterSubCategory('');
     setFilterState('');
     log.debug('Filters reset');
   };
@@ -557,7 +589,7 @@ const VendorList = () => {
           {/* Category filter */}
           <select
             value={filterCategory}
-            onChange={e => setFilterCategory(e.target.value)}
+            onChange={e => { setFilterCategory(e.target.value); setFilterSubCategory(''); }}
             style={{
               padding: '10px 14px', background: 'white',
               border: `1px solid ${T.border}`, borderRadius: 3,
@@ -569,7 +601,26 @@ const VendorList = () => {
             <option value="">All Categories</option>
             <option value="Gifting">Gifting</option>
             <option value="Travel">Travel</option>
+            <option value="Events">Events</option>
           </select>
+
+          {/* Sub-category filter — shown when category is selected OR sub-cats exist */}
+          {filterSubCategoryOptions.length > 0 && (
+            <select
+              value={filterSubCategory}
+              onChange={e => setFilterSubCategory(e.target.value)}
+              style={{
+                padding: '10px 14px', background: 'white',
+                border: `1px solid ${T.border}`, borderRadius: 3,
+                fontFamily: jost, fontSize: 11, fontWeight: 300,
+                color: filterSubCategory ? T.text : T.muted,
+                outline: 'none', cursor: 'pointer',
+              }}
+            >
+              <option value="">All Sub-Categories</option>
+              {filterSubCategoryOptions.map(s => <option key={s} value={s}>{s}</option>)}
+            </select>
+          )}
 
           {/* State filter */}
           <select
@@ -588,7 +639,7 @@ const VendorList = () => {
           </select>
 
           {/* Reset filters */}
-          {(searchTerm || filterCategory || filterState) && (
+          {(searchTerm || filterCategory || filterSubCategory || filterState) && (
             <button
               onClick={handleResetFilters}
               style={{
@@ -681,6 +732,13 @@ const VendorList = () => {
                 Primary Contact
               </th>
               <th style={{
+                padding: '12px 16px', textAlign: 'left',
+                fontFamily: jost, fontSize: 9, fontWeight: 400,
+                letterSpacing: '0.25em', textTransform: 'uppercase', color: T.muted,
+              }}>
+                Products Supplied
+              </th>
+              <th style={{
                 padding: '12px 16px', textAlign: 'right',
                 fontFamily: jost, fontSize: 9, fontWeight: 400,
                 letterSpacing: '0.25em', textTransform: 'uppercase', color: T.muted,
@@ -692,10 +750,10 @@ const VendorList = () => {
 
           <tbody>
             {isLoading ? (
-              <SkeletonList rows={8} cols={5} />
+              <SkeletonList rows={8} cols={6} />
             ) : filteredVendors.length === 0 ? (
               <tr>
-                <td colSpan={5} style={{ padding: '64px 0', textAlign: 'center' }}>
+                <td colSpan={6} style={{ padding: '64px 0', textAlign: 'center' }}>
                   <Building2 size={28} style={{ color: 'rgba(0,0,0,0.12)', margin: '0 auto 12px', display: 'block' }} />
                   <p style={{
                     fontFamily: jost, fontSize: 12, fontWeight: 300,
@@ -792,6 +850,15 @@ const VendorList = () => {
                       )}
                     </td>
 
+                    {/* Products Supplied */}
+                    <td style={{
+                      padding: '14px 16px', maxWidth: 220,
+                      fontFamily: jost, fontSize: 12, fontWeight: 300, color: T.muted,
+                      overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                    }}>
+                      {v.suppliedProducts || '—'}
+                    </td>
+
                     {/* Actions */}
                     <td style={{ padding: '14px 16px', textAlign: 'right' }}>
                       <button
@@ -826,7 +893,7 @@ const VendorList = () => {
                   {/* ── Expanded detail ── */}
                   {isExpanded && (
                     <tr>
-                      <td colSpan={5} style={{
+                      <td colSpan={6} style={{
                         padding: '24px 24px 24px 48px',
                         borderBottom: `1px solid ${T.border}`,
                         background: T.dimBg,
@@ -1127,7 +1194,7 @@ const VendorList = () => {
                 </label>
                 <select
                   value={formData.category}
-                  onChange={e => setFormData({ ...formData, category: e.target.value })}
+                  onChange={e => setFormData({ ...formData, category: e.target.value, subCategory: '' })}
                   style={{
                     ...inputStyle(false), appearance: 'none',
                     cursor: 'pointer', color: formData.category ? T.text : T.muted,
@@ -1204,19 +1271,24 @@ const VendorList = () => {
             <div style={{ marginBottom: 20 }}>
               <label style={{
                 display: 'block', fontFamily: jost, fontSize: 9, fontWeight: 400,
-                letterSpacing: '0.25em', textTransform: 'uppercase', color: T.muted, marginBottom: 8,
+                letterSpacing: '0.25em', textTransform: 'uppercase',
+                color: formData.category ? T.muted : 'rgba(0,0,0,0.25)', marginBottom: 8,
               }}>
                 Sub Category
-                <span style={{ marginLeft: 8, fontWeight: 300, textTransform: 'none', letterSpacing: 0, color: T.muted, fontSize: 9 }}>
-                  (optional)
-                </span>
+                {!formData.category && (
+                  <span style={{ marginLeft: 8, fontWeight: 300, textTransform: 'none', letterSpacing: 0, fontSize: 9 }}>
+                    — select a category first
+                  </span>
+                )}
               </label>
-              <SubCategoryInput
-                value={formData.subCategory}
-                onChange={val => setFormData({ ...formData, subCategory: val })}
-                suggestions={knownSubCategories}
-                placeholder="Type sub category…"
-              />
+              <div style={{ opacity: formData.category ? 1 : 0.4, pointerEvents: formData.category ? 'auto' : 'none' }}>
+                <SubCategoryInput
+                  value={formData.subCategory}
+                  onChange={val => setFormData({ ...formData, subCategory: val })}
+                  suggestions={availableSubCategories}
+                  placeholder={formData.category ? 'Type sub category…' : 'Select category first…'}
+                />
+              </div>
             </div>
 
             {/* State */}

@@ -833,7 +833,7 @@ const ProductList = () => {
       fd.append('brand',    pdfBrand);
       if (pdfPromptId)     fd.append('promptId',   pdfPromptId);
       if (pdfCustomPrompt) fd.append('promptText', pdfCustomPrompt);
-      const res = await api.post('/image-processing/pdf/same-category', fd);
+      const res = await api.post('/image-processing/pdf/same-category', fd, { timeout: 600_000 }); // 10 min — AI processing each image
       const count = res.data.productIds?.length || 0;
       setPdfResult({ count });
       log.info('PDF import complete', { count });
@@ -856,7 +856,7 @@ const ProductList = () => {
     try {
       const fd = new FormData();
       fd.append('pdf', extractFile);
-      const res = await api.post('/image-processing/pdf/extract', fd, { responseType: 'arraybuffer' });
+      const res = await api.post('/image-processing/pdf/extract', fd, { responseType: 'arraybuffer', timeout: 600_000 }); // 10 min — large PDFs need time
 
       const contentType = res.headers['content-type'] || '';
       if (!contentType.includes('application/zip')) {

@@ -101,12 +101,16 @@ const FieldLabel = ({ children }) => (
 );
 
 /** Focused-border input — exactly as in ClientList */
-const FocusInput = ({ value, onChange, placeholder, readOnly = false, style: extra = {} }) => {
+const FocusInput = ({ value, onChange, placeholder, readOnly = false, style: extra = {}, inputRef }) => {
   const [focused, setFocused] = useState(false);
+  // Uncontrolled mode: when inputRef is provided and no value/onChange are given,
+  // render without value/onChange so the user can type freely. The caller reads
+  // the value via inputRef.current.value on submit.
+  const isUncontrolled = inputRef && value === undefined;
   return (
     <input
-      value={value}
-      onChange={onChange}
+      ref={inputRef}
+      {...(isUncontrolled ? {} : { value, onChange })}
       placeholder={placeholder}
       readOnly={readOnly}
       onFocus={() => setFocused(true)}
@@ -832,6 +836,8 @@ export default function OrderTracker() {
   const editEditorRef    = useRef(null);
   const unreadPollTimer  = useRef(null);
   const prevClientCounts = useRef({});
+  const quoteInputRef    = useRef(null);
+  const invoiceInputRef  = useRef(null);
 
   const { showToast, confirm, Toast, ConfirmDialog } = usePopup();
 
@@ -1994,10 +2000,8 @@ export default function OrderTracker() {
             </div>
 
             <FocusInput
-              id="refInput"
+              inputRef={quoteInputRef}
               placeholder="e.g. Q-2024-001"
-              value=""
-              onChange={() => {}}
               style={{ textAlign: 'center', fontWeight: 500, textTransform: 'uppercase', marginBottom: 20 }}
             />
 
@@ -2007,7 +2011,7 @@ export default function OrderTracker() {
               </GhostBtn>
               <GoldBtn
                 onClick={() => {
-                  const val = document.getElementById('refInput')?.value?.trim();
+                  const val = quoteInputRef.current?.value?.trim();
                   if (val) { updateOrder(quotePrompt._id, { status: 'ongoing', refNumber: val }); setQuotePrompt(null); }
                 }}
                 style={{ flex: 1, textAlign: 'center' }}
@@ -2051,10 +2055,8 @@ export default function OrderTracker() {
             </div>
 
             <FocusInput
-              id="invoiceInput"
+              inputRef={invoiceInputRef}
               placeholder="e.g. INV-10293"
-              value=""
-              onChange={() => {}}
               style={{ textAlign: 'center', fontWeight: 500, textTransform: 'uppercase', marginBottom: 20 }}
             />
 
@@ -2064,7 +2066,7 @@ export default function OrderTracker() {
               </GhostBtn>
               <GoldBtn
                 onClick={() => {
-                  const val = document.getElementById('invoiceInput')?.value?.trim();
+                  const val = invoiceInputRef.current?.value?.trim();
                   if (val) {
                     updateOrder(completionPrompt._id, {
                       status: 'completed', invoiceNumber: val,
@@ -2153,7 +2155,7 @@ export default function OrderTracker() {
                   if (emailContact?.email) {
                     try {
                       await sendPortalEmail({
-                        slug:        clientCheckModal.portalSlug,
+                        slug: clientCheckModal.portalSlug,
                         clientEmail: emailContact.email,
                         contactName: newClient.contacts?.[0]?.name || emailContact.name || '',
                         clientName:  newClient.companyName,
@@ -2186,7 +2188,7 @@ export default function OrderTracker() {
                   if (newContact?.email) {
                     try {
                       await sendPortalEmail({
-                        slug:        clientCheckModal.portalSlug,
+                        slug: clientCheckModal.portalSlug,
                         clientEmail: newContact.email,
                         contactName: newContact.name,
                         clientName:  updatedClient.companyName,
