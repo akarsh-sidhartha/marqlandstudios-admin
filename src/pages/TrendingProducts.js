@@ -351,6 +351,8 @@ export default function TrendingProducts() {
   const [imgSearchPreview,setImgSearchPreview]= useState(null);
   const [imgSearching,    setImgSearching]    = useState(false);
   const [imgSearchResult, setImgSearchResult] = useState(null); // { analysis, saved, skipped }
+  const [showRunModal,    setShowRunModal]    = useState(false);
+  const [selectedIndustries, setSelectedIndustries] = useState([]); // [] = all
   const imgFileRef = React.useRef(null);
 
   // ── Multi-select state ──────────────────────────────────────────────────────
@@ -593,7 +595,7 @@ export default function TrendingProducts() {
             <ImageIcon size={14} /> Search by Image
           </button>
           <button
-            onClick={() => handleRun()}
+            onClick={() => { setSelectedIndustries([]); setShowRunModal(true); }}
             disabled={runState?.running}
             style={{ display: 'flex', alignItems: 'center', gap: 8, background: runState?.running ? '#1e2433' : 'linear-gradient(135deg,#6366f1,#818cf8)', border: 'none', borderRadius: 10, padding: '10px 20px', cursor: runState?.running ? 'not-allowed' : 'pointer', fontSize: 13, fontWeight: 700, color: runState?.running ? '#475569' : '#fff', opacity: runState?.running ? 0.7 : 1 }}>
             {runState?.running
@@ -601,6 +603,100 @@ export default function TrendingProducts() {
               : <><Play size={14} /> Run Discovery Now</>
             }
           </button>
+
+          {/* ── Industry picker modal ── */}
+          {showRunModal && (
+            <div
+              onClick={() => setShowRunModal(false)}
+              style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.6)', zIndex: 300, display: 'flex', alignItems: 'center', justifyContent: 'center', backdropFilter: 'blur(2px)' }}>
+              <div
+                onClick={e => e.stopPropagation()}
+                style={{ background: '#1a2235', border: '1px solid rgba(255,255,255,0.1)', borderRadius: 16, padding: 28, width: 420, maxWidth: '95vw', boxShadow: '0 32px 64px rgba(0,0,0,0.5)' }}>
+
+                {/* Header */}
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                    <Play size={15} style={{ color: '#818cf8' }} />
+                    <span style={{ fontSize: 15, fontWeight: 800, color: '#f0f4ff' }}>Run Discovery</span>
+                  </div>
+                  <button onClick={() => setShowRunModal(false)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#475569', padding: 2 }}><X size={15} /></button>
+                </div>
+                <p style={{ fontSize: 12, color: '#475569', marginBottom: 20, lineHeight: 1.6 }}>
+                  Select specific industries to save Gemini API calls, or leave all unchecked to run everything.
+                </p>
+
+                {/* Select / Clear all */}
+                <div style={{ display: 'flex', gap: 8, marginBottom: 14 }}>
+                  <button
+                    onClick={() => setSelectedIndustries([...industries])}
+                    style={{ fontSize: 11, fontWeight: 600, color: '#818cf8', background: 'rgba(99,102,241,0.1)', border: '1px solid rgba(99,102,241,0.25)', borderRadius: 7, padding: '4px 10px', cursor: 'pointer' }}>
+                    Select all
+                  </button>
+                  <button
+                    onClick={() => setSelectedIndustries([])}
+                    style={{ fontSize: 11, fontWeight: 600, color: '#475569', background: '#0f1623', border: '1px solid rgba(255,255,255,0.06)', borderRadius: 7, padding: '4px 10px', cursor: 'pointer' }}>
+                    Clear all (run all)
+                  </button>
+                </div>
+
+                {/* Industry checkboxes */}
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginBottom: 24 }}>
+                  {industries.map(ind => {
+                    const checked = selectedIndustries.includes(ind);
+                    return (
+                      <button
+                        key={ind}
+                        onClick={() => setSelectedIndustries(prev =>
+                          prev.includes(ind) ? prev.filter(i => i !== ind) : [...prev, ind]
+                        )}
+                        style={{
+                          display: 'flex', alignItems: 'center', gap: 8,
+                          background: checked ? `${industryColor(ind)}18` : '#0f1623',
+                          border: `1px solid ${checked ? industryColor(ind) + '50' : 'rgba(255,255,255,0.06)'}`,
+                          borderRadius: 8, padding: '8px 12px', cursor: 'pointer',
+                          fontSize: 12, fontWeight: 600,
+                          color: checked ? industryColor(ind) : '#64748b',
+                          transition: 'all 0.15s', textAlign: 'left',
+                        }}>
+                        <div style={{
+                          width: 14, height: 14, borderRadius: 4, flexShrink: 0,
+                          background: checked ? industryColor(ind) : 'transparent',
+                          border: `2px solid ${checked ? industryColor(ind) : '#334155'}`,
+                          display: 'flex', alignItems: 'center', justifyContent: 'center',
+                        }}>
+                          {checked && <Check size={9} style={{ color: '#fff', strokeWidth: 3 }} />}
+                        </div>
+                        {ind}
+                      </button>
+                    );
+                  })}
+                </div>
+
+                {/* Cost hint */}
+                <div style={{ background: 'rgba(99,102,241,0.06)', border: '1px solid rgba(99,102,241,0.15)', borderRadius: 8, padding: '8px 12px', marginBottom: 20, fontSize: 11, color: '#475569', lineHeight: 1.6 }}>
+                  {selectedIndustries.length === 0
+                    ? `⚡ Will run all ${industries.length} industries`
+                    : `⚡ Will run ${selectedIndustries.length} of ${industries.length} industries — saving ~${Math.round(((industries.length - selectedIndustries.length) / industries.length) * 100)}% of API calls`
+                  }
+                </div>
+
+                {/* Action buttons */}
+                <div style={{ display: 'flex', gap: 10 }}>
+                  <button
+                    onClick={() => setShowRunModal(false)}
+                    style={{ flex: 1, padding: '10px 0', background: '#0f1623', border: '1px solid rgba(255,255,255,0.06)', borderRadius: 10, cursor: 'pointer', fontSize: 13, fontWeight: 600, color: '#475569' }}>
+                    Cancel
+                  </button>
+                  <button
+                    onClick={() => { setShowRunModal(false); handleRun(selectedIndustries); }}
+                    style={{ flex: 2, padding: '10px 0', background: 'linear-gradient(135deg,#6366f1,#818cf8)', border: 'none', borderRadius: 10, cursor: 'pointer', fontSize: 13, fontWeight: 700, color: '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8 }}>
+                    <Play size={13} />
+                    {selectedIndustries.length === 0 ? 'Run All Industries' : `Run ${selectedIndustries.length} Industr${selectedIndustries.length === 1 ? 'y' : 'ies'}`}
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
         </div>
       </div>
 

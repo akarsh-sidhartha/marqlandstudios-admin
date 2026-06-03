@@ -404,12 +404,14 @@ function DocLink({ url, mimeType, label = 'View', style: extraStyle }) {
 
   // Fetch a proxy URL through axios so it goes to the correct backend port,
   // then hand back a blob URL that the browser can use directly.
+  // Strip leading /api because the axios instance's baseURL already includes /api.
   const fetchBlob = async () => {
     if (blobUrl) return blobUrl;           // already fetched — reuse
     setLoading(true);
     setFetchErr(null);
     try {
-      const res = await api.get(url, { responseType: 'blob' });
+      const axiosPath = url.replace(/^\/api/, '');
+      const res = await api.get(axiosPath, { responseType: 'blob' });
       const blob = new Blob([res.data], { type: res.headers['content-type'] || mimeType || 'application/octet-stream' });
       const objUrl = URL.createObjectURL(blob);
       setBlobUrl(objUrl);
@@ -2744,12 +2746,67 @@ function InvoiceViewerModal({ invoice, onClose }) {
 }
 
 
+// ── Shared vendor-name filter for Invoice tab (uses name strings, not IDs) ────
+function GlobalVendorNameFilter({ vendors, invoices, value, onChange }) {
+  const [open, setOpen] = useState(false);
+  const [q,    setQ]    = useState('');
+  const ref             = useRef();
+
+  useEffect(() => {
+    const h = (e) => { if (ref.current && !ref.current.contains(e.target)) setOpen(false); };
+    document.addEventListener('mousedown', h);
+    return () => document.removeEventListener('mousedown', h);
+  }, []);
+
+  const names = [...new Set(invoices.map((i) => i.vendor_name).filter(Boolean))].sort();
+  const filtered = names.filter((n) => !q || n.toLowerCase().includes(q.toLowerCase()));
+
+  return (
+    <div ref={ref} style={{ position: 'relative', width: 200, flexShrink: 0 }}>
+      <div
+        onClick={() => setOpen((o) => !o)}
+        style={{ ...IS, display: 'flex', alignItems: 'center', justifyContent: 'space-between', cursor: 'pointer', userSelect: 'none', color: value ? T.text : T.muted, fontSize: 12 }}
+      >
+        <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{value || 'Filter by Vendor'}</span>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 4, flexShrink: 0 }}>
+          {value && (
+            <span onClick={(e) => { e.stopPropagation(); onChange(''); setQ(''); }} style={{ color: T.muted, cursor: 'pointer', display: 'flex', alignItems: 'center' }}>
+              <X size={13} />
+            </span>
+          )}
+          <span style={{ color: T.muted, fontSize: 11 }}>{open ? '▲' : '▼'}</span>
+        </div>
+      </div>
+      {open && (
+        <div style={{ position: 'absolute', top: 'calc(100% + 4px)', left: 0, right: 0, background: '#fff', border: `1.5px solid ${T.border}`, borderRadius: 8, boxShadow: '0 10px 28px rgba(0,0,0,0.12)', zIndex: 600, overflow: 'hidden' }}>
+          <div style={{ padding: '7px 9px', borderBottom: `1px solid ${T.border}` }}>
+            <input autoFocus placeholder="Search vendor…" value={q} onChange={(e) => setQ(e.target.value)} style={{ ...IS, padding: '5px 9px', fontSize: 12 }} />
+          </div>
+          <div style={{ maxHeight: 200, overflowY: 'auto' }}>
+            <div onClick={() => { onChange(''); setOpen(false); setQ(''); }} style={{ padding: '8px 13px', cursor: 'pointer', color: T.muted, fontSize: 12 }}>All Vendors</div>
+            {filtered.map((name) => (
+              <div
+                key={name}
+                onClick={() => { onChange(name); setOpen(false); setQ(''); }}
+                style={{ padding: '8px 13px', cursor: 'pointer', background: name === value ? T.dimBg : '#fff', color: name === value ? T.gold : T.text, fontWeight: name === value ? 600 : 400, fontSize: 12, borderBottom: `1px solid ${T.offwhite}` }}
+                onMouseEnter={(e) => { if (name !== value) e.currentTarget.style.background = T.offwhite; }}
+                onMouseLeave={(e) => { if (name !== value) e.currentTarget.style.background = '#fff'; }}
+              >
+                {name}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // INVOICE VAULT TAB — FY/Month hierarchy with payment backtrack
 // ═══════════════════════════════════════════════════════════════════════════════
-function InvoiceVaultTab({ invoices, payments, proformaInvoices, vendors, onDelete, onViewInvoice, onUpload, onToast }) {
-  const [search,          setSearch]     = useState('');
-  const [filterVendorName, setFVN]       = useState('');
+function InvoiceVaultTab({ invoices, payments, proformaInvoices, vendors, onDelete, onViewInvoice, onUpload, onToast, externalSearch, externalVendorFilter }) {
   const [expandedFY,      setExpandedFY] = useState(null);
   const [expandedMo,      setExpandedMo] = useState(null);
   const [expandedInv,     setExpandedInv] = useState(null);
@@ -2757,24 +2814,10 @@ function InvoiceVaultTab({ invoices, payments, proformaInvoices, vendors, onDele
   const [zipProgress,     setZipProgress] = useState(null); // { current, total }
   const [docList,         setDocList]    = useState(null);
 
-  // Vendor name filter dropdown
-  const [vq,    setVq]    = useState('');
-  const [vOpen, setVOpen] = useState(false);
-  const vRef              = useRef();
-
-  useEffect(() => {
-    const handler = (e) => { if (vRef.current && !vRef.current.contains(e.target)) setVOpen(false); };
-    document.addEventListener('mousedown', handler);
-    return () => document.removeEventListener('mousedown', handler);
-  }, []);
-
-  const vendorNames     = [...new Set(invoices.map((i) => i.vendor_name).filter(Boolean))].sort();
-  const filteredVNames  = vendorNames.filter((n) => !vq || n.toLowerCase().includes(vq.toLowerCase()));
-
   const filteredInvoices = invoices.filter((inv) => {
-    const s           = search.toLowerCase();
+    const s           = (externalSearch || '').toLowerCase();
     const textMatch   = !s || inv.vendor_name?.toLowerCase().includes(s) || inv.invoice_number?.toLowerCase().includes(s);
-    const vendorMatch = !filterVendorName || inv.vendor_name === filterVendorName;
+    const vendorMatch = !externalVendorFilter || inv.vendor_name === externalVendorFilter;
     return textMatch && vendorMatch;
   });
 
@@ -2853,34 +2896,16 @@ function InvoiceVaultTab({ invoices, payments, proformaInvoices, vendors, onDele
             })())
           : root;
 
-        // Prefer proxy route (authenticated server-side fetch), fall back to base64 image
+        // Use api (axios) — strip /api prefix since baseURL already includes it
         if (inv.oneDriveFileId) {
           try {
-            const blob = await fetch(proxyUrl.invoice(inv._id)).then((r) => {
-              if (!r.ok) throw new Error(`HTTP ${r.status}`);
-              return r.blob();
-            });
+            const axiosPath = proxyUrl.invoice(inv._id).replace(/^\/api/, '');
+            const res  = await api.get(axiosPath, { responseType: 'blob' });
+            const blob = new Blob([res.data], { type: res.headers['content-type'] || mime });
             folder.file(`${name}.${ext}`, blob);
+            log.debug('Zip: file fetched', { invoice: inv.invoice_number });
           } catch (fetchErr) {
-            // Proxy failed — try base64 fallback
-            if (inv.image) {
-              if (inv.image.startsWith('data:')) {
-                folder.file(`${name}.${ext}`, inv.image.split(',')[1], { base64: true });
-              } else {
-                try {
-                  folder.file(`${name}.${ext}`, await fetch(inv.image).then((r) => r.blob()));
-                } catch {}
-              }
-            }
-            log.warn('Proxy fetch failed for zip, used fallback', { invoice: inv.invoice_number, error: fetchErr.message });
-          }
-        } else if (inv.image) {
-          if (inv.image.startsWith('data:')) {
-            folder.file(`${name}.${ext}`, inv.image.split(',')[1], { base64: true });
-          } else {
-            try {
-              folder.file(`${name}.${ext}`, await fetch(inv.image).then((r) => r.blob()));
-            } catch {}
+            log.warn('Zip: skipping file — fetch failed', { invoice: inv.invoice_number, error: fetchErr.message });
           }
         }
 
@@ -3024,76 +3049,6 @@ function InvoiceVaultTab({ invoices, payments, proformaInvoices, vendors, onDele
         ))}
       </div>
 
-      {/* Search + vendor filter */}
-      <div style={{ display: 'flex', gap: 12, marginBottom: 16, alignItems: 'center' }}>
-        <div style={{ position: 'relative', flex: 1 }}>
-          <span style={{ position: 'absolute', left: 11, top: '50%', transform: 'translateY(-50%)', color: '#94a3b8', display: 'flex' }}>
-            <Search size={15} />
-          </span>
-          <input
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            placeholder="Search vendor or invoice #…"
-            style={{ ...IS, paddingLeft: 36, paddingRight: search ? 36 : 12 }}
-          />
-          {search && (
-            <button onClick={() => setSearch('')} style={{ position: 'absolute', right: 8, top: '50%', transform: 'translateY(-50%)', background: 'none', border: 'none', cursor: 'pointer', color: '#94a3b8', display: 'flex', alignItems: 'center', padding: 2 }}>
-              <X size={14} />
-            </button>
-          )}
-        </div>
-
-        {/* Vendor name filter */}
-        <div ref={vRef} style={{ position: 'relative', width: 220 }}>
-          <div
-            onClick={() => setVOpen((o) => !o)}
-            style={{ ...IS, display: 'flex', alignItems: 'center', justifyContent: 'space-between', cursor: 'pointer', userSelect: 'none', color: filterVendorName ? '#0f172a' : '#94a3b8' }}
-          >
-            <span style={{ fontSize: 13 }}>{filterVendorName || 'Filter by Vendor'}</span>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-              {filterVendorName && (
-                <span onClick={(e) => { e.stopPropagation(); setFVN(''); setVq(''); }} style={{ color: '#94a3b8', cursor: 'pointer', display: 'flex', alignItems: 'center' }}>
-                  <X size={14} />
-                </span>
-              )}
-              <span style={{ color: '#94a3b8', fontSize: 12 }}>{vOpen ? '▲' : '▼'}</span>
-            </div>
-          </div>
-          {vOpen && (
-            <div style={{ position: 'absolute', top: 'calc(100% + 4px)', left: 0, right: 0, background: '#fff', border: '1.5px solid #e2e8f0', borderRadius: 10, boxShadow: '0 10px 28px rgba(0,0,0,0.12)', zIndex: 500, overflow: 'hidden' }}>
-              <div style={{ padding: '8px 10px', borderBottom: '1px solid #f1f5f9' }}>
-                <input autoFocus placeholder="Search vendor…" value={vq} onChange={(e) => setVq(e.target.value)} style={{ ...IS, padding: '6px 10px', fontSize: 13 }} />
-              </div>
-              <div style={{ maxHeight: 200, overflowY: 'auto' }}>
-                <div onClick={() => { setFVN(''); setVOpen(false); setVq(''); }} style={{ padding: '9px 14px', cursor: 'pointer', color: '#94a3b8', fontSize: 13 }}>
-                  All Vendors
-                </div>
-                {filteredVNames.map((name) => (
-                  <div
-                    key={name}
-                    onClick={() => { setFVN(name); setVOpen(false); setVq(''); }}
-                    style={{ padding: '9px 14px', cursor: 'pointer', background: name === filterVendorName ? '#eff6ff' : '#fff', color: name === filterVendorName ? '#1d4ed8' : '#0f172a', fontWeight: name === filterVendorName ? 700 : 400, fontSize: 13, borderBottom: '1px solid #f8fafc' }}
-                    onMouseEnter={(e) => { if (name !== filterVendorName) e.currentTarget.style.background = '#f8fafc'; }}
-                    onMouseLeave={(e) => { if (name !== filterVendorName) e.currentTarget.style.background = '#fff'; }}
-                  >
-                    {name}
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
-        </div>
-
-        {(search || filterVendorName) && (
-          <button
-            onClick={() => { setSearch(''); setFVN(''); setVq(''); }}
-            style={{ display: 'flex', alignItems: 'center', gap: 5, padding: '9px 14px', borderRadius: 8, border: '1.5px solid #e2e8f0', background: '#fff', color: '#64748b', fontWeight: 600, fontSize: 13, cursor: 'pointer', whiteSpace: 'nowrap' }}
-          >
-            <X size={13} /> Clear All
-          </button>
-        )}
-      </div>
-
       {/* FY / Month / Invoice hierarchy */}
       <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
         {Object.entries(hierarchy).sort().reverse().map(([fy, months]) => {
@@ -3204,8 +3159,19 @@ function InvoiceVaultTab({ invoices, payments, proformaInvoices, vendors, onDele
                                         <div style={{ fontWeight: 700, fontSize: 13 }}>{inv.vendor_name}</div>
                                         <div style={{ fontSize: 11, color: '#94a3b8' }}>INV: {inv.invoice_number} · {fmtDate(inv.date)}</div>
                                         {inv.notes && (
-                                          <div style={{ fontSize: 10, color: '#94a3b8', fontStyle: 'italic', marginTop: 2, maxWidth: 240, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={inv.notes}>
-                                            {inv.notes}
+                                          <div style={{
+                                            display: 'inline-flex', alignItems: 'center', gap: 4,
+                                            marginTop: 4, padding: '3px 8px',
+                                            background: '#fefce8', border: '1px solid #fde68a',
+                                            borderRadius: 6, maxWidth: 300,
+                                          }}>
+                                            <FileText size={10} style={{ color: '#b45309', flexShrink: 0 }} />
+                                            <span style={{
+                                              fontSize: 11, color: '#78350f', fontWeight: 500,
+                                              overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                                            }} title={inv.notes}>
+                                              {inv.notes}
+                                            </span>
                                           </div>
                                         )}
                                         <div style={{ display: 'flex', gap: 5, flexWrap: 'wrap', marginTop: 3 }}>
@@ -3885,6 +3851,8 @@ export default function PaymentTracker() {
   const [pendingPiFlowId, setPendingPiFlowId] = useState(null);
   const [filterVendor,    setFilterVendor]    = useState('');
   const [filterStatus,    setFilterStatus]    = useState('');
+  const [globalSearch,    setGlobalSearch]    = useState('');
+  const [globalVendorFilter, setGlobalVendorFilter] = useState('');
 
   const { showToast: _showToast, confirm, Toast, ConfirmDialog } = usePopup();
   const showToast = (msg, type = 'success') => _showToast(type, msg);
@@ -3950,19 +3918,36 @@ export default function PaymentTracker() {
     }
   }, [data.pi, pendingPiFlowId, modal]);
 
-  // PI tab: hide invoiced PIs that are fully settled
+  // PI tab: hide invoiced PIs that are fully settled; apply global search
   const filteredPIs = data.pi.filter((p) => {
     if (filterStatus) return p.status === filterStatus;
     if (p.status === 'invoiced' && p.amountDue <= 0) return false;
     return true;
+  }).filter((p) => {
+    if (!globalSearch) return true;
+    const s = globalSearch.toLowerCase();
+    return (
+      p.piNumber?.toLowerCase().includes(s) ||
+      p.vendor?.companyName?.toLowerCase().includes(s) ||
+      p.notes?.toLowerCase().includes(s)
+    );
   });
 
-  // Payments tab: show advance (unmapped) payments only
+  // Payments tab: show advance (unmapped) payments only; apply global search
   const filteredPayments = data.payments.filter((p) => {
     const isAdvance = p.mappedTo === 'advance';
     if (!filterStatus) return isAdvance;
     if (filterStatus === 'advance') return isAdvance;
     return isAdvance && p.status === filterStatus;
+  }).filter((p) => {
+    if (!globalSearch) return true;
+    const s = globalSearch.toLowerCase();
+    return (
+      p.paymentRef?.toLowerCase().includes(s) ||
+      p.vendor?.companyName?.toLowerCase().includes(s) ||
+      p.bankRef?.toLowerCase().includes(s) ||
+      p.remarks?.toLowerCase().includes(s)
+    );
   });
 
   const thisFY         = currentFY();
@@ -4093,12 +4078,12 @@ export default function PaymentTracker() {
         ))}
       </div>
 
-      {/* ── Tab bar + inline filters ────────────────────────────────────── */}
+      {/* ── Tab bar ────────────────────────────────────────────────────── */}
       <div style={{ display: 'flex', alignItems: 'flex-end', gap: 0, marginBottom: 0, borderBottom: `1px solid ${T.border}` }}>
         {tabs.map((t) => (
           <button
             key={t.key}
-            onClick={() => { setTab(t.key); setFilterStatus(''); }}
+            onClick={() => { setTab(t.key); setFilterStatus(''); setGlobalSearch(''); setGlobalVendorFilter(''); }}
             style={{
               padding: '12px 24px', border: 'none',
               borderBottom: tab === t.key ? `2px solid ${T.gold}` : '2px solid transparent',
@@ -4124,40 +4109,84 @@ export default function PaymentTracker() {
             )}
           </button>
         ))}
+      </div>
 
-        {/* Filters right-aligned in tab bar */}
-        {tab !== 'invoices' && (
-          <div style={{ marginLeft: 'auto', display: 'flex', gap: 10, alignItems: 'center', paddingBottom: 6 }}>
-            <div style={{ width: 200 }}>
-              <VendorSelect vendors={vendors} value={filterVendor} onChange={setFilterVendor} placeholder="All Vendors" showReset />
-            </div>
-            <select
-              style={{ ...IS, width: 150, fontSize: 11, padding: '8px 12px' }}
-              value={filterStatus}
-              onChange={(e) => setFilterStatus(e.target.value)}
+      {/* ── Unified search + filter bar (common to all tabs) ───────────── */}
+      <div style={{
+        display: 'flex', gap: 10, alignItems: 'center',
+        padding: '10px 16px',
+        background: T.offwhite, border: `1px solid ${T.border}`, borderTop: 'none',
+      }}>
+        {/* Search input — placeholder adapts per tab */}
+        <div style={{ position: 'relative', flex: 1, minWidth: 0 }}>
+          <span style={{ position: 'absolute', left: 11, top: '50%', transform: 'translateY(-50%)', color: T.muted, display: 'flex', pointerEvents: 'none' }}>
+            <Search size={14} />
+          </span>
+          <input
+            value={globalSearch}
+            onChange={(e) => setGlobalSearch(e.target.value)}
+            placeholder={
+              tab === 'pi'       ? 'Search PI number, vendor…'      :
+              tab === 'payments' ? 'Search ref, vendor, bank ref…'  :
+                                   'Search vendor or invoice #…'
+            }
+            style={{ ...IS, paddingLeft: 34, paddingRight: globalSearch ? 34 : 12, fontSize: 12 }}
+          />
+          {globalSearch && (
+            <button
+              onClick={() => setGlobalSearch('')}
+              style={{ position: 'absolute', right: 8, top: '50%', transform: 'translateY(-50%)', background: 'none', border: 'none', cursor: 'pointer', color: T.muted, display: 'flex', alignItems: 'center', padding: 2 }}
             >
-              <option value="">All Statuses</option>
-              {statusOptions.map((s) => (
-                <option key={s} value={s}>{STATUS_META[s]?.label || s}</option>
-              ))}
-            </select>
-            {(filterVendor || filterStatus) && (
-              <button
-                onClick={() => { setFilterVendor(''); setFilterStatus(''); }}
-                style={{
-                  background: 'none', border: `1px solid ${T.border}`,
-                  fontFamily: jost, fontSize: 9, letterSpacing: '0.15em',
-                  textTransform: 'uppercase', color: T.muted,
-                  padding: '8px 14px', cursor: 'pointer',
-                  transition: 'color 0.2s, border-color 0.2s',
-                }}
-                onMouseEnter={e => { e.currentTarget.style.color = T.red; e.currentTarget.style.borderColor = T.red; }}
-                onMouseLeave={e => { e.currentTarget.style.color = T.muted; e.currentTarget.style.borderColor = T.border; }}
-              >
-                ✕ Clear
-              </button>
-            )}
+              <X size={13} />
+            </button>
+          )}
+        </div>
+
+        {/* Vendor filter — for invoice tab uses vendor name strings; others use VendorSelect with IDs */}
+        {tab === 'invoices' ? (
+          <GlobalVendorNameFilter
+            vendors={vendors}
+            invoices={data.invoices}
+            value={globalVendorFilter}
+            onChange={setGlobalVendorFilter}
+          />
+        ) : (
+          <div style={{ width: 200, flexShrink: 0 }}>
+            <VendorSelect vendors={vendors} value={filterVendor} onChange={setFilterVendor} placeholder="All Vendors" showReset />
           </div>
+        )}
+
+        {/* Status filter — PI and Payments tabs only */}
+        {tab !== 'invoices' && (
+          <select
+            style={{ ...IS, width: 150, flexShrink: 0, fontSize: 11, padding: '8px 12px' }}
+            value={filterStatus}
+            onChange={(e) => setFilterStatus(e.target.value)}
+          >
+            <option value="">All Statuses</option>
+            {statusOptions.map((s) => (
+              <option key={s} value={s}>{STATUS_META[s]?.label || s}</option>
+            ))}
+          </select>
+        )}
+
+        {/* Clear all */}
+        {(globalSearch || globalVendorFilter || filterVendor || filterStatus) && (
+          <button
+            onClick={() => { setGlobalSearch(''); setGlobalVendorFilter(''); setFilterVendor(''); setFilterStatus(''); }}
+            style={{
+              display: 'flex', alignItems: 'center', gap: 5,
+              background: 'none', border: `1px solid ${T.border}`,
+              fontFamily: jost, fontSize: 9, letterSpacing: '0.15em',
+              textTransform: 'uppercase', color: T.muted, flexShrink: 0,
+              padding: '8px 14px', cursor: 'pointer',
+              transition: 'color 0.2s, border-color 0.2s',
+            }}
+            onMouseEnter={e => { e.currentTarget.style.color = T.red; e.currentTarget.style.borderColor = T.red; }}
+            onMouseLeave={e => { e.currentTarget.style.color = T.muted; e.currentTarget.style.borderColor = T.border; }}
+          >
+            <X size={11} /> Clear
+          </button>
         )}
       </div>
 
@@ -4474,6 +4503,8 @@ export default function PaymentTracker() {
                 payments={data.payments}
                 proformaInvoices={data.pi}
                 vendors={vendors}
+                externalSearch={globalSearch}
+                externalVendorFilter={globalVendorFilter}
                 onDelete={async (id) => {
                   const ok = await confirm({ title: 'Delete Invoice?', message: 'This invoice will be permanently removed from the vault.', confirmLabel: 'Delete', variant: 'danger' });
                   if (!ok) return;

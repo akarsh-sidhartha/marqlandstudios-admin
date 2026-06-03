@@ -67,6 +67,9 @@ const COMPLETED_STATUSES = ['Delivered', 'Completed', 'Returned'];
 /** Delay threshold in days before a shipment is flagged as delayed. */
 const DELAY_THRESHOLD_DAYS = 4;
 
+/** Days after completion before a shipment moves to the archive tab. */
+const ARCHIVE_THRESHOLD_DAYS = 30;
+
 /** Skeleton shimmer row count while data loads */
 const SKELETON_ROW_COUNT = 7;
 
@@ -326,8 +329,8 @@ const SkeletonRow = ({ cols }) => (
  * @param {{ isMarqland: boolean }} props
  */
 const TableSkeleton = ({ isMarqland }) => {
-  // Date | Recipient | Address | Country | Tracking | Partner | Status | [Order] | Actions
-  const cols = isMarqland ? 9 : 8;
+  // Date | Recipient | Address | Tracking | Status | [Order] | Actions
+  const cols = isMarqland ? 7 : 6;
   log.debug('Rendering TableSkeleton', { cols, isMarqland });
 
   return (
@@ -1219,8 +1222,34 @@ const ExcelImportModal = ({ orders, partners, vendors, showOrderLink, onImported
 // ─────────────────────────────────────────────────────────────────────────────
 
 const BulkOrderLinkModal = ({ selectedIds, orders, onDone, onClose, showToast }) => {
-  const [orderId, setOrderId] = useState('');
-  const [saving, setSaving]   = useState(false);
+  const [orderId, setOrderId]           = useState('');
+  const [search, setSearch]             = useState('');
+  const [filterClient, setFilterClient] = useState('');
+  const [filterPerson, setFilterPerson] = useState('');
+  const [saving, setSaving]             = useState(false);
+  const [searchFocused, setSearchFocused] = useState(false);
+
+  // Only inquiry + ongoing
+  const eligibleOrders = orders.filter((o) => o.status === 'inquiry' || o.status === 'ongoing');
+  const clientNames = [...new Set(eligibleOrders.map((o) => o.clientName).filter(Boolean))].sort();
+  const personNames = [...new Set(
+    eligibleOrders
+      .filter((o) => !filterClient || o.clientName === filterClient)
+      .map((o) => o.personName || o.contactName || o.contact)
+      .filter(Boolean)
+  )].sort();
+
+  const filtered = eligibleOrders.filter((o) => {
+    if (filterClient && o.clientName !== filterClient) return false;
+    const person = o.personName || o.contactName || o.contact || '';
+    if (filterPerson && person !== filterPerson) return false;
+    if (search) {
+      const term = search.toLowerCase();
+      const blob = [o.refNumber, o.clientName, person, o.title].join(' ').toLowerCase();
+      if (!blob.includes(term)) return false;
+    }
+    return true;
+  });
 
   const apply = async () => {
     setSaving(true);
@@ -1247,39 +1276,148 @@ const BulkOrderLinkModal = ({ selectedIds, orders, onDone, onClose, showToast })
     }
   };
 
+  const statusBadge = (status) => {
+    const map = {
+      inquiry: { bg: '#1a2a3e', color: '#6a9abf', label: 'Inquiry' },
+      ongoing: { bg: '#1a2e1a', color: '#6ab07a', label: 'Ongoing' },
+    };
+    const s = map[status] || map.inquiry;
+    return (
+      <span style={{
+        fontFamily: jost, fontSize: 9, fontWeight: 700, letterSpacing: '0.1em',
+        textTransform: 'uppercase', background: s.bg, color: s.color,
+        border: `1px solid ${s.color}44`, borderRadius: 10, padding: '2px 8px',
+      }}>{s.label}</span>
+    );
+  };
+
   return (
     <ModalShell
       onClose={onClose}
       icon={Link2}
       subtitle="Bulk Action"
       title="Link Order"
-      maxWidth={380}
+      maxWidth={600}
       footer={
         <>
           <CancelBtn onClick={onClose} />
-          <GoldBtn onClick={apply} disabled={saving}>
+          <GoldBtn onClick={apply} disabled={saving || !orderId}>
             {saving && <GoldSpinner size={11} />}
             Apply to {selectedIds.length} row{selectedIds.length !== 1 ? 's' : ''}
           </GoldBtn>
         </>
       }
     >
-      <div style={{ padding: '20px 24px', display: 'flex', flexDirection: 'column', gap: 16 }}>
+      <div style={{ padding: '16px 24px', display: 'flex', flexDirection: 'column', gap: 12 }}>
         <p style={{ fontFamily: jost, fontSize: 12, fontWeight: 300, color: '#4a6080', margin: 0 }}>
           Linking{' '}
           <strong style={{ color: '#c8d8e8', fontWeight: 600 }}>{selectedIds.length}</strong>{' '}
           selected shipment{selectedIds.length !== 1 ? 's' : ''} to an order.
         </p>
-        <Field label="Select Order">
-          <DarkSelect value={orderId} onChange={(e) => setOrderId(e.target.value)}>
-            <option value="">— Mark as Ad-hoc (no order) —</option>
-            {orders.map((o) => (
-              <option key={o._id} value={o._id}>
-                {o.refNumber || o._id.slice(-6)} — {o.clientName}
-              </option>
-            ))}
+
+        {/* Filters */}
+        <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+          <div style={{ position: 'relative', flex: 1, minWidth: 160 }}>
+            <Search size={12} style={{
+              position: 'absolute', left: 10, top: '50%',
+              transform: 'translateY(-50%)', color: '#4a6080', pointerEvents: 'none',
+            }} />
+            <input
+              type="text"
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              placeholder="Search orders…"
+              onFocus={() => setSearchFocused(true)}
+              onBlur={() => setSearchFocused(false)}
+              style={{
+                ...darkInput, paddingLeft: 30,
+                borderColor: searchFocused ? T.gold : '#2a3a52',
+              }}
+            />
+            {search && (
+              <button onClick={() => setSearch('')} style={{ position: 'absolute', right: 8, top: '50%', transform: 'translateY(-50%)', background: 'none', border: 'none', cursor: 'pointer', color: '#4a6080', padding: 0, display: 'flex' }}>
+                <X size={12} />
+              </button>
+            )}
+          </div>
+          <DarkSelect value={filterClient} onChange={(e) => { setFilterClient(e.target.value); setFilterPerson(''); }} style={{ minWidth: 140 }}>
+            <option value="">All Clients</option>
+            {clientNames.map((c) => <option key={c} value={c}>{c}</option>)}
           </DarkSelect>
-        </Field>
+          <DarkSelect value={filterPerson} onChange={(e) => setFilterPerson(e.target.value)} style={{ minWidth: 140 }}>
+            <option value="">All Persons</option>
+            {personNames.map((p) => <option key={p} value={p}>{p}</option>)}
+          </DarkSelect>
+        </div>
+
+        <p style={{ fontFamily: jost, fontSize: 9, fontWeight: 400, letterSpacing: '0.2em', textTransform: 'uppercase', color: `${T.gold}66`, margin: 0 }}>
+          {filtered.length} order{filtered.length !== 1 ? 's' : ''} · inquiry & ongoing only
+        </p>
+      </div>
+
+      {/* Order list */}
+      <div style={{ maxHeight: 280, overflowY: 'auto', borderTop: '1px solid #1e2d40' }}>
+        {/* Ad-hoc option */}
+        <button
+          onClick={() => setOrderId('')}
+          style={{
+            width: '100%', textAlign: 'left', padding: '10px 24px',
+            background: orderId === '' ? `${T.gold}0a` : 'none',
+            border: 'none', borderBottom: '1px solid #1e2d40',
+            cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 10,
+            transition: 'background 0.15s',
+          }}
+          onMouseEnter={e => { e.currentTarget.style.background = '#0d1c2c'; }}
+          onMouseLeave={e => { e.currentTarget.style.background = orderId === '' ? `${T.gold}0a` : 'none'; }}
+        >
+          {orderId === '' && <Check size={12} style={{ color: T.gold, flexShrink: 0 }} />}
+          <span style={{ fontFamily: jost, fontSize: 11, fontWeight: 600, color: '#4a6080', marginLeft: orderId === '' ? 0 : 22 }}>
+            — Mark as Ad-hoc (no order)
+          </span>
+        </button>
+
+        {filtered.length === 0 ? (
+          <div style={{ padding: '24px', textAlign: 'center' }}>
+            <p style={{ fontFamily: jost, fontSize: 12, fontWeight: 300, color: '#3d5070', margin: 0 }}>No matching orders</p>
+          </div>
+        ) : (
+          filtered.map((o) => {
+            const person = o.personName || o.contactName || o.contact || '';
+            const isSelected = orderId === o._id;
+            return (
+              <button
+                key={o._id}
+                onClick={() => setOrderId(o._id)}
+                style={{
+                  width: '100%', textAlign: 'left', padding: '10px 24px',
+                  background: isSelected ? `${T.gold}0a` : 'none',
+                  border: 'none', borderBottom: '1px solid #1e2d40',
+                  cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 10,
+                  transition: 'background 0.15s',
+                }}
+                onMouseEnter={e => { e.currentTarget.style.background = '#0d1c2c'; }}
+                onMouseLeave={e => { e.currentTarget.style.background = isSelected ? `${T.gold}0a` : 'none'; }}
+              >
+                {isSelected
+                  ? <Check size={12} style={{ color: T.gold, flexShrink: 0 }} />
+                  : <div style={{ width: 12, flexShrink: 0 }} />
+                }
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 2 }}>
+                    <span style={{ fontFamily: 'monospace', fontSize: 11, fontWeight: 700, color: T.gold, background: `${T.gold}14`, border: `1px solid ${T.gold}33`, borderRadius: 2, padding: '1px 6px' }}>
+                      {o.refNumber || o._id.slice(-6)}
+                    </span>
+                    {statusBadge(o.status)}
+                  </div>
+                  <p style={{ fontFamily: jost, fontSize: 12, fontWeight: 500, color: '#c8d8e8', margin: 0 }}>
+                    {o.clientName}
+                    {person && <span style={{ color: '#4a6080', fontWeight: 300 }}> · {person}</span>}
+                  </p>
+                </div>
+              </button>
+            );
+          })
+        )}
       </div>
     </ModalShell>
   );
@@ -1287,12 +1425,40 @@ const BulkOrderLinkModal = ({ selectedIds, orders, onDone, onClose, showToast })
 
 
 // ─────────────────────────────────────────────────────────────────────────────
-// INLINE SINGLE-ROW ORDER ASSIGNER
+// LINK ORDER MODAL — full-screen searchable modal with client/person filters
+// Only shows inquiry + ongoing orders
 // ─────────────────────────────────────────────────────────────────────────────
 
-const OrderAssigner = ({ shipmentId, orders, onAssigned, showToast }) => {
-  const [open, setOpen]     = useState(false);
-  const [saving, setSaving] = useState(false);
+const LinkOrderModal = ({ shipmentId, shipmentRecipient, orders, onAssigned, onClose, showToast }) => {
+  const [search, setSearch]         = useState('');
+  const [filterClient, setFilterClient] = useState('');
+  const [filterPerson, setFilterPerson] = useState('');
+  const [saving, setSaving]         = useState(false);
+  const [searchFocused, setSearchFocused] = useState(false);
+
+  // Only show inquiry + ongoing orders
+  const eligibleOrders = orders.filter((o) => o.status === 'inquiry' || o.status === 'ongoing');
+
+  // Unique client names and person names from eligible orders
+  const clientNames = [...new Set(eligibleOrders.map((o) => o.clientName).filter(Boolean))].sort();
+  const personNames = [...new Set(
+    eligibleOrders
+      .filter((o) => !filterClient || o.clientName === filterClient)
+      .map((o) => o.personName || o.contactName || o.contact)
+      .filter(Boolean)
+  )].sort();
+
+  const filtered = eligibleOrders.filter((o) => {
+    if (filterClient && o.clientName !== filterClient) return false;
+    const person = o.personName || o.contactName || o.contact || '';
+    if (filterPerson && person !== filterPerson) return false;
+    if (search) {
+      const term = search.toLowerCase();
+      const blob = [o.refNumber, o.clientName, person, o.title, o.status].join(' ').toLowerCase();
+      if (!blob.includes(term)) return false;
+    }
+    return true;
+  });
 
   const assign = async (orderId) => {
     setSaving(true);
@@ -1305,22 +1471,211 @@ const OrderAssigner = ({ shipmentId, orders, onAssigned, showToast }) => {
         isAdhoc:  !orderId,
       });
       logOrderAssigner.info('Assignment succeeded', { shipmentId, orderId });
+      showToast('success', orderId ? 'Order linked' : 'Marked as ad-hoc');
       onAssigned();
+      onClose();
     } catch (err) {
       logOrderAssigner.error('Assignment failed', err);
       showToast('error', getApiError(err));
     } finally {
       setSaving(false);
-      setOpen(false);
     }
   };
 
-  if (saving) return <GoldSpinner size={12} />;
+  const statusBadge = (status) => {
+    const map = {
+      inquiry: { bg: '#1a2a3e', color: '#6a9abf', label: 'Inquiry' },
+      ongoing: { bg: '#1a2e1a', color: '#6ab07a', label: 'Ongoing' },
+    };
+    const s = map[status] || map.inquiry;
+    return (
+      <span style={{
+        fontFamily: jost, fontSize: 9, fontWeight: 700,
+        letterSpacing: '0.1em', textTransform: 'uppercase',
+        background: s.bg, color: s.color,
+        border: `1px solid ${s.color}44`,
+        borderRadius: 10, padding: '2px 8px',
+      }}>{s.label}</span>
+    );
+  };
 
   return (
-    <div style={{ position: 'relative' }}>
+    <ModalShell
+      onClose={onClose}
+      icon={Link2}
+      subtitle="Assign to Order"
+      title="Link Order"
+      maxWidth={660}
+      footer={
+        <>
+          <button
+            onClick={() => assign('')}
+            disabled={saving}
+            style={{
+              background: 'none', border: `1px solid #2a3a52`, borderRadius: 2,
+              cursor: saving ? 'not-allowed' : 'pointer', padding: '9px 18px',
+              fontFamily: jost, fontSize: 10, fontWeight: 400,
+              letterSpacing: '0.18em', textTransform: 'uppercase',
+              color: '#4a6080', transition: 'border-color 0.2s, color 0.2s',
+            }}
+            onMouseEnter={e => { e.currentTarget.style.borderColor = '#4a6080'; e.currentTarget.style.color = '#8fa3c0'; }}
+            onMouseLeave={e => { e.currentTarget.style.borderColor = '#2a3a52'; e.currentTarget.style.color = '#4a6080'; }}
+          >
+            Mark as Ad-hoc
+          </button>
+          <CancelBtn onClick={onClose} />
+        </>
+      }
+    >
+      <div style={{ padding: '16px 24px', display: 'flex', flexDirection: 'column', gap: 12 }}>
+
+        {/* Recipient context */}
+        {shipmentRecipient && (
+          <div style={{
+            padding: '8px 12px', background: '#0a1018', border: '1px solid #1e2d40', borderRadius: 2,
+            fontFamily: jost, fontSize: 11, color: '#4a6080',
+          }}>
+            Linking shipment for <strong style={{ color: '#8fa3c0' }}>{shipmentRecipient}</strong>
+          </div>
+        )}
+
+        {/* Filters row */}
+        <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+          {/* Search */}
+          <div style={{ position: 'relative', flex: 1, minWidth: 160 }}>
+            <Search size={12} style={{
+              position: 'absolute', left: 10, top: '50%',
+              transform: 'translateY(-50%)', color: '#4a6080', pointerEvents: 'none',
+            }} />
+            <input
+              type="text"
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              placeholder="Search orders…"
+              onFocus={() => setSearchFocused(true)}
+              onBlur={() => setSearchFocused(false)}
+              style={{
+                ...darkInput,
+                paddingLeft: 30,
+                borderColor: searchFocused ? T.gold : '#2a3a52',
+                boxShadow: searchFocused ? `0 0 0 2px ${T.gold}14` : 'none',
+              }}
+            />
+            {search && (
+              <button
+                onClick={() => setSearch('')}
+                style={{
+                  position: 'absolute', right: 8, top: '50%', transform: 'translateY(-50%)',
+                  background: 'none', border: 'none', cursor: 'pointer',
+                  color: '#4a6080', padding: 0, display: 'flex',
+                }}
+              ><X size={12} /></button>
+            )}
+          </div>
+
+          {/* Client filter */}
+          <DarkSelect
+            value={filterClient}
+            onChange={(e) => { setFilterClient(e.target.value); setFilterPerson(''); }}
+            style={{ minWidth: 150 }}
+          >
+            <option value="">All Clients</option>
+            {clientNames.map((c) => <option key={c} value={c}>{c}</option>)}
+          </DarkSelect>
+
+          {/* Person filter */}
+          <DarkSelect
+            value={filterPerson}
+            onChange={(e) => setFilterPerson(e.target.value)}
+            style={{ minWidth: 150 }}
+          >
+            <option value="">All Persons</option>
+            {personNames.map((p) => <option key={p} value={p}>{p}</option>)}
+          </DarkSelect>
+        </div>
+
+        {/* Results count */}
+        <p style={{
+          fontFamily: jost, fontSize: 9, fontWeight: 400,
+          letterSpacing: '0.2em', textTransform: 'uppercase',
+          color: `${T.gold}66`, margin: 0,
+        }}>
+          {filtered.length} order{filtered.length !== 1 ? 's' : ''} · inquiry & ongoing only
+        </p>
+      </div>
+
+      {/* Order list */}
+      <div style={{ maxHeight: 320, overflowY: 'auto', borderTop: '1px solid #1e2d40' }}>
+        {filtered.length === 0 ? (
+          <div style={{ padding: '32px 24px', textAlign: 'center' }}>
+            <p style={{ fontFamily: jost, fontSize: 12, fontWeight: 300, color: '#3d5070', margin: 0 }}>
+              No matching orders
+            </p>
+          </div>
+        ) : (
+          filtered.map((o) => {
+            const person = o.personName || o.contactName || o.contact || '';
+            return (
+              <button
+                key={o._id}
+                onClick={() => !saving && assign(o._id)}
+                disabled={saving}
+                style={{
+                  width: '100%', textAlign: 'left',
+                  padding: '12px 24px',
+                  background: 'none', border: 'none', borderBottom: '1px solid #1e2d40',
+                  cursor: saving ? 'not-allowed' : 'pointer',
+                  transition: 'background 0.15s',
+                  display: 'flex', alignItems: 'center', gap: 12,
+                }}
+                onMouseEnter={e => { if (!saving) e.currentTarget.style.background = '#0d1c2c'; }}
+                onMouseLeave={e => { e.currentTarget.style.background = 'none'; }}
+              >
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 3 }}>
+                    <span style={{
+                      fontFamily: 'monospace', fontSize: 12, fontWeight: 700, color: T.gold,
+                      background: `${T.gold}14`, border: `1px solid ${T.gold}33`,
+                      borderRadius: 2, padding: '1px 6px',
+                    }}>
+                      {o.refNumber || o._id.slice(-6)}
+                    </span>
+                    {statusBadge(o.status)}
+                  </div>
+                  <p style={{ fontFamily: jost, fontSize: 12, fontWeight: 500, color: '#c8d8e8', margin: 0, lineHeight: 1.3 }}>
+                    {o.clientName}
+                    {person && <span style={{ color: '#4a6080', fontWeight: 300 }}> · {person}</span>}
+                  </p>
+                  {o.title && (
+                    <p style={{ fontFamily: jost, fontSize: 10, fontWeight: 300, color: '#3d5070', margin: '2px 0 0', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                      {o.title}
+                    </p>
+                  )}
+                </div>
+                <div style={{ flexShrink: 0, color: '#2a3a52' }}>
+                  {saving ? <GoldSpinner size={13} /> : <Link2 size={13} />}
+                </div>
+              </button>
+            );
+          })
+        )}
+      </div>
+    </ModalShell>
+  );
+};
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+// INLINE SINGLE-ROW ORDER ASSIGNER — triggers the LinkOrderModal
+// ─────────────────────────────────────────────────────────────────────────────
+
+const OrderAssigner = ({ shipmentId, shipmentRecipient, orders, onAssigned, showToast }) => {
+  const [open, setOpen] = useState(false);
+
+  return (
+    <>
       <button
-        onClick={() => setOpen((prev) => !prev)}
+        onClick={() => setOpen(true)}
         style={{
           display: 'inline-flex', alignItems: 'center', gap: 4,
           background: `${T.gold}18`, border: `1px solid ${T.gold}44`,
@@ -1336,53 +1691,16 @@ const OrderAssigner = ({ shipmentId, orders, onAssigned, showToast }) => {
       </button>
 
       {open && (
-        <>
-          <div style={{ position: 'fixed', inset: 0, zIndex: 40 }} onClick={() => setOpen(false)} />
-          <div style={{
-            position: 'absolute', zIndex: 50, left: 0, top: 28,
-            background: T.navyBg, border: '1px solid #2a3a52', borderRadius: 2,
-            boxShadow: '0 8px 32px rgba(0,0,0,0.5)',
-            width: 264, maxHeight: 220, overflowY: 'auto',
-          }}>
-            <div style={{ padding: '8px 12px', borderBottom: '1px solid #1e2d40' }}>
-              <p style={{
-                fontFamily: jost, fontSize: 9, fontWeight: 400,
-                letterSpacing: '0.25em', textTransform: 'uppercase', color: `${T.gold}66`, margin: 0,
-              }}>Assign to Order</p>
-            </div>
-            <button
-              onClick={() => assign('')}
-              style={{
-                width: '100%', textAlign: 'left', padding: '8px 12px',
-                background: 'none', border: 'none', borderBottom: '1px solid #1e2d40',
-                cursor: 'pointer', fontFamily: jost, fontSize: 11, fontWeight: 600,
-                color: '#4a6080', transition: 'background 0.2s, color 0.2s',
-              }}
-              onMouseEnter={e => { e.currentTarget.style.background = T.navyBg2; e.currentTarget.style.color = '#8fa3c0'; }}
-              onMouseLeave={e => { e.currentTarget.style.background = 'none'; e.currentTarget.style.color = '#4a6080'; }}
-            >
-              — Mark as Ad-hoc
-            </button>
-            {orders.map((o) => (
-              <button
-                key={o._id}
-                onClick={() => assign(o._id)}
-                style={{
-                  width: '100%', textAlign: 'left', padding: '8px 12px',
-                  background: 'none', border: 'none', borderBottom: '1px solid #1e2d40',
-                  cursor: 'pointer', fontFamily: jost, fontSize: 11, transition: 'background 0.2s',
-                }}
-                onMouseEnter={e => e.currentTarget.style.background = '#1a2a1e'}
-                onMouseLeave={e => e.currentTarget.style.background = 'none'}
-              >
-                <span style={{ fontWeight: 600, color: '#c8d8e8' }}>{o.refNumber || o._id.slice(-6)}</span>
-                <span style={{ color: '#4a6080', marginLeft: 6, fontSize: 10 }}>— {o.clientName}</span>
-              </button>
-            ))}
-          </div>
-        </>
+        <LinkOrderModal
+          shipmentId={shipmentId}
+          shipmentRecipient={shipmentRecipient}
+          orders={orders}
+          onAssigned={onAssigned}
+          onClose={() => setOpen(false)}
+          showToast={showToast}
+        />
       )}
-    </div>
+    </>
   );
 };
 
@@ -1471,7 +1789,7 @@ const ShipmentRow = memo(({
         )}
       </td>
 
-      {/* Address / City */}
+      {/* Address / City — includes country */}
       <td style={{ padding: '12px 16px', verticalAlign: 'top', maxWidth: 200 }}>
         <p style={{
           fontFamily: jost, fontSize: 11, fontWeight: 300, color: T.muted, margin: 0,
@@ -1482,40 +1800,40 @@ const ShipmentRow = memo(({
         <div style={{ display: 'flex', alignItems: 'center', gap: 3, marginTop: 2 }}>
           <MapPin size={9} style={{ color: T.muted, opacity: 0.5 }} />
           <span style={{ fontFamily: jost, fontSize: 10, fontWeight: 300, color: '#aaa' }}>
-            {[shipment.city, shipment.state].filter(Boolean).join(', ') || '—'}
+            {[shipment.city, shipment.state, shipment.country].filter(Boolean).join(', ') || '—'}
           </span>
         </div>
       </td>
 
-      {/* Country */}
-      <td style={{ padding: '12px 16px', verticalAlign: 'top' }}>
-        <span style={{ fontFamily: jost, fontSize: 11, fontWeight: 300, color: T.muted }}>
-          {shipment.country || '—'}
-        </span>
-      </td>
-
-      {/* Tracking ID */}
+      {/* Tracking ID — partner name shown below */}
       <td style={{ padding: '12px 16px', verticalAlign: 'top' }}>
         {shipment.trackingId ? (
-          <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-            <span style={{
-              fontFamily: 'monospace', fontSize: 11, fontWeight: 700, color: T.gold,
-              background: `${T.gold}14`, border: `1px solid ${T.gold}33`,
-              borderRadius: 2, padding: '2px 7px',
-            }}>
-              {shipment.trackingId}
-            </span>
-            {partnerObj?.trackingUrl && (
-              <a
-                href={`${partnerObj.trackingUrl}${shipment.trackingId}`}
-                target="_blank" rel="noreferrer"
-                title="Track shipment"
-                style={{ color: T.muted, display: 'flex', transition: 'color 0.2s' }}
-                onMouseEnter={e => e.currentTarget.style.color = T.gold}
-                onMouseLeave={e => e.currentTarget.style.color = T.muted}
-              >
-                <ExternalLink size={11} />
-              </a>
+          <div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+              <span style={{
+                fontFamily: 'monospace', fontSize: 11, fontWeight: 700, color: T.gold,
+                background: `${T.gold}14`, border: `1px solid ${T.gold}33`,
+                borderRadius: 2, padding: '2px 7px',
+              }}>
+                {shipment.trackingId}
+              </span>
+              {partnerObj?.trackingUrl && (
+                <a
+                  href={partnerObj.trackingUrl}
+                  target="_blank" rel="noreferrer"
+                  title={`Open ${partnerObj.name} portal — copy tracking number: ${shipment.trackingId}`}
+                  style={{ color: T.muted, display: 'flex', transition: 'color 0.2s' }}
+                  onMouseEnter={e => e.currentTarget.style.color = T.gold}
+                  onMouseLeave={e => e.currentTarget.style.color = T.muted}
+                >
+                  <ExternalLink size={11} />
+                </a>
+              )}
+            </div>
+            {shipment.shippingPartner && (
+              <p style={{ fontFamily: jost, fontSize: 10, fontWeight: 300, color: '#6a7a8a', margin: '4px 0 0' }}>
+                {shipment.shippingPartner}
+              </p>
             )}
           </div>
         ) : (
@@ -1523,13 +1841,6 @@ const ShipmentRow = memo(({
             {isMarqland ? 'Pending from vendor' : '—'}
           </span>
         )}
-      </td>
-
-      {/* Partner */}
-      <td style={{ padding: '12px 16px', verticalAlign: 'top' }}>
-        <span style={{ fontFamily: jost, fontSize: 11, fontWeight: 400, color: T.muted }}>
-          {shipment.shippingPartner || '—'}
-        </span>
       </td>
 
       {/* Status */}
@@ -1570,6 +1881,7 @@ const ShipmentRow = memo(({
               : (
                 <OrderAssigner
                   shipmentId={shipment._id}
+                  shipmentRecipient={shipment.recipientName}
                   orders={orders}
                   onAssigned={onAssigned}
                   showToast={showToast}
@@ -1878,9 +2190,20 @@ export default function CourierTracking() {
 
   // ── Filtering & sorting ───────────────────────────────────────────────────
 
+  /**
+   * Returns true if a completed shipment has aged past ARCHIVE_THRESHOLD_DAYS
+   * (measured from lastTrackedAt or updatedAt or shippedDate).
+   */
+  const isArchived = (s) => {
+    if (!COMPLETED_STATUSES.includes(s.status)) return false;
+    const anchor = s.lastTrackedAt || s.updatedAt || s.shippedDate || s.createdAt;
+    return (Date.now() - new Date(anchor).getTime()) / 86_400_000 > ARCHIVE_THRESHOLD_DAYS;
+  };
+
   const filtered = shipments.filter((s) => {
     if (tab === 'active'    &&  COMPLETED_STATUSES.includes(s.status)) return false;
-    if (tab === 'completed' && !COMPLETED_STATUSES.includes(s.status)) return false;
+    if (tab === 'completed' && (!COMPLETED_STATUSES.includes(s.status) || isArchived(s))) return false;
+    if (tab === 'archive'   && !isArchived(s)) return false;
     if (filterCountry && s.country !== filterCountry) return false;
     if (filterCity    && s.city?.toLowerCase()  !== filterCity.toLowerCase())  return false;
     if (filterState   && s.state?.toLowerCase() !== filterState.toLowerCase()) return false;
@@ -1905,7 +2228,8 @@ export default function CourierTracking() {
 
   const delayedCount   = filtered.filter(isDelayed).length;
   const activeCount    = shipments.filter((s) => !COMPLETED_STATUSES.includes(s.status)).length;
-  const completedCount = shipments.filter((s) =>  COMPLETED_STATUSES.includes(s.status)).length;
+  const completedCount = shipments.filter((s) =>  COMPLETED_STATUSES.includes(s.status) && !isArchived(s)).length;
+  const archiveCount   = shipments.filter(isArchived).length;
 
 
   // ── Selection helpers ─────────────────────────────────────────────────────
@@ -2163,6 +2487,7 @@ export default function CourierTracking() {
         {[
           { key: 'active',    label: 'Shipping & Shipped', count: activeCount    },
           { key: 'completed', label: 'Completed',          count: completedCount },
+          { key: 'archive',   label: 'Archive',            count: archiveCount   },
         ].map((t) => {
           const isActive = tab === t.key;
           return (
@@ -2258,10 +2583,10 @@ export default function CourierTracking() {
         <div style={{ background: T.white, border: `1px solid ${T.border}`, padding: '80px 0', textAlign: 'center' }}>
           <Truck size={32} style={{ color: `${T.gold}44`, margin: '0 auto 12px', display: 'block' }} />
           <p style={{ fontFamily: serif, fontSize: 20, fontWeight: 300, color: T.navy, margin: '0 0 4px' }}>
-            {hasFilters ? 'No shipments match your filters' : `No ${tab === 'active' ? 'active' : 'completed'} shipments`}
+            {hasFilters ? 'No shipments match your filters' : tab === 'active' ? 'No active shipments' : tab === 'archive' ? 'No archived shipments' : 'No completed shipments'}
           </p>
           <p style={{ fontFamily: jost, fontSize: 11, fontWeight: 300, color: T.muted, margin: 0 }}>
-            {hasFilters ? 'Try adjusting the filters above.' : 'Add your first shipment to get started.'}
+            {hasFilters ? 'Try adjusting the filters above.' : tab === 'archive' ? 'Completed shipments older than 30 days will appear here.' : 'Add your first shipment to get started.'}
           </p>
         </div>
       ) : (
@@ -2281,7 +2606,8 @@ export default function CourierTracking() {
                       />
                     </th>
                   )}
-                  {['Date', 'Recipient', 'Address / City', 'Country', 'Tracking ID', 'Partner', 'Status',
+                  {['Date', 'Recipient', 'Address / City',
+                    'Tracking ID', 'Status',
                     ...(isMarqland ? ['Order'] : []),
                     'Actions',
                   ].map((h) => (

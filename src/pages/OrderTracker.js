@@ -956,11 +956,15 @@ export default function OrderTracker() {
     const term = searchTerm.toLowerCase();
     const completed = orders.filter(o => {
       if (o.status !== 'completed') return false;
+      if (selectedClient  && o.clientName    !== selectedClient)  return false;
+      if (selectedContact && o.orderPlacedBy !== selectedContact) return false;
       if (!searchTerm) return true;
       return (
         o.clientName?.toLowerCase().includes(term) ||
         o.title?.toLowerCase().includes(term) ||
-        o.invoiceNumber?.toLowerCase().includes(term)
+        o.invoiceNumber?.toLowerCase().includes(term) ||
+        o.refNumber?.toLowerCase().includes(term) ||
+        o.orderPlacedBy?.toLowerCase().includes(term)
       );
     });
     const hierarchy = {};
@@ -973,14 +977,13 @@ export default function OrderTracker() {
       hierarchy[fy][month].push(order);
     });
     return hierarchy;
-  }, [orders, searchTerm]);
+  }, [orders, searchTerm, selectedClient, selectedContact]);
 
   // ── Mutations ──────────────────────────────────────────────────────────────
   const sendPortalEmail = async ({ slug, clientEmail, contactName, clientName, orderRef, title, portalUrl }) => {
     log.debug('Sending portal email', { clientEmail, orderRef });
     await api.post('/portal/send-email', {
-      slug, clientEmail, contactName, clientName, orderRef, title, portalUrl,
-      cc: CC_EMAIL,
+      slug, clientEmail, contactName, clientName, orderRef, title, cc: CC_EMAIL
     });
   };
 
@@ -1019,6 +1022,8 @@ export default function OrderTracker() {
 
         // Create portal to get the real server-generated slug
         const savedOrder = res.data;
+        console.log("save order details = "+saveOrder);
+        /*
         const genRandomSlug = () => Array.from({length: 10}, () => 'abcdefghijklmnopqrstuvwxyz0123456789'[Math.floor(Math.random() * 36)]).join('');
         //let portalSlug   = generatedRef.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
         let portalSlug   = genRandomSlug();
@@ -1027,9 +1032,11 @@ export default function OrderTracker() {
         try {
           const portalRes = await api.post('/portal', {
             orderId:    savedOrder._id,
+            portalSlug,
             type:       payload.orderType || 'product',
             orderRef:   generatedRef,
             clientName: payload.clientName,
+            orderPlacedBy: formData.orderPlacedBy || '',
             title:      payload.title,
           });
           if (portalRes.data?.slug) {
@@ -1046,10 +1053,12 @@ export default function OrderTracker() {
             log.warn('Portal creation failed — slug may be wrong', portalErr.message);
           }
         }
-
+        */
         // Client/contact lookup → determine email-send scenario
         try {
           const lookup = await api.get('/clients/lookup', { params: { name: payload.clientName } });
+          let portalSlug = savedOrder.slug
+          let portalUrl = `${CLIENT_BASE_URL}/p/${portalSlug}`;
 
           if (lookup.data.found && lookup.data.client) {
             const existingClient = lookup.data.client;
@@ -1064,7 +1073,7 @@ export default function OrderTracker() {
                 await sendPortalEmail({
                   slug: portalSlug, clientEmail: matchedContact.email,
                   contactName: matchedContact.name, clientName: existingClient.companyName,
-                  orderRef: generatedRef, title: payload.title, portalUrl,
+                  orderRef: generatedRef, title: payload.title
                 });
                 log.info('Portal email sent', { email: matchedContact.email });
               } catch (emailErr) {
@@ -1502,7 +1511,7 @@ export default function OrderTracker() {
                 fontFamily: jost, fontSize: 12, fontWeight: 300,
                 letterSpacing: '0.1em', color: T.muted,
               }}>
-                No completed records found
+                No completed records found{searchTerm ? ` for "${searchTerm}"` : ''}
               </p>
             )}
 
@@ -2160,8 +2169,7 @@ export default function OrderTracker() {
                         contactName: newClient.contacts?.[0]?.name || emailContact.name || '',
                         clientName:  newClient.companyName,
                         orderRef:    clientCheckModal.orderRef,
-                        title:       clientCheckModal.title,
-                        portalUrl:   clientCheckModal.portalUrl,
+                        title:       clientCheckModal.title
                       });
                       showToast('success', `Portal link sent to ${emailContact.email}`);
                     } catch (err) {
@@ -2193,8 +2201,7 @@ export default function OrderTracker() {
                         contactName: newContact.name,
                         clientName:  updatedClient.companyName,
                         orderRef:    clientCheckModal.orderRef,
-                        title:       clientCheckModal.title,
-                        portalUrl:   clientCheckModal.portalUrl,
+                        title:       clientCheckModal.title
                       });
                       showToast('success', `Contact added & portal link sent to ${newContact.email}`);
                     } catch (err) {
