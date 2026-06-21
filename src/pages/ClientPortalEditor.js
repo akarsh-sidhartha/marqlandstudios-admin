@@ -175,6 +175,130 @@ const ClientPortalEditor = ({ order, onClose }) => {
     }
   };
 
+  // ── Combo Creator state ─────────────────────────────────────────────────────
+  const [showComboPanel, setShowComboPanel]     = useState(false);
+  const [allCategories, setAllCategories]       = useState([]);
+  // { [category]: [subCategoryName, ...] } — same shape as ProductList.js's
+  // meta.subCategories, fetched from the same /products/meta endpoint.
+  const [subCategoriesMap, setSubCategoriesMap] = useState({});
+  const [comboCategories, setComboCategories]   = useState([]);
+  const [comboSubCategories, setComboSubCategories] = useState([]);
+  const [comboTargetPrice, setComboTargetPrice] = useState('');
+  const [comboGenerating, setComboGenerating]   = useState(false);
+  // One entry per candidate the engine returned, in the same order, each
+  // carrying how the auto-publish attempt for it went — there's no longer a
+  // per-row Add button to click; every in-band candidate gets published as
+  // part of generation, and this just reports what happened to each one.
+  const [comboResults, setComboResults]         = useState([]);
+  const [comboError, setComboError]             = useState('');
+
+  // Mirrors getComboPriceBand() in backend/services/comboEngine.js — keep the
+  // two in sync if this changes. Used here only for the live preview text
+  // under the target-price input, since the engine is what actually filters.
+  const getComboPriceBand = (targetPrice) => {
+    const t = Number(targetPrice) || 0;
+    let tolerance;
+    if (t <= 500) tolerance = 50;
+    else if (t <= 1000) tolerance = 100;
+    else if (t <= 5000) tolerance = 500;
+    else tolerance = 1000;
+    return { tolerance, lower: Math.max(0, t - tolerance), upper: t + tolerance };
+  };
+
+  // Sub-categories available to pick from — the union across every selected
+  // category, since comboCategories is multi-select. Deselecting a category
+  // also drops any of its sub-categories that are no longer reachable.
+  const comboSubCatOptions = [...new Set(
+    comboCategories.flatMap(cat => subCategoriesMap[cat] || [])
+  )];
+
+  const toggleComboCategory = (cat) =>
+    setComboCategories(prev => {
+      const next = prev.includes(cat) ? prev.filter(c => c !== cat) : [...prev, cat];
+      const stillReachable = new Set(next.flatMap(c => subCategoriesMap[c] || []));
+      setComboSubCategories(subs => subs.filter(s => stillReachable.has(s)));
+      return next;
+    });
+
+  const toggleComboSubCategory = (sub) =>
+    setComboSubCategories(prev =>
+      prev.includes(sub) ? prev.filter(s => s !== sub) : [...prev, sub]
+    );
+
+  const resetComboPanel = () => {
+    setShowComboPanel(false);
+    setComboCategories([]);
+    setComboSubCategories([]);
+    setComboTargetPrice('');
+    setComboResults([]);
+    setComboError('');
+  };
+
+  // Category + sub-category map fetched once, lazily, the first time the panel opens
+  const ensureCategoriesLoaded = async () => {
+    if (allCategories.length > 0) return;
+    try {
+      const res = await api.get('/products/meta');
+      setAllCategories(res.data?.categories || []);
+      setSubCategoriesMap(res.data?.subCategories || {});
+    } catch (err) {
+      console.error('Failed to load product categories for Combo Creator', err);
+    }
+  };
+
+  const openComboPanel = () => {
+    setShowComboPanel(true);
+    ensureCategoriesLoaded();
+  };
+
+  // Generate candidates, then immediately publish all of them — no separate
+  // Add step. The engine already only returns candidates inside the price
+  // band (and respects "at most one product per sub-category per combo" —
+  // no two hooded jackets, no two speakers, etc., even from different
+  // brands/products), so nothing here needs further admin confirmation per
+  // item. This calls the /combos/batch route (one portal read + one save for
+  // the whole list) rather than N individual /combos calls in parallel,
+  // which would otherwise race on the same document and risk one publish
+  // silently overwriting another.
+  const generateCombos = async () => {
+    if (!portal || !comboCategories.length || !comboSubCategories.length || !comboTargetPrice) return;
+    setComboGenerating(true);
+    setComboError('');
+    setComboResults([]);
+    try {
+      const genRes = await api.post('/products/combos/generate', {
+        categories:    comboCategories,
+        subCategories: comboSubCategories,
+        targetPrice:   Number(comboTargetPrice),
+      });
+      const candidates = genRes.data?.candidates || [];
+      if (candidates.length === 0) {
+        setComboError('No combos found in that price range — try a wider category/sub-category selection or a different target.');
+        return;
+      }
+
+      const batchRes = await api.post(`/portal/${portal.slug}/combos/batch`, {
+        combos: candidates.map(c => ({
+          productIds: c.products.map(p => p._id),
+          comboPrice: c.total,
+        })),
+      });
+
+      const rawResults = batchRes.data?.results || [];
+      setComboResults(candidates.map((c, i) => ({
+        candidate: c,
+        status:  rawResults[i]?.status  || 'error',
+        message: rawResults[i]?.message || '',
+      })));
+
+      await loadPortal(true);
+    } catch (err) {
+      setComboError(err.response?.data?.message || err.message || 'Failed to generate combos.');
+    } finally {
+      setComboGenerating(false);
+    }
+  };
+
   const fallbackSlug = order.refNumber?.toLowerCase().replace(/[^a-z0-9]+/g, '-');
   // Always link to the public client domain, never to the admin domain
   const portalUrl = portal?.slug
@@ -1019,6 +1143,183 @@ const ClientPortalEditor = ({ order, onClose }) => {
                           : <><Plus size={11} /> Add to Portal</>
                         }
                       </button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* ── Create Combo — product portals only ── */}
+            {portal.type === 'product' && (
+              <div className="border border-dashed border-slate-200 rounded-xl overflow-hidden">
+                {!showComboPanel ? (
+                  <button
+                    onClick={openComboPanel}
+                    className="w-full flex items-center justify-center gap-2 py-3 text-[10px] font-black uppercase tracking-widest text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 transition-all"
+                  >
+                    <Package size={13} />
+                    Create Combo
+                  </button>
+                ) : (
+                  <div>
+                    {/* Form header */}
+                    <div className="flex items-center justify-between px-3 py-2 bg-indigo-50 border-b border-indigo-100">
+                      <span className="text-[9px] font-black text-indigo-600 uppercase tracking-widest">Create Combo</span>
+                      <button onClick={resetComboPanel} className="text-indigo-300 hover:text-indigo-500">
+                        <X size={13} />
+                      </button>
+                    </div>
+
+                    <div className="p-3 space-y-2.5">
+                      {/* Category multi-select chips */}
+                      <div>
+                        <div className="text-[9px] font-black text-slate-400 uppercase tracking-widest mb-1.5">Categories</div>
+                        {allCategories.length === 0 ? (
+                          <p className="text-[10px] text-slate-300 italic">Loading categories…</p>
+                        ) : (
+                          <div className="flex flex-wrap gap-1.5">
+                            {allCategories.map(cat => (
+                              <button
+                                key={cat}
+                                onClick={() => toggleComboCategory(cat)}
+                                className={`px-2.5 py-1 rounded-full text-[10px] font-bold border transition-colors ${
+                                  comboCategories.includes(cat)
+                                    ? 'bg-indigo-600 text-white border-indigo-600'
+                                    : 'bg-white text-slate-500 border-slate-200 hover:border-indigo-300'
+                                }`}
+                              >
+                                {cat}
+                              </button>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+
+                      {/* Sub-category multi-select chips — required, same as Categories.
+                          Options are the union of sub-categories across every selected
+                          category. This isn't just a narrower search filter: the engine
+                          also never puts two products from the same sub-category into one
+                          combo (no two hooded jackets, no two speakers, even from
+                          different brands), so picking sub-categories here is really
+                          picking which "slots" a combo can be built from. */}
+                      {comboCategories.length > 0 && (
+                        <div>
+                          <div className="text-[9px] font-black text-slate-400 uppercase tracking-widest mb-1.5">Sub-categories</div>
+                          {comboSubCatOptions.length === 0 ? (
+                            <p className="text-[10px] text-amber-600">
+                              None of the selected categories have sub-categories set on their products yet.
+                            </p>
+                          ) : (
+                            <div className="flex flex-wrap gap-1.5">
+                              {comboSubCatOptions.map(sub => (
+                                <button
+                                  key={sub}
+                                  onClick={() => toggleComboSubCategory(sub)}
+                                  className={`px-2.5 py-1 rounded-full text-[10px] font-bold border transition-colors ${
+                                    comboSubCategories.includes(sub)
+                                      ? 'bg-emerald-600 text-white border-emerald-600'
+                                      : 'bg-white text-slate-500 border-slate-200 hover:border-emerald-300'
+                                  }`}
+                                >
+                                  {sub}
+                                </button>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      )}
+
+                      {/* Target price + generate */}
+                      <div className="flex items-center gap-2">
+                        <span className="text-xs font-bold text-slate-400">₹</span>
+                        <input
+                          type="number" min="0"
+                          placeholder="Target price (guides the search)"
+                          value={comboTargetPrice}
+                          onChange={e => setComboTargetPrice(e.target.value)}
+                          className="flex-1 border border-slate-200 rounded-lg px-2.5 py-2 text-xs outline-none focus:border-indigo-400 focus:ring-2 focus:ring-indigo-100 placeholder:text-slate-300 transition"
+                        />
+                        <button
+                          onClick={generateCombos}
+                          disabled={comboGenerating || !comboCategories.length || !comboSubCategories.length || !comboTargetPrice}
+                          className="px-3 py-2 bg-indigo-600 hover:bg-indigo-700 text-white text-[10px] font-black uppercase rounded-lg disabled:opacity-40 disabled:cursor-not-allowed flex items-center gap-1.5 shrink-0"
+                        >
+                          {comboGenerating
+                            ? <><Loader2 size={11} className="animate-spin" /> Adding…</>
+                            : <><Plus size={11} /> Generate & Add</>}
+                        </button>
+                      </div>
+                      {comboTargetPrice && !isNaN(Number(comboTargetPrice)) && (() => {
+                        const previewBand = getComboPriceBand(comboTargetPrice);
+                        return (
+                          <p className="text-[10px] text-slate-400 -mt-1">
+                            Will find combos between{' '}
+                            <span className="font-bold text-slate-500">
+                              ₹{previewBand.lower.toLocaleString('en-IN')}–₹{previewBand.upper.toLocaleString('en-IN')}
+                            </span>{' '}
+                            (±₹{previewBand.tolerance}) and add every match straight to this portal's Combo options.
+                          </p>
+                        );
+                      })()}
+
+                      {comboError && (
+                        <p className="text-[10px] text-red-500 font-bold">{comboError}</p>
+                      )}
+
+                      {/* Read-only outcome per candidate — there's no Add button anymore. Every
+                          candidate the engine returns is already inside the price band, so
+                          generateCombos() publishes all of them in one batched call; this list
+                          just reports what happened to each one (added / already existed / failed). */}
+                      {comboResults.length > 0 && (
+                        <div className="space-y-1.5">
+                          <div className="text-[9px] font-black text-slate-400 uppercase tracking-widest">
+                            {comboResults.filter(r => r.status === 'added').length} of {comboResults.length} added
+                          </div>
+                          {comboResults.map(({ candidate: c, status, message }) => (
+                            <div key={c.products.map(p => p._id).sort().join('|')} className="flex gap-3 items-center p-2.5 bg-slate-50 rounded-lg">
+                              <div className="flex shrink-0">
+                                {c.products.slice(0, 3).map((p, idx) => (
+                                  <div
+                                    key={p._id}
+                                    className="w-7 h-7 rounded-full bg-slate-200 border-2 border-white overflow-hidden"
+                                    style={{ marginLeft: idx === 0 ? 0 : -10 }}
+                                  >
+                                    {p.imageUrl
+                                      ? <img src={p.imageUrl} alt={p.name} className="w-full h-full object-cover" />
+                                      : <div className="w-full h-full flex items-center justify-center text-slate-300"><Package size={10} /></div>
+                                    }
+                                  </div>
+                                ))}
+                              </div>
+
+                              <div className="flex-1 min-w-0">
+                                <div className="text-xs font-bold text-slate-700 truncate">
+                                  {c.products.map(p => p.name).join(' + ')}
+                                </div>
+                                <div className="text-[10px] text-slate-400">
+                                  ₹{c.total.toLocaleString('en-IN')}
+                                </div>
+                              </div>
+
+                              {status === 'added' && (
+                                <span className="flex items-center gap-1 px-2 py-1 bg-emerald-100 text-emerald-700 text-[9px] font-black uppercase rounded-full shrink-0">
+                                  <Check size={10} /> Added
+                                </span>
+                              )}
+                              {status === 'duplicate' && (
+                                <span className="px-2 py-1 bg-amber-100 text-amber-700 text-[9px] font-black uppercase rounded-full shrink-0">
+                                  Already on portal
+                                </span>
+                              )}
+                              {status === 'error' && (
+                                <span title={message} className="px-2 py-1 bg-red-100 text-red-700 text-[9px] font-black uppercase rounded-full shrink-0">
+                                  Failed
+                                </span>
+                              )}
+                            </div>
+                          ))}
+                        </div>
+                      )}
                     </div>
                   </div>
                 )}

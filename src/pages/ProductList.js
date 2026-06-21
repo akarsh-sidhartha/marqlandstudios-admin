@@ -678,8 +678,18 @@ const ProductList = () => {
   };
 
   // ─── Category change ─────────────────────────────────────────────────────────
+  // 'Combo' is reserved — the Combo Creator (in ClientPortalEditor.js) uses it as a
+  // virtual category for bundle items that live only on a client portal, never in
+  // this products collection. A real product with this category would visually
+  // mix into that "Combo" group on the portal with no way to tell them apart.
+  const RESERVED_CATEGORIES = ['combo'];
+
   const handleCategoryChange = (v) => {
     const selectedCat = v?.value || '';
+    if (RESERVED_CATEGORIES.includes(selectedCat.trim().toLowerCase())) {
+      alert(`"${selectedCat}" is reserved for portal combo bundles and can't be used as a product category.`);
+      return;
+    }
     setFormData(prev => ({ ...prev, category: selectedCat, subCategory: '' }));
     const subCats = (meta.subCategories && meta.subCategories[selectedCat]) || [];
     setAvailableSubCats(subCats.map(s => ({ label: s, value: s })));
