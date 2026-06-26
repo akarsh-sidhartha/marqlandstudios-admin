@@ -505,12 +505,229 @@ const getFileIcon = (type) => {
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Authenticated OneDrive media helpers
+// The /api/orders/proxy-attachment endpoint is public (whitelisted in
+// authMiddleware) — Graph bearer token is the auth layer server-side.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Returns the best URL to fetch an order attachment through.
+ *
+ * Priority:
+ *  1. Backend proxy  — when itemId is set (available after /:id/attachments refresh)
+ *  2. downloadUrl    — pre-authenticated Graph direct URL (~1h TTL), set on most
+ *                      stored attachments. Works without a SharePoint session.
+ *  3. null           — brand-new unsaved files (base64 in memory only)
+ */
+const orderProxyUrl = (file, download = false) => {
+  if (!file) return null;
+  if (file.isNew || file.base64) return null;   // not yet uploaded
+
+  // Prefer backend proxy (itemId available after opening order detail)
+  if (file.itemId) {
+    const apiBase = (typeof api !== 'undefined' && api.defaults?.baseURL?.replace(/\/$/, '')) || '';
+    return `${apiBase}/orders/proxy-attachment?itemId=${file.itemId}${download ? '&download=1' : ''}`;
+  }
+
+  // Fall back to the pre-authenticated Graph downloadUrl stored in MongoDB.
+  // This URL does NOT require a SharePoint/Microsoft browser session.
+  // It expires ~1h after the order was last fetched from OneDrive, but is
+  // refreshed every time /:id/attachments is called.
+  if (file.downloadUrl) return file.downloadUrl;
+
+  return null;
+};
+
+/** Detect image from mimeType, type field, or filename extension */
+const isImageFile = (file) => {
+  if (file.mimeType?.startsWith('image/')) return true;
+  if (file.type?.startsWith('image/'))     return true;
+  return /\.(jpe?g|png|gif|webp|heic|bmp|svg)$/i.test(file.name || '');
+};
+
+/** Detect video from mimeType, type field, or filename extension */
+const isVideoFile = (file) => {
+  if (file.mimeType?.startsWith('video/')) return true;
+  if (file.type?.startsWith('video/'))     return true;
+  return /\.(mp4|mov|webm|mpeg|3gp|avi|mkv)$/i.test(file.name || '');
+};
+
+/**
+ * useAuthBlob — fetches a URL (plain fetch, proxy is public) and returns
+ * a blob object URL. Cleans up on unmount.
+ */
+const useAuthBlob = (url) => {
+  const [src,     setSrc]     = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [error,   setError]   = useState(false);
+
+  useEffect(() => {
+    if (!url) { setLoading(false); return; }
+    let objectUrl = null;
+    let cancelled = false;
+    setLoading(true); setError(false); setSrc(null);
+
+    fetch(url)
+      .then(r => { if (!r.ok) throw new Error(r.status); return r.blob(); })
+      .then(blob => { if (cancelled) return; objectUrl = URL.createObjectURL(blob); setSrc(objectUrl); })
+      .catch(() => { if (!cancelled) setError(true); })
+      .finally(() => { if (!cancelled) setLoading(false); });
+
+    return () => { cancelled = true; if (objectUrl) URL.revokeObjectURL(objectUrl); };
+  }, [url]);
+
+  return { src, loading, error };
+};
+
+/** Thumbnail tile — shimmer while loading, file-type icon on error/non-image */
+const AttachmentThumb = ({ file, onClick }) => {
+  const proxyUrl = orderProxyUrl(file);
+  const isImage  = isImageFile(file);
+  const { src, loading } = useAuthBlob(isImage && proxyUrl ? proxyUrl : null);
+
+  return (
+    <div
+      style={{ display: 'inline-flex', alignItems: 'center', gap: 0, flexShrink: 0 }}
+      onClick={e => e.stopPropagation()}
+    >
+      <div
+        onClick={() => onClick(file)}
+        title={`Open ${file.name}`}
+        style={{
+          display: 'inline-flex', alignItems: 'center', gap: 6,
+          padding: '4px 10px', cursor: 'pointer',
+          background: 'rgba(79,70,229,0.05)',
+          border: `1px solid rgba(79,70,229,0.12)`,
+          fontFamily: jost, fontSize: 10, fontWeight: 400,
+          letterSpacing: '0.08em',
+          maxWidth: 160, overflow: 'hidden',
+          transition: 'background 0.15s',
+        }}
+        onMouseEnter={e => e.currentTarget.style.background = 'rgba(79,70,229,0.1)'}
+        onMouseLeave={e => e.currentTarget.style.background = 'rgba(79,70,229,0.05)'}
+      >
+        {isImage ? (
+          loading ? (
+            <div style={{
+              width: 28, height: 28, flexShrink: 0,
+              background: 'linear-gradient(90deg,#eee 25%,#f5f5f5 50%,#eee 75%)',
+              backgroundSize: '200% 100%', animation: 'shimmer 1.2s infinite',
+            }} />
+          ) : src ? (
+            <img src={src} alt={file.name}
+              style={{ width: 28, height: 28, objectFit: 'cover', flexShrink: 0, display: 'block' }} />
+          ) : (
+            <div style={{ flexShrink: 0 }}>{getFileIcon(file.type || file.mimeType)}</div>
+          )
+        ) : (
+          <div style={{ flexShrink: 0 }}>{getFileIcon(file.type || file.mimeType)}</div>
+        )}
+        <span style={{
+          overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+          color: T.indigo, maxWidth: 110,
+        }}>
+          {file.name}
+        </span>
+      </div>
+    </div>
+  );
+};
+
+/** Full-screen lightbox for any attachment type */
+const AttachmentLightbox = ({ file, onClose }) => {
+  const proxyUrl = orderProxyUrl(file);
+  const dlUrl    = orderProxyUrl(file, true);
+  const isImage  = isImageFile(file);
+  const isVideo  = isVideoFile(file);
+  const { src, loading } = useAuthBlob(proxyUrl);
+
+  const handleDownload = async () => {
+    const url = dlUrl || proxyUrl;
+    if (!url) return;
+    const res = await fetch(url).catch(() => null);
+    if (!res?.ok) { alert('Download failed.'); return; }
+    const blob    = await res.blob();
+    const blobUrl = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = blobUrl; a.download = file.name;
+    document.body.appendChild(a); a.click();
+    document.body.removeChild(a);
+    setTimeout(() => URL.revokeObjectURL(blobUrl), 10000);
+  };
+
+  return (
+    <div
+      style={{
+        position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.92)',
+        zIndex: 500, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 16,
+      }}
+      onClick={onClose}
+    >
+      <button
+        onClick={onClose}
+        style={{
+          position: 'absolute', top: 24, right: 24,
+          background: 'none', border: 'none', cursor: 'pointer',
+          color: 'rgba(255,255,255,0.5)',
+        }}
+        onMouseEnter={e => e.currentTarget.style.color = 'white'}
+        onMouseLeave={e => e.currentTarget.style.color = 'rgba(255,255,255,0.5)'}
+      >
+        <X size={28} />
+      </button>
+
+      <div
+        style={{ maxWidth: 900, width: '100%', maxHeight: '90vh', display: 'flex', flexDirection: 'column', alignItems: 'center' }}
+        onClick={e => e.stopPropagation()}
+      >
+        {loading ? (
+          <div style={{ color: 'rgba(255,255,255,0.4)', fontFamily: jost, fontSize: 12, letterSpacing: '0.1em' }}>
+            Loading…
+          </div>
+        ) : !src ? (
+          <div style={{ color: 'rgba(255,255,255,0.4)', fontFamily: jost, fontSize: 12 }}>
+            Could not load preview. Use the download button below.
+          </div>
+        ) : isImage ? (
+          <img src={src} alt={file.name} style={{ maxHeight: '80vh', maxWidth: '100%', objectFit: 'contain', borderRadius: 2 }} />
+        ) : isVideo ? (
+          <video src={src} controls autoPlay style={{ maxHeight: '80vh', maxWidth: '100%', borderRadius: 2 }} />
+        ) : (
+          <iframe src={src} title={file.name} style={{ width: '100%', height: '80vh', borderRadius: 2, background: 'white', border: 'none' }} />
+        )}
+
+        <div style={{ marginTop: 16, display: 'flex', alignItems: 'center', gap: 20 }}>
+          <span style={{ fontFamily: jost, fontSize: 12, fontWeight: 300, color: 'rgba(255,255,255,0.6)' }}>
+            {file.name}
+          </span>
+          <button
+            onClick={handleDownload}
+            style={{
+              display: 'inline-flex', alignItems: 'center', gap: 6,
+              padding: '8px 20px', background: 'rgba(255,255,255,0.1)',
+              color: 'white', border: 'none', cursor: 'pointer',
+              fontFamily: jost, fontSize: 10, fontWeight: 400,
+              letterSpacing: '0.2em', textTransform: 'uppercase',
+              transition: 'background 0.2s',
+            }}
+            onMouseEnter={e => e.currentTarget.style.background = 'rgba(255,255,255,0.2)'}
+            onMouseLeave={e => e.currentTarget.style.background = 'rgba(255,255,255,0.1)'}
+          >
+            <Download size={13} /> Download
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
 // OrderRow
 // ─────────────────────────────────────────────────────────────────────────────
 const OrderRow = ({
   order, loading, unreadCounts, sentLinks, copiedId,
   onRowClick, onStartProject, onMarkComplete,
-  onOpenPortalChat, onCopyLink, onDelete,
+  onOpenPortalChat, onCopyLink, onDelete, onOpenFile,
 }) => {
   const isCompleted = order.status === 'completed';
 
@@ -613,43 +830,11 @@ const OrderRow = ({
         {order.attachments?.length > 0 && (
           <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
             {order.attachments.map((file, idx) => (
-              <a
+              <AttachmentThumb
                 key={idx}
-                href={file.webUrl}
-                target="_blank"
-                rel="noopener noreferrer"
-                onClick={e => e.stopPropagation()}
-                style={{
-                  display: 'inline-flex', alignItems: 'center', gap: 6,
-                  padding: '4px 10px',
-                  background: 'rgba(79,70,229,0.05)',
-                  border: `1px solid rgba(79,70,229,0.12)`,
-                  color: T.indigo,
-                  fontFamily: jost, fontSize: 10, fontWeight: 400,
-                  letterSpacing: '0.08em', textDecoration: 'none',
-                  maxWidth: 140, overflow: 'hidden',
-                }}
-              >
-                <FileText size={11} />
-                <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                  {file.name}
-                </span>
-                <Download
-                  size={12}
-                  style={{ flexShrink: 0, cursor: 'pointer' }}
-                  onClick={e => {
-                    e.preventDefault();
-                    e.stopPropagation();
-                    const url = file.downloadUrl || file['@microsoft.graph.downloadUrl'] || file.webUrl;
-                    const link = document.createElement('a');
-                    link.href = url;
-                    link.setAttribute('download', file.name);
-                    document.body.appendChild(link);
-                    link.click();
-                    document.body.removeChild(link);
-                  }}
-                />
-              </a>
+                file={file}
+                onClick={f => { onOpenFile(f); }}
+              />
             ))}
           </div>
         )}
@@ -823,6 +1008,7 @@ export default function OrderTracker() {
   const [chatOrder,        setChatOrder]        = useState(null);
   const [clientCheckModal, setClientCheckModal] = useState(null);
   const [unreadCounts,     setUnreadCounts]     = useState({});
+  const [lightboxFile,     setLightboxFile]     = useState(null);  // attachment lightbox
 
   // meta: populated from /clients, not from orders
   const [meta, setMeta] = useState({ clients: [], clientContacts: {}, clientMap: {} });
@@ -1250,6 +1436,7 @@ export default function OrderTracker() {
     onOpenPortalChat: handleOpenPortalChat,
     onCopyLink:       handleCopyLink,
     onDelete:         deleteOrder,
+    onOpenFile: (file) => setLightboxFile(file),
   };
 
   // ── Column-header style (matches ClientList th) ────────────────────────────
@@ -1733,26 +1920,20 @@ export default function OrderTracker() {
                   <FieldLabel>Attachments</FieldLabel>
                   <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginTop: 8 }}>
                     {editOrder.attachments?.map((file, idx) => (
-                      <div key={idx} style={{
-                        display: 'inline-flex', alignItems: 'center', gap: 6,
-                        padding: '5px 12px',
-                        background: 'rgba(79,70,229,0.05)',
-                        border: `1px solid rgba(79,70,229,0.12)`,
-                        fontFamily: jost, fontSize: 10, color: T.indigo,
-                      }}>
-                        <FileText size={11} />
-                        <span style={{ maxWidth: 110, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                          {file.name}
-                        </span>
-                        <Download size={12} style={{ cursor: 'pointer' }} onClick={e => {
-                          const url = file.downloadUrl || file['@microsoft.graph.downloadUrl'] || file.webUrl;
-                          const a = document.createElement('a');
-                          a.href = url; a.setAttribute('download', file.name);
-                          document.body.appendChild(a); a.click(); document.body.removeChild(a);
-                        }} />
-                        <X size={12} style={{ cursor: 'pointer', color: T.danger }} onClick={() =>
-                          setEditOrder({ ...editOrder, attachments: editOrder.attachments.filter((_, i) => i !== idx) })
-                        } />
+                      <div key={idx} style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+                        <AttachmentThumb
+                          file={file}
+                          onClick={f => setLightboxFile(f)}
+                        />
+                        <button
+                          onClick={() =>
+                            setEditOrder({ ...editOrder, attachments: editOrder.attachments.filter((_, i) => i !== idx) })
+                          }
+                          style={{ background: 'none', border: 'none', cursor: 'pointer', color: T.danger, padding: 2, display: 'flex' }}
+                          title="Remove attachment"
+                        >
+                          <X size={11} />
+                        </button>
                       </div>
                     ))}
                     <label style={{
@@ -2241,6 +2422,14 @@ export default function OrderTracker() {
         </div>
       )}
 
+      {/* ── Attachment lightbox ──────────────────────────────────────────── */}
+      {lightboxFile && (
+        <AttachmentLightbox
+          file={lightboxFile}
+          onClose={() => setLightboxFile(null)}
+        />
+      )}
+
       {/* ── Custom scrollbar CSS ─────────────────────────────────────────── */}
       <style>{`
         ::-webkit-scrollbar { width: 5px; }
@@ -2251,6 +2440,7 @@ export default function OrderTracker() {
         [contentEditable] td, [contentEditable] th { border: 1px solid rgba(0,0,0,0.07); padding: 6px 10px; }
         [contentEditable] th { background: #faf8f5; }
         @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+        @keyframes shimmer { to { background-position: -200% 0; } }
       `}</style>
     </div>
   );

@@ -5,6 +5,7 @@ import { SkeletonList } from '../components/PageLoader';
 import {
   Download, Plus, Search, ChevronDown, ChevronRight,
   Paperclip, FileText, Image as ImageIcon, Video, X, Building2,
+  Star, ArrowUpRight, Globe, Loader2,
 } from 'lucide-react';
 import { INDIA_STATES, CITIES_BY_STATE, SearchableSelect } from '../utils/indiaLocations';
 
@@ -160,6 +161,121 @@ const fmtSize = (bytes = 0) =>
     ? `${Math.round(bytes / 1024)} KB`
     : `${(bytes / 1_048_576).toFixed(1)} MB`;
 
+/**
+ * Returns the URL to use for displaying / downloading a media item.
+ *
+ * OneDrive items (storage === 'onedrive') must go through our backend proxy
+ * at /api/vendors/media/:vendorId/:mediaId because SharePoint webUrls require
+ * a logged-in Microsoft session (401 otherwise).
+ *
+ * R2 items are public CDN URLs — use directly.
+ * ?download=1 tells the proxy to set Content-Disposition: attachment.
+ */
+const mediaUrl = (vendorId, m, download = false) => {
+  if (!m) return '';
+  if (m.storage !== 'onedrive') return m.url || '';   // R2 or legacy local — direct
+  // Path is relative to the axios api baseURL (already includes /api)
+  // so we use /vendors/... not /api/vendors/...
+  const base = `/vendors/media/${vendorId}/${m._id}`;
+  return download ? `${base}?download=1` : base;
+};
+
+/**
+ * useAuthBlob — fetches a URL and converts the response to a blob object URL.
+ * /vendors/media/* is a public proxy endpoint (auth is handled server-side via
+ * the Microsoft Graph bearer token), so we use plain fetch — no JWT header needed.
+ * The blob object URL is revoked on unmount to avoid memory leaks.
+ * Returns { src, loading, error }.
+ */
+const useAuthBlob = (url) => {
+  const [src,     setSrc]     = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [error,   setError]   = useState(false);
+
+  useEffect(() => {
+    if (!url) { setLoading(false); return; }
+    let objectUrl = null;
+    let cancelled = false;
+
+    setLoading(true);
+    setError(false);
+    setSrc(null);
+
+    // Build the full URL — the api axios instance has baseURL set (e.g. http://localhost:5000/api).
+    // We reuse that so this works in both dev and production without hardcoding the port.
+    const apiBase = api.defaults.baseURL?.replace(/\/$/, '') || '';
+    const fullUrl = url.startsWith('http') ? url : `${apiBase}${url}`;
+
+    fetch(fullUrl)
+      .then(res => {
+        if (!res.ok) throw new Error(`${res.status}`);
+        return res.blob();
+      })
+      .then(blob => {
+        if (cancelled) return;
+        objectUrl = URL.createObjectURL(blob);
+        setSrc(objectUrl);
+      })
+      .catch(() => { if (!cancelled) setError(true); })
+      .finally(() => { if (!cancelled) setLoading(false); });
+
+    return () => {
+      cancelled = true;
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    };
+  }, [url]);
+
+  return { src, loading, error };
+};
+
+/**
+ * AuthMediaImg — drop-in <img> replacement for OneDrive-proxied images.
+ * Fetches with JWT, shows a subtle shimmer while loading, shows the file-icon
+ * placeholder on error.
+ */
+const AuthMediaImg = ({ proxyUrl, alt, style: extraStyle = {} }) => {
+  const { src, loading, error } = useAuthBlob(proxyUrl);
+  if (loading) return (
+    <div style={{
+      width: '100%', height: '100%',
+      background: 'linear-gradient(90deg, #f0ece4 25%, #faf8f5 50%, #f0ece4 75%)',
+      backgroundSize: '200% 100%',
+      animation: 'shimmer 1.2s infinite',
+    }} />
+  );
+  if (error || !src) return (
+    <div style={{ textAlign: 'center', color: T.gold }}>
+      <ImageIcon size={28} />
+      <p style={{ fontFamily: jost, fontSize: 8, letterSpacing: '0.2em', textTransform: 'uppercase', marginTop: 4 }}>
+        {alt?.split('.').pop()?.toUpperCase() || 'IMG'}
+      </p>
+    </div>
+  );
+  return <img src={src} alt={alt} style={{ width: '100%', height: '100%', objectFit: 'cover', ...extraStyle }} />;
+};
+
+/**
+ * AuthMediaLightbox — fetches the full-res blob for lightbox display.
+ * For images: renders <img>. For video: renders <video>. For docs: <iframe>.
+ */
+const AuthMediaLightbox = ({ proxyUrl, mimeType, name }) => {
+  const { src, loading } = useAuthBlob(proxyUrl);
+  if (loading) return (
+    <div style={{ color: 'rgba(255,255,255,0.4)', fontFamily: jost, fontSize: 12, letterSpacing: '0.1em' }}>
+      Loading…
+    </div>
+  );
+  if (!src) return null;
+  if (mimeType?.startsWith('image/')) {
+    return <img src={src} alt={name} style={{ maxHeight: '80vh', maxWidth: '100%', objectFit: 'contain', borderRadius: 2 }} />;
+  }
+  if (mimeType?.startsWith('video/')) {
+    return <video src={src} controls autoPlay style={{ maxHeight: '80vh', maxWidth: '100%', borderRadius: 2 }} />;
+  }
+  return <iframe src={src} title={name} style={{ width: '100%', height: '80vh', borderRadius: 2, background: 'white', border: 'none' }} />;
+};
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
 const mediaIcon = (mimeType = '') => {
   if (mimeType.startsWith('image/')) return <ImageIcon size={13} style={{ color: '#4f46e5', flexShrink: 0 }} />;
   if (mimeType.startsWith('video/')) return <Video     size={13} style={{ color: '#7c3aed', flexShrink: 0 }} />;
@@ -195,6 +311,10 @@ const VendorList = () => {
   const [filterCategory,    setFilterCategory]    = useState('');
   const [filterSubCategory, setFilterSubCategory] = useState('');
   const [filterState,       setFilterState]       = useState('');
+  // F1 — "Preferred" filter: 'all' | 'preferred' | 'regular'
+  const [filterPreferred,   setFilterPreferred]   = useState('all');
+  // F2 — Website extraction
+  const [isExtractingMenu,  setIsExtractingMenu]  = useState(false);
 
   // Card scanner
   const [cardImages,    setCardImages]    = useState({ front: null, back: null });
@@ -211,6 +331,8 @@ const VendorList = () => {
     category:         '',
     subCategory:      '',
     suppliedProducts: '',
+    isPreferred:      false,    // F1
+    websiteUrl:       '',       // F2
     contacts: [{ name: '', phone: '', email: '' }],
   });
 
@@ -311,17 +433,22 @@ const VendorList = () => {
             c.email?.toLowerCase().includes(s)
           )
         );
-        const matchesCat    = !filterCategory    || v.category    === filterCategory;
-        const matchesSub    = !filterSubCategory || v.subCategory === filterSubCategory;
-        const matchesState  = !filterState       || v.state       === filterState;
-        return matchesSearch && matchesCat && matchesSub && matchesState;
+        const matchesCat       = !filterCategory    || v.category    === filterCategory;
+        const matchesSub       = !filterSubCategory || v.subCategory === filterSubCategory;
+        const matchesState     = !filterState       || v.state       === filterState;
+        // F1 — Preferred filter
+        const matchesPreferred =
+          filterPreferred === 'all'       ? true :
+          filterPreferred === 'preferred' ? !!v.isPreferred :
+          /* 'regular' */                   !v.isPreferred;
+        return matchesSearch && matchesCat && matchesSub && matchesState && matchesPreferred;
       })
       .sort((a, b) => {
         const na = a.companyName?.toLowerCase() ?? '';
         const nb = b.companyName?.toLowerCase() ?? '';
         return sortOrder === 'asc' ? na.localeCompare(nb) : nb.localeCompare(na);
       });
-  }, [vendors, searchTerm, filterCategory, filterSubCategory, filterState, sortOrder]);
+  }, [vendors, searchTerm, filterCategory, filterSubCategory, filterState, filterPreferred, sortOrder]);
 
   // ── Handlers ──────────────────────────────────────────────────────────────
   const toggleSort = () => setSortOrder(p => (p === 'asc' ? 'desc' : 'asc'));
@@ -333,6 +460,7 @@ const VendorList = () => {
     setFilterCategory('');
     setFilterSubCategory('');
     setFilterState('');
+    setFilterPreferred('all');
     log.debug('Filters reset');
   };
 
@@ -450,6 +578,8 @@ const VendorList = () => {
       category:         v.category         || '',
       subCategory:      v.subCategory      || '',
       suppliedProducts: v.suppliedProducts || '',
+      isPreferred:      !!v.isPreferred,      // F1
+      websiteUrl:       v.websiteUrl       || '', // F2
       contacts: v.contacts?.length > 0 ? [...v.contacts] : [{ name: '', phone: '', email: '' }],
     });
     setKeepMediaIds((v.media || []).map(m => m._id));
@@ -481,6 +611,8 @@ const VendorList = () => {
       fd.append('category',         formData.category);
       fd.append('subCategory',      formData.subCategory || '');
       fd.append('suppliedProducts', formData.suppliedProducts);
+      fd.append('isPreferred',      formData.isPreferred ? 'true' : 'false'); // F1
+      fd.append('websiteUrl',       formData.websiteUrl || '');               // F2
       fd.append('contacts',         JSON.stringify(formData.contacts));
       if (isEditing) fd.append('keepMediaIds', keepMediaIds.join(','));
       newMediaFiles.forEach(f => fd.append('mediaFiles', f));
@@ -503,12 +635,47 @@ const VendorList = () => {
   };
 
   const resetForm = () => {
-    setFormData({ companyName: '', state: '', city: '', category: '', subCategory: '', suppliedProducts: '', contacts: [{ name: '', phone: '', email: '' }] });
+    setFormData({
+      companyName: '', state: '', city: '', category: '', subCategory: '',
+      suppliedProducts: '',
+      isPreferred: false,    // F1
+      websiteUrl:  '',       // F2
+      contacts: [{ name: '', phone: '', email: '' }],
+    });
     setCardImages({ front: null, back: null });
     setIsEditing(false);
     setCurrentId(null);
     setNewMediaFiles([]);
     setKeepMediaIds([]);
+  };
+
+  // ── F2: Extract vendor website menu categories ────────────────────────────
+  const handleExtractMenu = async () => {
+    const url = formData.websiteUrl?.trim();
+    if (!url) return alert('Please enter a Website URL first.');
+    log.info('Extracting website menu', { url });
+    setIsExtractingMenu(true);
+    try {
+      const res = await api.post('/vendors/extract-menu', { url });
+      const { text } = res.data;
+      if (!text?.trim()) {
+        alert('No navigation categories found on that page. You can still type them manually.');
+        return;
+      }
+      // Append extracted text to whatever is already in the textarea (non-destructive)
+      setFormData(prev => ({
+        ...prev,
+        suppliedProducts: prev.suppliedProducts
+          ? `${prev.suppliedProducts}\n\n--- Extracted from website ---\n${text}`
+          : text,
+      }));
+      log.info('Menu extraction complete', { categoryCount: res.data.categories?.length });
+    } catch (err) {
+      log.error('Menu extraction failed', err.response?.data?.message || err.message);
+      alert('Could not extract menu: ' + (err.response?.data?.message || err.message));
+    } finally {
+      setIsExtractingMenu(false);
+    }
   };
 
   const exportToExcel = () => {
@@ -529,8 +696,10 @@ const VendorList = () => {
   return (
     <div style={{ minHeight: '100vh', background: T.offwhite, fontFamily: jost, padding: '56px 48px' }}>
 
-      {/* Spin keyframe injected once */}
-      <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
+      <style>{`
+        @keyframes spin { to { transform: rotate(360deg); } }
+        @keyframes shimmer { to { background-position: -200% 0; } }
+      `}</style>
 
       {/* ── Page header ────────────────────────────────────────────────── */}
       <div style={{ marginBottom: 40 }}>
@@ -638,8 +807,26 @@ const VendorList = () => {
             {INDIA_STATES.map(s => <option key={s} value={s}>{s}</option>)}
           </select>
 
+          {/* F1 — Preferred Vendor filter */}
+          <select
+            value={filterPreferred}
+            onChange={e => setFilterPreferred(e.target.value)}
+            style={{
+              padding: '10px 14px', background: 'white',
+              border: `1px solid ${filterPreferred !== 'all' ? T.gold : T.border}`,
+              borderRadius: 3,
+              fontFamily: jost, fontSize: 11, fontWeight: 300,
+              color: filterPreferred !== 'all' ? T.gold : T.muted,
+              outline: 'none', cursor: 'pointer',
+            }}
+          >
+            <option value="all">All Vendors</option>
+            <option value="preferred">⭐ Preferred Only</option>
+            <option value="regular">Regular Only</option>
+          </select>
+
           {/* Reset filters */}
-          {(searchTerm || filterCategory || filterSubCategory || filterState) && (
+          {(searchTerm || filterCategory || filterSubCategory || filterState || filterPreferred !== 'all') && (
             <button
               onClick={handleResetFilters}
               style={{
@@ -797,17 +984,48 @@ const VendorList = () => {
                       fontFamily: jost, fontSize: 12, fontWeight: 500,
                       letterSpacing: '0.06em', textTransform: 'uppercase', color: T.text,
                     }}>
-                      {v.companyName}
-                      {v.media?.length > 0 && (
-                        <span style={{
-                          marginLeft: 10, display: 'inline-flex', alignItems: 'center', gap: 4,
-                          fontFamily: jost, fontSize: 9, fontWeight: 400,
-                          letterSpacing: '0.12em', textTransform: 'uppercase',
-                          color: T.gold, border: `1px solid ${T.borderG}`, padding: '2px 6px',
-                        }}>
-                          <Paperclip size={9} /> {v.media.length}
-                        </span>
-                      )}
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                        {/* F1 — Preferred star badge */}
+                        {v.isPreferred && (
+                          <span title="Preferred Vendor" style={{
+                            display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+                            width: 20, height: 20, flexShrink: 0,
+                          }}>
+                            <Star size={14} style={{ fill: T.gold, color: T.gold }} />
+                          </span>
+                        )}
+                        <span>{v.companyName}</span>
+                        {v.media?.length > 0 && (
+                          <span style={{
+                            display: 'inline-flex', alignItems: 'center', gap: 4,
+                            fontFamily: jost, fontSize: 9, fontWeight: 400,
+                            letterSpacing: '0.12em', textTransform: 'uppercase',
+                            color: T.gold, border: `1px solid ${T.borderG}`, padding: '2px 6px',
+                          }}>
+                            <Paperclip size={9} /> {v.media.length}
+                          </span>
+                        )}
+                        {/* Website URL shortcut — only when saved */}
+                        {v.websiteUrl && (
+                          <a
+                            href={/^https?:\/\//i.test(v.websiteUrl) ? v.websiteUrl : `https://${v.websiteUrl}`}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            title={`Open ${v.websiteUrl}`}
+                            onClick={e => e.stopPropagation()}
+                            style={{
+                              display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+                              width: 20, height: 20, flexShrink: 0,
+                              color: T.muted, transition: 'color 0.18s',
+                              textDecoration: 'none',
+                            }}
+                            onMouseEnter={e => e.currentTarget.style.color = T.gold}
+                            onMouseLeave={e => e.currentTarget.style.color = T.muted}
+                          >
+                            <ArrowUpRight size={13} />
+                          </a>
+                        )}
+                      </div>
                     </td>
 
                     {/* Category / State */}
@@ -978,6 +1196,8 @@ const VendorList = () => {
                                 {v.media.map(m => {
                                   const isImg = m.mimeType?.startsWith('image/');
                                   const isVid = m.mimeType?.startsWith('video/');
+                                  const srcUrl      = mediaUrl(v._id, m);
+                                  const downloadSrc = mediaUrl(v._id, m, true);
                                   return (
                                     <div
                                       key={m._id}
@@ -986,7 +1206,7 @@ const VendorList = () => {
                                         overflow: 'hidden', cursor: 'pointer',
                                         transition: 'box-shadow 0.2s',
                                       }}
-                                      onClick={() => setLightboxMedia({ url: m.url, mimeType: m.mimeType, name: m.name })}
+                                      onClick={() => setLightboxMedia({ url: srcUrl, downloadUrl: downloadSrc, mimeType: m.mimeType, name: m.name })}
                                       onMouseEnter={e => e.currentTarget.style.boxShadow = `0 4px 12px rgba(184,151,90,0.15)`}
                                       onMouseLeave={e => e.currentTarget.style.boxShadow = 'none'}
                                     >
@@ -997,7 +1217,7 @@ const VendorList = () => {
                                         overflow: 'hidden',
                                       }}>
                                         {isImg ? (
-                                          <img src={m.url} alt={m.name} style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+                                          <AuthMediaImg proxyUrl={srcUrl} alt={m.name} />
                                         ) : isVid ? (
                                           <div style={{ textAlign: 'center', color: '#7c3aed' }}>
                                             <Video size={28} />
@@ -1025,14 +1245,28 @@ const VendorList = () => {
                                           <p style={{ fontFamily: jost, fontSize: 9, fontWeight: 300, color: T.muted, margin: 0 }}>
                                             {fmtSize(m.size)}
                                           </p>
-                                          <a
-                                            href={m.url}
-                                            download={m.name}
-                                            onClick={e => e.stopPropagation()}
-                                            style={{ color: T.gold, display: 'flex' }}
+                                          <button
+                                            onClick={async (e) => {
+                                              e.stopPropagation();
+                                              try {
+                                                const apiBase = api.defaults.baseURL?.replace(/\/$/, '') || '';
+                                                const fullUrl = downloadSrc.startsWith('http')
+                                                  ? downloadSrc
+                                                  : `${apiBase}${downloadSrc}`;
+                                                const res = await fetch(fullUrl);
+                                                const blob = await res.blob();
+                                                const blobUrl = URL.createObjectURL(blob);
+                                                const a = document.createElement('a');
+                                                a.href = blobUrl; a.download = m.name;
+                                                document.body.appendChild(a); a.click();
+                                                document.body.removeChild(a);
+                                                setTimeout(() => URL.revokeObjectURL(blobUrl), 10000);
+                                              } catch { alert('Download failed.'); }
+                                            }}
+                                            style={{ background: 'none', border: 'none', cursor: 'pointer', color: T.gold, display: 'flex', padding: 0 }}
                                           >
                                             <Download size={11} />
-                                          </a>
+                                          </button>
                                         </div>
                                       </div>
                                     </div>
@@ -1208,6 +1442,58 @@ const VendorList = () => {
               </div>
             </div>
 
+            {/* ── F1: Preferred Vendor toggle ── */}
+            <div style={{
+              marginBottom: 20,
+              display: 'flex', alignItems: 'center', gap: 14,
+              padding: '14px 16px',
+              background: formData.isPreferred ? 'rgba(184,151,90,0.06)' : T.offwhite,
+              border: `1px solid ${formData.isPreferred ? T.borderG : T.border}`,
+              transition: 'background 0.2s, border-color 0.2s',
+              cursor: 'pointer',
+            }}
+              onClick={() => setFormData(p => ({ ...p, isPreferred: !p.isPreferred }))}
+            >
+              {/* Custom styled checkbox */}
+              <div style={{
+                width: 18, height: 18, flexShrink: 0,
+                border: `1.5px solid ${formData.isPreferred ? T.gold : 'rgba(0,0,0,0.2)'}`,
+                borderRadius: 2,
+                background: formData.isPreferred ? T.gold : 'white',
+                display: 'flex', alignItems: 'center', justifyContent: 'center',
+                transition: 'all 0.18s',
+              }}>
+                {formData.isPreferred && (
+                  <svg width="10" height="8" viewBox="0 0 10 8" fill="none">
+                    <path d="M1 4L3.8 7L9 1" stroke={T.navy} strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+                  </svg>
+                )}
+              </div>
+              <Star
+                size={13}
+                style={{
+                  fill:  formData.isPreferred ? T.gold : 'none',
+                  color: formData.isPreferred ? T.gold : T.muted,
+                  transition: 'all 0.18s', flexShrink: 0,
+                }}
+              />
+              <div>
+                <p style={{
+                  fontFamily: jost, fontSize: 11, fontWeight: 500,
+                  color: formData.isPreferred ? T.gold : T.text, margin: 0,
+                  transition: 'color 0.18s',
+                }}>
+                  Preferred Vendor
+                </p>
+                <p style={{
+                  fontFamily: jost, fontSize: 10, fontWeight: 300,
+                  color: T.muted, margin: '2px 0 0',
+                }}>
+                  Mark this vendor as a go-to choice
+                </p>
+              </div>
+            </div>
+
             {/* ── Duplicate vendor warning ── */}
             {!isEditing && duplicateMatches.length > 0 && (
               <div style={{
@@ -1327,6 +1613,90 @@ const VendorList = () => {
                 placeholder={formData.state ? 'Select city…' : 'Select state first…'}
                 disabled={!formData.state}
               />
+            </div>
+
+            {/* ── F2: Website URL ── */}
+            <div style={{ marginBottom: 20 }}>
+              <label style={{
+                display: 'block', fontFamily: jost, fontSize: 9, fontWeight: 400,
+                letterSpacing: '0.25em', textTransform: 'uppercase', color: T.muted, marginBottom: 8,
+              }}>
+                Website URL
+              </label>
+              <div style={{ display: 'flex', gap: 8, alignItems: 'stretch' }}>
+                {/* URL input */}
+                <div style={{ flex: 1 }}>
+                  <FocusInput
+                    value={formData.websiteUrl}
+                    onChange={e => setFormData({ ...formData, websiteUrl: e.target.value })}
+                    placeholder="https://vendor-website.com"
+                    type="url"
+                  />
+                </div>
+
+                {/* Open in new tab */}
+                <button
+                  type="button"
+                  title="Open website in new tab"
+                  onClick={() => {
+                    const u = formData.websiteUrl?.trim();
+                    if (!u) return;
+                    const href = /^https?:\/\//i.test(u) ? u : `https://${u}`;
+                    window.open(href, '_blank', 'noopener,noreferrer');
+                  }}
+                  style={{
+                    display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+                    width: 40, flexShrink: 0,
+                    background: 'white', border: `1px solid ${T.border}`, borderRadius: 3,
+                    color: T.muted, cursor: 'pointer',
+                    transition: 'border-color 0.2s, color 0.2s',
+                  }}
+                  onMouseEnter={e => {
+                    e.currentTarget.style.borderColor = T.gold;
+                    e.currentTarget.style.color = T.gold;
+                  }}
+                  onMouseLeave={e => {
+                    e.currentTarget.style.borderColor = T.border;
+                    e.currentTarget.style.color = T.muted;
+                  }}
+                >
+                  <ArrowUpRight size={14} />
+                </button>
+
+                {/* Extract website data */}
+                <button
+                  type="button"
+                  onClick={handleExtractMenu}
+                  disabled={isExtractingMenu || !formData.websiteUrl?.trim()}
+                  title="Extract service categories from website navigation"
+                  style={{
+                    display: 'inline-flex', alignItems: 'center', gap: 6,
+                    padding: '0 14px', flexShrink: 0,
+                    background: isExtractingMenu ? T.borderG : T.dimBg,
+                    border: `1px solid ${T.borderG}`, borderRadius: 3,
+                    color: isExtractingMenu ? T.muted : T.gold,
+                    fontFamily: jost, fontSize: 9, fontWeight: 500,
+                    letterSpacing: '0.18em', textTransform: 'uppercase',
+                    cursor: (isExtractingMenu || !formData.websiteUrl?.trim()) ? 'not-allowed' : 'pointer',
+                    opacity: !formData.websiteUrl?.trim() ? 0.5 : 1,
+                    transition: 'background 0.2s, color 0.2s',
+                    whiteSpace: 'nowrap',
+                  }}
+                  onMouseEnter={e => {
+                    if (!isExtractingMenu && formData.websiteUrl?.trim()) {
+                      e.currentTarget.style.background = 'rgba(184,151,90,0.1)';
+                    }
+                  }}
+                  onMouseLeave={e => {
+                    e.currentTarget.style.background = isExtractingMenu ? T.borderG : T.dimBg;
+                  }}
+                >
+                  {isExtractingMenu
+                    ? <><Loader2 size={11} style={{ animation: 'spin 0.7s linear infinite' }} /> Extracting…</>
+                    : <><Globe size={11} /> Extract Data</>
+                  }
+                </button>
+              </div>
             </div>
 
             {/* Products */}
@@ -1604,28 +1974,40 @@ const VendorList = () => {
             style={{ maxWidth: 900, width: '100%', maxHeight: '90vh', display: 'flex', flexDirection: 'column', alignItems: 'center' }}
             onClick={e => e.stopPropagation()}
           >
-            {lightboxMedia.mimeType?.startsWith('image/') ? (
-              <img src={lightboxMedia.url} alt={lightboxMedia.name}
-                style={{ maxHeight: '80vh', maxWidth: '100%', objectFit: 'contain', borderRadius: 2 }} />
-            ) : lightboxMedia.mimeType?.startsWith('video/') ? (
-              <video src={lightboxMedia.url} controls autoPlay
-                style={{ maxHeight: '80vh', maxWidth: '100%', borderRadius: 2 }} />
-            ) : (
-              <iframe src={lightboxMedia.url} title={lightboxMedia.name}
-                style={{ width: '100%', height: '80vh', borderRadius: 2, background: 'white', border: 'none' }} />
-            )}
+            <AuthMediaLightbox
+              proxyUrl={lightboxMedia.url}
+              mimeType={lightboxMedia.mimeType}
+              name={lightboxMedia.name}
+            />
             <div style={{ marginTop: 16, display: 'flex', alignItems: 'center', gap: 20 }}>
               <span style={{ fontFamily: jost, fontSize: 12, fontWeight: 300, color: 'rgba(255,255,255,0.6)' }}>
                 {lightboxMedia.name}
               </span>
-              <a
-                href={lightboxMedia.url}
-                download={lightboxMedia.name}
-                onClick={e => e.stopPropagation()}
+              <button
+                onClick={async (e) => {
+                  e.stopPropagation();
+                  try {
+                    const dlUrl = lightboxMedia.downloadUrl || lightboxMedia.url;
+                    const apiBase = api.defaults.baseURL?.replace(/\/$/, '') || '';
+                    const fullUrl = dlUrl.startsWith('http') ? dlUrl : `${apiBase}${dlUrl}`;
+                    const res = await fetch(fullUrl);
+                    const blob = await res.blob();
+                    const blobUrl = URL.createObjectURL(blob);
+                    const a = document.createElement('a');
+                    a.href = blobUrl;
+                    a.download = lightboxMedia.name;
+                    document.body.appendChild(a);
+                    a.click();
+                    document.body.removeChild(a);
+                    setTimeout(() => URL.revokeObjectURL(blobUrl), 10000);
+                  } catch {
+                    alert('Download failed.');
+                  }
+                }}
                 style={{
                   display: 'inline-flex', alignItems: 'center', gap: 6,
                   padding: '8px 20px', background: 'rgba(255,255,255,0.1)',
-                  color: 'white', textDecoration: 'none',
+                  color: 'white', border: 'none', cursor: 'pointer',
                   fontFamily: jost, fontSize: 10, fontWeight: 400,
                   letterSpacing: '0.2em', textTransform: 'uppercase',
                   transition: 'background 0.2s',
@@ -1634,7 +2016,7 @@ const VendorList = () => {
                 onMouseLeave={e => e.currentTarget.style.background = 'rgba(255,255,255,0.1)'}
               >
                 <Download size={13} /> Download
-              </a>
+              </button>
             </div>
           </div>
         </div>

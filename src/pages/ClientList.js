@@ -65,6 +65,15 @@ const ClientList = () => {
     contacts: [{ name: '', phone: '', email: '' }],
   });
 
+  // ── Move-contact modal state ───────────────────────────────────────────────
+  const [moveModal, setMoveModal]         = useState(false);
+  const [moveContact, setMoveContact]     = useState(null);   // { name, phone, email }
+  const [moveFromId, setMoveFromId]       = useState(null);
+  const [moveToId, setMoveToId]           = useState('');
+  const [moveNewEmail, setMoveNewEmail]   = useState('');
+  const [moveToFocused, setMoveToFocused] = useState(false);
+  const [moveEmailFocused, setMoveEmailFocused] = useState(false);
+
   useEffect(() => { fetchClients(); }, []);
 
   const fetchClients = async () => {
@@ -169,6 +178,33 @@ const ClientList = () => {
     setFormData({ companyName: '', contacts: [{ name: '', phone: '', email: '' }] });
     setIsEditing(false);
     setCurrentId(null);
+  };
+
+  // ── Move contact ───────────────────────────────────────────────────────────
+  const openMoveModal = (contact, clientId, e) => {
+    e.stopPropagation();
+    setMoveContact(contact);
+    setMoveFromId(clientId);
+    setMoveToId('');
+    setMoveNewEmail(contact.email || '');
+    setMoveModal(true);
+  };
+
+  const handleMoveContact = async () => {
+    if (!moveToId) return alert('Please select a destination client.');
+    try {
+      await api.patch('/clients/move-contact', {
+        fromClientId: moveFromId,
+        contactName:  moveContact.name,
+        toClientId:   moveToId,
+        newEmail:     moveNewEmail,
+      });
+      setMoveModal(false);
+      fetchClients();
+    } catch (err) {
+      log.error('Move contact failed', err.message);
+      alert(err.response?.data?.message || 'Failed to move contact.');
+    }
   };
 
   // ── Duplicate client detection ─────────────────────────────────────────────
@@ -475,6 +511,7 @@ const ClientList = () => {
                               border: `1px solid ${T.border}`,
                               padding: '16px 18px',
                               display: 'flex', flexDirection: 'column', gap: 5,
+                              position: 'relative',
                             }}>
                               <p style={{
                                 fontFamily: jost, fontSize: 12, fontWeight: 500,
@@ -492,6 +529,24 @@ const ClientList = () => {
                               }}>
                                 {contact.email || 'No email'}
                               </p>
+                              {/* Move contact button */}
+                              <button
+                                onClick={e => openMoveModal(contact, c._id, e)}
+                                title="Move to another client"
+                                style={{
+                                  position: 'absolute', top: 10, right: 10,
+                                  background: 'none', border: `1px solid ${T.borderG}`,
+                                  cursor: 'pointer', color: T.gold,
+                                  fontFamily: jost, fontSize: 9, fontWeight: 400,
+                                  letterSpacing: '0.15em', textTransform: 'uppercase',
+                                  padding: '3px 8px',
+                                  transition: 'background 0.15s, color 0.15s',
+                                }}
+                                onMouseEnter={e => { e.currentTarget.style.background = T.dimBg; }}
+                                onMouseLeave={e => { e.currentTarget.style.background = 'none'; }}
+                              >
+                                Move →
+                              </button>
                             </div>
                           ))}
                         </div>
@@ -745,6 +800,178 @@ const ClientList = () => {
                 onMouseLeave={e => e.currentTarget.style.background = T.gold}
               >
                 Confirm
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+      {/* ── Move Contact Modal ───────────────────────────────────────── */}
+      {moveModal && moveContact && (
+        <div style={{
+          position: 'fixed', inset: 0,
+          background: 'rgba(14,21,32,0.75)',
+          backdropFilter: 'blur(4px)',
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          padding: 24, zIndex: 60,
+        }}>
+          <div style={{
+            background: 'white',
+            border: `1px solid ${T.border}`,
+            padding: '36px 36px 28px',
+            width: '100%', maxWidth: 480,
+          }}>
+            {/* Header */}
+            <div style={{
+              display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start',
+              marginBottom: 28, paddingBottom: 20, borderBottom: `1px solid ${T.border}`,
+            }}>
+              <div>
+                <p style={{
+                  fontFamily: jost, fontSize: 9, fontWeight: 400,
+                  letterSpacing: '0.28em', textTransform: 'uppercase',
+                  color: T.muted, marginBottom: 6,
+                }}>
+                  Reassign Employee
+                </p>
+                <h2 style={{ fontFamily: serif, fontSize: 26, fontWeight: 300, color: T.navy, margin: 0 }}>
+                  Move Contact
+                </h2>
+              </div>
+              <button
+                onClick={() => setMoveModal(false)}
+                style={{
+                  background: 'none', border: 'none', cursor: 'pointer',
+                  color: T.muted, fontSize: 20, lineHeight: 1, padding: 4,
+                  transition: 'color 0.2s',
+                }}
+                onMouseEnter={e => e.currentTarget.style.color = T.text}
+                onMouseLeave={e => e.currentTarget.style.color = T.muted}
+              >✕</button>
+            </div>
+
+            {/* Contact summary */}
+            <div style={{
+              background: T.dimBg,
+              border: `1px solid ${T.borderG}`,
+              padding: '14px 16px',
+              marginBottom: 24,
+            }}>
+              <p style={{ fontFamily: jost, fontSize: 9, fontWeight: 400, letterSpacing: '0.22em', textTransform: 'uppercase', color: T.gold, margin: '0 0 8px' }}>
+                Contact Being Moved
+              </p>
+              <p style={{ fontFamily: jost, fontSize: 13, fontWeight: 500, color: T.text, margin: '0 0 3px' }}>
+                {moveContact.name}
+              </p>
+              <p style={{ fontFamily: jost, fontSize: 11, fontWeight: 300, color: T.muted, margin: 0 }}>
+                {moveContact.phone || 'No phone'} · {moveContact.email || 'No email'}
+              </p>
+              <p style={{ fontFamily: jost, fontSize: 10, fontWeight: 300, color: T.muted, margin: '6px 0 0' }}>
+                From: <strong style={{ color: T.text }}>
+                  {clients.find(c => c._id === moveFromId)?.companyName || '—'}
+                </strong>
+              </p>
+            </div>
+
+            {/* Destination dropdown */}
+            <div style={{ marginBottom: 18 }}>
+              <label style={{
+                display: 'block', fontFamily: jost, fontSize: 9, fontWeight: 400,
+                letterSpacing: '0.25em', textTransform: 'uppercase',
+                color: T.muted, marginBottom: 8,
+              }}>
+                Destination Client
+              </label>
+              <select
+                value={moveToId}
+                onChange={e => setMoveToId(e.target.value)}
+                onFocus={() => setMoveToFocused(true)}
+                onBlur={() => setMoveToFocused(false)}
+                style={{
+                  width: '100%', padding: '10px 14px',
+                  background: 'white',
+                  border: `1px solid ${moveToFocused ? T.gold : T.border}`,
+                  borderRadius: 3,
+                  fontFamily: jost, fontSize: 13, fontWeight: 300,
+                  color: moveToId ? T.text : T.muted,
+                  outline: 'none', boxSizing: 'border-box',
+                  transition: 'border-color 0.2s', cursor: 'pointer',
+                  appearance: 'none',
+                  backgroundImage: `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%23888' stroke-width='2'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E")`,
+                  backgroundRepeat: 'no-repeat',
+                  backgroundPosition: 'right 12px center',
+                  paddingRight: 36,
+                }}
+              >
+                <option value="">Select destination client…</option>
+                {clients
+                  .filter(c => c._id !== moveFromId)
+                  .sort((a, b) => a.companyName.localeCompare(b.companyName))
+                  .map(c => (
+                    <option key={c._id} value={c._id}>{c.companyName}</option>
+                  ))
+                }
+              </select>
+            </div>
+
+            {/* New email (optional) */}
+            <div style={{ marginBottom: 28 }}>
+              <label style={{
+                display: 'block', fontFamily: jost, fontSize: 9, fontWeight: 400,
+                letterSpacing: '0.25em', textTransform: 'uppercase',
+                color: T.muted, marginBottom: 8,
+              }}>
+                Update Email Address <span style={{ letterSpacing: 0, textTransform: 'none', fontWeight: 300, fontSize: 10 }}>(optional)</span>
+              </label>
+              <input
+                type="email"
+                value={moveNewEmail}
+                onChange={e => setMoveNewEmail(e.target.value)}
+                placeholder={moveContact.email || 'New email at destination…'}
+                onFocus={() => setMoveEmailFocused(true)}
+                onBlur={() => setMoveEmailFocused(false)}
+                style={{
+                  width: '100%', padding: '10px 14px',
+                  background: 'white',
+                  border: `1px solid ${moveEmailFocused ? T.gold : T.border}`,
+                  borderRadius: 3,
+                  fontFamily: jost, fontSize: 13, fontWeight: 300,
+                  color: T.text, outline: 'none',
+                  boxSizing: 'border-box', transition: 'border-color 0.2s',
+                }}
+              />
+            </div>
+
+            {/* Footer */}
+            <div style={{
+              display: 'flex', justifyContent: 'flex-end', gap: 14,
+              borderTop: `1px solid ${T.border}`, paddingTop: 24,
+            }}>
+              <button
+                onClick={() => setMoveModal(false)}
+                style={{
+                  background: 'none', border: 'none', cursor: 'pointer',
+                  fontFamily: jost, fontSize: 10, fontWeight: 400,
+                  letterSpacing: '0.2em', textTransform: 'uppercase',
+                  color: T.muted, padding: '10px 20px', transition: 'color 0.2s',
+                }}
+                onMouseEnter={e => e.currentTarget.style.color = T.text}
+                onMouseLeave={e => e.currentTarget.style.color = T.muted}
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleMoveContact}
+                style={{
+                  background: T.gold, color: T.navy,
+                  border: 'none', padding: '12px 36px',
+                  fontFamily: jost, fontSize: 10, fontWeight: 500,
+                  letterSpacing: '0.22em', textTransform: 'uppercase',
+                  cursor: 'pointer', transition: 'background 0.25s',
+                }}
+                onMouseEnter={e => e.currentTarget.style.background = T.gold2}
+                onMouseLeave={e => e.currentTarget.style.background = T.gold}
+              >
+                Confirm Move
               </button>
             </div>
           </div>
