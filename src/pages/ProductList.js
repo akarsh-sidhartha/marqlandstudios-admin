@@ -380,7 +380,16 @@ const ProductList = () => {
   const [isLoading, setIsLoading]     = useState(true);
   const [meta, setMeta]               = useState({ brands: [], categories: [], subCategories: {} });
   const [availableSubCats, setAvailableSubCats] = useState([]);
-  const [collapsedCategories, setCollapsedCategories] = useState({});
+  // All categories start collapsed on load
+  const [collapsedCategories, setCollapsedCategories] = useState(() => {
+    // Will be overwritten once groupedProducts is known; start as "all collapsed" sentinel
+    return { __allCollapsed: true };
+  });
+
+  // Per-category sort: { [cat]: 'asc' | 'desc' | 'price-asc' | 'price-desc' | '' }
+  const [categorySort, setCategorySort] = useState({});
+  // Per-category price range: { [cat]: { min: '', max: '' } }
+  const [categoryPriceFilter, setCategoryPriceFilter] = useState({});
   const [selectedProducts, setSelectedProducts]     = useState([]);
   const [previewProduct, setPreviewProduct]         = useState(null);
 
@@ -482,9 +491,18 @@ const ProductList = () => {
       if (metaData.subCategoryMap && !metaData.subCategories) {
         metaData.subCategories = metaData.subCategoryMap;
       }
-      setProducts(pRes.data || []);
+      const fetchedProducts = pRes.data || [];
+      setProducts(fetchedProducts);
       setMeta(metaData);
-      log.info('Products loaded', { count: pRes.data?.length ?? 0 });
+      // Collapse all categories by default on initial load
+      const cats = [...new Set(fetchedProducts.map(p => p.category || 'Uncategorized'))];
+      setCollapsedCategories(prev => {
+        if (prev.__allCollapsed) {
+          return cats.reduce((acc, c) => ({ ...acc, [c]: true }), {});
+        }
+        return prev;
+      });
+      log.info('Products loaded', { count: fetchedProducts.length });
     } catch (err) {
       log.error('Failed to fetch products', err.message);
     } finally {
@@ -937,6 +955,30 @@ const ProductList = () => {
     return acc;
   }, {});
 
+  const setCatSort = (cat, val) => setCategorySort(prev => ({ ...prev, [cat]: val }));
+  const setCatPrice = (cat, key, val) =>
+    setCategoryPriceFilter(prev => ({ ...prev, [cat]: { ...(prev[cat] || {}), [key]: val } }));
+  const resetCatFilters = (cat) => {
+    setCategorySort(prev => ({ ...prev, [cat]: '' }));
+    setCategoryPriceFilter(prev => ({ ...prev, [cat]: { min: '', max: '' } }));
+  };
+
+  const applyCatFiltersAndSort = (cat, prods) => {
+    const priceF = categoryPriceFilter[cat] || {};
+    const min = priceF.min === '' || priceF.min === undefined ? 0 : parseFloat(priceF.min);
+    const max = priceF.max === '' || priceF.max === undefined ? Infinity : parseFloat(priceF.max);
+    let result = prods.filter(p => {
+      const sp = parseFloat(calculateSellingPrice(p.purchasePrice, p.markupPercent));
+      return sp >= min && sp <= max;
+    });
+    const sort = categorySort[cat] || '';
+    if (sort === 'asc')        result = [...result].sort((a, b) => (a.name || '').localeCompare(b.name || ''));
+    if (sort === 'desc')       result = [...result].sort((a, b) => (b.name || '').localeCompare(a.name || ''));
+    if (sort === 'price-asc')  result = [...result].sort((a, b) => parseFloat(calculateSellingPrice(a.purchasePrice, a.markupPercent)) - parseFloat(calculateSellingPrice(b.purchasePrice, b.markupPercent)));
+    if (sort === 'price-desc') result = [...result].sort((a, b) => parseFloat(calculateSellingPrice(b.purchasePrice, b.markupPercent)) - parseFloat(calculateSellingPrice(a.purchasePrice, a.markupPercent)));
+    return result;
+  };
+
   const toggleCategory = (cat) =>
     setCollapsedCategories(prev => ({ ...prev, [cat]: !prev[cat] }));
 
@@ -1254,50 +1296,129 @@ const ProductList = () => {
         ) : (
           Object.keys(groupedProducts).sort().map(category => {
             const isCollapsed = collapsedCategories[category];
-            const catProducts = groupedProducts[category];
-            const allSelected = catProducts.every(p => selectedProducts.some(sp => sp._id === p._id));
+            const catProducts = applyCatFiltersAndSort(category, groupedProducts[category]);
+            const allCatProducts = groupedProducts[category];
+            const allSelected = allCatProducts.every(p => selectedProducts.some(sp => sp._id === p._id));
+            const catPriceF = categoryPriceFilter[category] || {};
+            const catSortVal = categorySort[category] || '';
+            const hasCatFilters = catSortVal || catPriceF.min || catPriceF.max;
 
             return (
               <div key={category} style={{ marginBottom: 40 }}>
 
                 {/* Category header */}
-                <div style={{ display: 'flex', alignItems: 'center', gap: 14, marginBottom: 16 }}>
-                  <div
-                    onClick={() => toggleCategory(category)}
-                    style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer' }}
-                  >
-                    <span style={{
-                      color: T.muted, fontSize: 10,
-                      transform: isCollapsed ? 'rotate(-90deg)' : 'rotate(0deg)',
-                      transition: 'transform 0.2s', display: 'inline-block',
-                    }}>▼</span>
-                    <h2 style={{
-                      fontFamily: jost, fontSize: 10, fontWeight: 400,
-                      letterSpacing: '0.28em', textTransform: 'uppercase',
-                      color: T.muted, margin: 0,
+                <div style={{ marginBottom: 16 }}>
+                  {/* Row 1: chevron + title + select all + line */}
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 14, marginBottom: 10 }}>
+                    <div
+                      onClick={() => toggleCategory(category)}
+                      style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer' }}
+                    >
+                      <span style={{
+                        color: T.muted, fontSize: 10,
+                        transform: isCollapsed ? 'rotate(-90deg)' : 'rotate(0deg)',
+                        transition: 'transform 0.2s', display: 'inline-block',
+                      }}>▼</span>
+                      <h2 style={{
+                        fontFamily: jost, fontSize: 10, fontWeight: 400,
+                        letterSpacing: '0.28em', textTransform: 'uppercase',
+                        color: T.muted, margin: 0,
+                      }}>
+                        {category} <span style={{ color: T.gold }}>({allCatProducts.length})</span>
+                      </h2>
+                    </div>
+
+                    <button
+                      onClick={() => selectAllInCategory(allCatProducts)}
+                      style={{
+                        display: 'inline-flex', alignItems: 'center', gap: 5,
+                        background: allSelected ? T.gold : 'transparent',
+                        border: `1px solid ${allSelected ? T.gold : T.borderG}`,
+                        padding: '4px 12px', borderRadius: 2,
+                        fontFamily: jost, fontSize: 9, fontWeight: 400,
+                        letterSpacing: '0.18em', textTransform: 'uppercase',
+                        color: allSelected ? T.navy : T.gold,
+                        cursor: 'pointer', transition: 'all 0.2s',
+                      }}
+                    >
+                      {allSelected ? <CheckSquare size={11} /> : <Square size={11} />}
+                      {allSelected ? 'All Selected' : 'Select All'}
+                    </button>
+
+                    {/* ── Per-category sort ── */}
+                    <select
+                      value={catSortVal}
+                      onChange={e => setCatSort(category, e.target.value)}
+                      title="Sort products in this category"
+                      style={{
+                        padding: '4px 8px',
+                        border: `1px solid ${catSortVal ? T.gold : T.border}`,
+                        borderRadius: 2,
+                        fontFamily: jost, fontSize: 9, fontWeight: 400,
+                        color: catSortVal ? T.gold : T.muted,
+                        background: 'white', outline: 'none', cursor: 'pointer',
+                        letterSpacing: '0.12em',
+                      }}
+                    >
+                      <option value="">Sort</option>
+                      <option value="asc">Name A → Z</option>
+                      <option value="desc">Name Z → A</option>
+                      <option value="price-asc">Price ↑</option>
+                      <option value="price-desc">Price ↓</option>
+                    </select>
+
+                    {/* ── Per-category price range ── */}
+                    <div style={{
+                      display: 'flex', alignItems: 'center', gap: 5,
+                      background: 'white',
+                      border: `1px solid ${(catPriceF.min || catPriceF.max) ? T.gold : T.border}`,
+                      borderRadius: 2, padding: '3px 8px',
                     }}>
-                      {category} <span style={{ color: T.gold }}>({catProducts.length})</span>
-                    </h2>
+                      <span style={{ fontFamily: jost, fontSize: 9, color: T.muted }}>₹</span>
+                      <input
+                        type="number"
+                        placeholder="Min"
+                        value={catPriceF.min || ''}
+                        onChange={e => setCatPrice(category, 'min', e.target.value)}
+                        style={{
+                          width: 44, background: 'transparent', border: 'none',
+                          fontFamily: jost, fontSize: 9, fontWeight: 300,
+                          color: T.text, outline: 'none',
+                        }}
+                      />
+                      <span style={{ color: T.border, fontSize: 9 }}>–</span>
+                      <input
+                        type="number"
+                        placeholder="Max"
+                        value={catPriceF.max || ''}
+                        onChange={e => setCatPrice(category, 'max', e.target.value)}
+                        style={{
+                          width: 44, background: 'transparent', border: 'none',
+                          fontFamily: jost, fontSize: 9, fontWeight: 300,
+                          color: T.text, outline: 'none',
+                        }}
+                      />
+                    </div>
+
+                    {/* ── Reset cat filters ── */}
+                    {hasCatFilters && (
+                      <button
+                        onClick={() => resetCatFilters(category)}
+                        title="Reset category filters"
+                        style={{
+                          background: 'none', border: `1px solid ${T.border}`, borderRadius: 2,
+                          padding: '4px 6px', cursor: 'pointer', color: T.muted,
+                          display: 'flex', alignItems: 'center', transition: 'color 0.2s',
+                        }}
+                        onMouseEnter={e => { e.currentTarget.style.color = T.gold; e.currentTarget.style.borderColor = T.borderG; }}
+                        onMouseLeave={e => { e.currentTarget.style.color = T.muted; e.currentTarget.style.borderColor = T.border; }}
+                      >
+                        <RotateCcw size={10} />
+                      </button>
+                    )}
+
+                    <div style={{ flex: 1, height: 1, background: T.border }} />
                   </div>
-
-                  <button
-                    onClick={() => selectAllInCategory(catProducts)}
-                    style={{
-                      display: 'inline-flex', alignItems: 'center', gap: 5,
-                      background: allSelected ? T.gold : 'transparent',
-                      border: `1px solid ${allSelected ? T.gold : T.borderG}`,
-                      padding: '4px 12px', borderRadius: 2,
-                      fontFamily: jost, fontSize: 9, fontWeight: 400,
-                      letterSpacing: '0.18em', textTransform: 'uppercase',
-                      color: allSelected ? T.navy : T.gold,
-                      cursor: 'pointer', transition: 'all 0.2s',
-                    }}
-                  >
-                    {allSelected ? <CheckSquare size={11} /> : <Square size={11} />}
-                    {allSelected ? 'All Selected' : 'Select All'}
-                  </button>
-
-                  <div style={{ flex: 1, height: 1, background: T.border }} />
                 </div>
 
                 {!isCollapsed && (
