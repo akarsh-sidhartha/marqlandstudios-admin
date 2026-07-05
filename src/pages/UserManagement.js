@@ -5,7 +5,13 @@ import {
   RefreshCw, Trash2, Mail, Send, X, Link2
 } from 'lucide-react';
 
-const ROLES = ['admin', 'accounts', 'sales', 'inventory', 'courier', 'viewer'];
+const ROLES = ['admin', 'accounts', 'sales', 'inventory', 'courier', 'viewer', 'supplier'];
+
+// The stored role value stays 'supplier' (matches the backend enum and every
+// permission check in authMiddleware.js/supplierRoutes.js) — this is purely
+// a display label, since the Partner Portal is what everyone calls it.
+const ROLE_LABELS = { supplier: 'Partner' };
+const roleLabel = (role) => ROLE_LABELS[role] || role;
 
 // ── All routes in the app — key = route name, path = used in ProtectedRoute ──
 // ⚠ KEEP IN SYNC WITH PATH_TO_ROUTE_KEY in App.js.
@@ -43,6 +49,7 @@ const ROLE_DEFAULTS = {
   inventory: ['Products','Samples Provided','Saved Catalogues','Sourcing Hub','Property List','Saved Offsites'],
   courier:   ['Courier Tracking'],
   viewer:    ['Order Tracker'],
+  supplier:  [], // Partners never get internal app routes — they only ever hit /api/suppliers/*
 };
 
 // Resolve the effective route list for a user
@@ -152,6 +159,7 @@ const ROLE_COLORS = {
   inventory: { bg: '#172554', text: '#93c5fd', border: '#1d4ed8' },
   courier: { bg: '#1a2e1a', text: '#86efac', border: '#16a34a' },
   viewer:    { bg: '#1e293b', text: '#94a3b8', border: '#475569' },
+  supplier:  { bg: '#2e2410', text: '#e6c180', border: '#b8975a' }, // Partner — gold, matches PartnerPage branding
 };
 
 const STATUS_CONFIG = {
@@ -167,7 +175,7 @@ const RoleBadge = ({ role }) => {
       padding: '3px 10px', borderRadius: '20px', fontSize: '11px', fontWeight: 700,
       background: c.bg, color: c.text, border: `1px solid ${c.border}`,
       textTransform: 'uppercase', letterSpacing: '0.06em',
-    }}>{role}</span>
+    }}>{roleLabel(role)}</span>
   );
 };
 
@@ -617,7 +625,7 @@ const UserManagement = () => {
                           onChange={e => setSelectedRoles(prev => ({ ...prev, [u._id]: e.target.value }))}
                         >
                           {ROLES.filter(r => r !== 'admin').map(r => (
-                            <option key={r} value={r}>{r}</option>
+                            <option key={r} value={r}>{roleLabel(r)}</option>
                           ))}
                         </select>
                         <button
@@ -638,7 +646,7 @@ const UserManagement = () => {
                           value={u.role}
                           onChange={e => doAction(u._id, 'role', { role: e.target.value })}
                         >
-                          {ROLES.map(r => <option key={r} value={r}>{r}</option>)}
+                          {ROLES.map(r => <option key={r} value={r}>{roleLabel(r)}</option>)}
                         </select>
                         <button style={S.actionBtn('#f59e0b')}
                           onClick={() => doAction(u._id, 'suspend')}

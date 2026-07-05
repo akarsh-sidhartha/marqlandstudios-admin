@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import api from '../../api'; // uses the existing Axios instance (authenticated)
+import { usePopup, AppPopupStyles } from '../../components/AppPopups'; // NEW — branded toast/confirm instead of window.alert/confirm
 
 // All public-site API calls go through /api/public-site/
 // This works from internalportal.marqland.com (admin) AND from www.marqland.com (public)
@@ -18,6 +19,7 @@ import {
   Trash2, Upload, Plus, LayoutGrid,
   AlertTriangle, RefreshCw, ChevronRight,
   ArrowLeft, Edit3, X, Folder, Mail, User, Phone, GripVertical,
+  CheckCircle2, Loader2, UserCheck,
 } from 'lucide-react';
 
 /**
@@ -36,10 +38,17 @@ import {
  */
 
 const AdminView = () => {
-  const [data, setData]             = useState({ categories: [], inquiries: [], testimonials: [] });
+  const { showToast, confirm, Toast, ConfirmDialog } = usePopup(); // NEW — branded popups
+  const [data, setData]             = useState({ categories: [], inquiries: [], testimonials: [], partnerLeads: [] });
   const [selectedCat, setSelectedCat] = useState(null);
   const [selectedSub, setSelectedSub] = useState(null);
-  const [view, setView]             = useState('categories'); // 'categories' | 'testimonials' | 'inquiries'
+  const [view, setView]             = useState('categories'); // 'categories' | 'testimonials' | 'inquiries' | 'partners'
+  const [partnerSubView, setPartnerSubView] = useState('leads'); // NEW — 'leads' | 'enrolled'
+  const [enrolledSuppliers, setEnrolledSuppliers] = useState([]);
+  const [loadingEnrolled, setLoadingEnrolled] = useState(false);
+  const [rejectingLead, setRejectingLead] = useState(null); // NEW — lead currently in the "reject + notify" modal
+  const [rejectReason, setRejectReason] = useState('');
+  const [rejecting, setRejecting] = useState(false);
   const [modal, setModal]           = useState({ show: false, type: '', data: null });
   const [testimonialModal, setTestimonialModal] = useState({
     show: false, mode: 'add', data: { author: '', company: '', text: '' },
@@ -56,10 +65,13 @@ const AdminView = () => {
   const refreshData = async () => {
     try {
       setError('');
-      const res = await psApi.get('/store');
-      setData(res.data);
+      const [storeRes, leadsRes] = await Promise.all([
+        psApi.get('/store'),
+        psApi.get('/partner-leads'),
+      ]);
+      setData({ ...storeRes.data, partnerLeads: leadsRes.data });
       if (selectedCat) {
-        const updated = res.data.categories.find(c => c.id === selectedCat.id);
+        const updated = storeRes.data.categories.find(c => c.id === selectedCat.id);
         setSelectedCat(updated || null);
         if (selectedSub && updated) {
           const updatedSub = updated.subcategories?.find(s => s.id === selectedSub.id);
@@ -216,6 +228,110 @@ const AdminView = () => {
     refreshData();
   };
 
+  // ── Partner leads (NEW) ────────────────────────────────────────────────────────
+  const markLeadRead = async (id) => {
+    try { await psApi.patch(`/partner-leads/${id}/read`); refreshData(); }
+    catch (err) { console.error('Mark lead read failed', err); }
+  };
+
+  const updateLeadStatus = async (id, status) => {
+    try { await psApi.patch(`/partner-leads/${id}/status`, { status }); refreshData(); }
+    catch (err) { showToast('error', 'Failed to update status.'); }
+  };
+
+  // One-click "invite this lead as a Supplier" — reuses the existing employee
+  // invite flow (POST /api/auth/invite, with inviteType:'supplier' so the
+  // email copy + registration link match the Partner Portal), then marks
+  // the lead as 'invited'. Uses the plain `api` instance directly since
+  // /auth is outside psApi's scope.
+  const inviteLeadAsSupplier = async (lead) => {
+    const ok = await confirm({
+      title: 'Send Partner Invite',
+      message: `Send a Partner invite to ${lead.email}? They'll receive an email with a link to register at marqlandstudios.com/partner. This lead will move to the Enrolled Suppliers tab.`,
+      confirmLabel: 'Send Invite',
+      variant: 'default',
+    });
+    if (!ok) return;
+    try {
+      await api.post('/auth/invite', { email: lead.email, inviteType: 'supplier' });
+      // CHANGED — delete the lead outright instead of just marking it
+      // 'invited', so it never sits duplicated across both the Leads and
+      // Enrolled Suppliers tabs. The invite itself (and later the User once
+      // they register) is what shows up in "Enrolled Suppliers" from here on.
+      await psApi.delete(`/partner-leads/${lead._id}`);
+      showToast('success', `Invite sent to ${lead.email}. They now appear under Enrolled Suppliers.`);
+      refreshData();
+    } catch (err) {
+      showToast('error', 'Failed to send invite: ' + (err.response?.data?.message || err.message));
+    }
+  };
+
+  // "Delete" — opens the reject-and-notify modal (see render below) rather
+  // than deleting silently; submitReject actually performs the delete.
+  const openRejectModal = (lead) => {
+    setRejectingLead(lead);
+    setRejectReason('');
+  };
+
+  const submitReject = async () => {
+    if (!rejectReason.trim()) {
+      showToast('warning', 'Please enter a reason — it will be included in the email to the applicant.');
+      return;
+    }
+    setRejecting(true);
+    try {
+      await psApi.post(`/partner-leads/${rejectingLead._id}/reject`, { reason: rejectReason.trim() });
+      showToast('success', `${rejectingLead.email} has been notified.`);
+      setRejectingLead(null);
+      refreshData();
+    } catch (err) {
+      showToast('error', err.response?.data?.message || 'Failed to send notification.');
+    } finally {
+      setRejecting(false);
+    }
+  };
+
+  // NEW — "Enrolled Suppliers" sub-tab merges two sources so nobody falls
+  // into a gap between "invite sent" and "admin approved them as Partner":
+  //   1. Invites with inviteType === 'supplier' that haven't been used yet
+  //      (person invited, hasn't registered) — requires models/Invite.js to
+  //      have the additive `inviteType` field, see INVITE_MODEL_PATCH.md.
+  //   2. Users with role === 'supplier' (any status — 'pending' means
+  //      registered but not yet approved by an admin, 'active' means fully
+  //      enrolled).
+  const loadEnrolledSuppliers = async () => {
+    setLoadingEnrolled(true);
+    try {
+      const [usersRes, invitesRes] = await Promise.all([
+        api.get('/auth/users'),
+        api.get('/auth/invites'),
+      ]);
+      const supplierUsers = usersRes.data
+        .filter(u => u.role === 'supplier')
+        .map(u => ({ _id: u._id, key: `user-${u._id}`, name: u.name, email: u.email, supplierCompanyName: u.supplierCompanyName, kind: 'user', status: u.status }));
+      const supplierInvites = (invitesRes.data || [])
+        .filter(i => i.inviteType === 'supplier')
+        .map(i => ({ _id: i._id, key: `invite-${i._id}`, name: null, email: i.email, supplierCompanyName: null, kind: 'invite', status: 'invited' }));
+
+      // An invite for someone who has already registered would show up
+      // twice (once as the invite, once as the pending/active User) — once
+      // they register, the Invite is marked `used` server-side and
+      // GET /auth/invites (used: false only) stops returning it, so this
+      // dedupe is just a defensive belt-and-braces check on email.
+      const usedEmails = new Set(supplierUsers.map(u => u.email));
+      const merged = [...supplierUsers, ...supplierInvites.filter(i => !usedEmails.has(i.email))];
+      setEnrolledSuppliers(merged);
+    } catch (err) {
+      showToast('error', 'Failed to load enrolled suppliers.');
+    } finally {
+      setLoadingEnrolled(false);
+    }
+  };
+
+  useEffect(() => {
+    if (view === 'partners' && partnerSubView === 'enrolled') loadEnrolledSuppliers();
+  }, [view, partnerSubView]);
+
   const hasSubcategories = selectedCat?.subcategories?.length > 0;
 
   if (loading) return (
@@ -226,6 +342,9 @@ const AdminView = () => {
 
   return (
     <div className="min-h-screen bg-[#f8fafc] flex font-sans text-slate-900">
+      <AppPopupStyles />
+      <Toast />
+      <ConfirmDialog />
 
       {/* Delete Confirmation Modal */}
       {modal.show && (
@@ -298,6 +417,7 @@ const AdminView = () => {
           { key: 'categories',  label: 'Portfolio',    icon: Folder },
           { key: 'testimonials',label: 'Testimonials', icon: Mail },
           { key: 'inquiries',   label: 'Inquiries',    icon: User },
+          { key: 'partners',    label: 'Partner Leads',icon: User },
         ].map(({ key, label, icon: Icon }) => (
           <button key={key} onClick={() => { setView(key); setSelectedCat(null); setSelectedSub(null); }}
             className={`flex items-center gap-3 px-5 py-3 rounded-2xl text-sm font-bold transition-all ${view === key ? 'bg-black text-white' : 'text-slate-500 hover:bg-slate-50'}`}>
@@ -305,6 +425,11 @@ const AdminView = () => {
             {key === 'inquiries' && data.inquiries?.filter(i => !i.read).length > 0 && (
               <span className="ml-auto bg-red-500 text-white text-[9px] font-black px-2 py-0.5 rounded-full">
                 {data.inquiries.filter(i => !i.read).length}
+              </span>
+            )}
+            {key === 'partners' && data.partnerLeads?.filter(l => !l.read).length > 0 && (
+              <span className="ml-auto bg-red-500 text-white text-[9px] font-black px-2 py-0.5 rounded-full">
+                {data.partnerLeads.filter(l => !l.read).length}
               </span>
             )}
           </button>
@@ -556,7 +681,165 @@ const AdminView = () => {
             </div>
           </div>
         )}
+
+        {/* ── PARTNER LEADS (NEW) ── */}
+        {view === 'partners' && (
+          <div className="max-w-6xl mx-auto">
+            <header className="mb-8 flex items-end justify-between">
+              <div>
+                <h2 className="text-4xl font-serif">Partners</h2>
+                <p className="text-slate-400 text-xs font-bold uppercase tracking-widest mt-2">
+                  Supplier interest submissions and enrolled partners
+                </p>
+              </div>
+              <div className="flex gap-2 bg-slate-100 p-1 rounded-2xl">
+                <button
+                  onClick={() => setPartnerSubView('leads')}
+                  className={`px-4 py-2 rounded-xl text-xs font-bold transition-all ${partnerSubView === 'leads' ? 'bg-white shadow-sm text-slate-900' : 'text-slate-400'}`}
+                >
+                  Leads
+                </button>
+                <button
+                  onClick={() => setPartnerSubView('enrolled')}
+                  className={`px-4 py-2 rounded-xl text-xs font-bold transition-all ${partnerSubView === 'enrolled' ? 'bg-white shadow-sm text-slate-900' : 'text-slate-400'}`}
+                >
+                  Enrolled Suppliers
+                </button>
+              </div>
+            </header>
+
+            {/* ── LEADS ── */}
+            {partnerSubView === 'leads' && (
+              <div className="flex flex-col gap-3">
+                {data.partnerLeads?.length > 0 ? data.partnerLeads.map(lead => (
+                  <div key={lead._id}
+                    className={`bg-white px-5 py-3 rounded-2xl shadow-sm border relative flex items-center gap-4 ${!lead.read ? 'border-indigo-200 bg-indigo-50/30' : 'border-slate-100'}`}>
+                    {!lead.read && (
+                      <span className="absolute -top-1.5 -right-1.5 bg-indigo-600 text-white text-[8px] font-black px-2 py-0.5 rounded-full uppercase tracking-wider">New</span>
+                    )}
+
+                    <div className="flex-1 min-w-0 grid grid-cols-12 gap-4 items-center">
+                      <div className="col-span-3 min-w-0">
+                        <p className="text-sm font-bold truncate">{lead.contactName}</p>
+                        <p className="text-xs text-slate-400 truncate">{lead.companyName}</p>
+                      </div>
+                      <div className="col-span-3 min-w-0 text-xs text-slate-500 space-y-0.5">
+                        <div className="flex items-center gap-1.5 truncate"><Mail size={11} className="text-slate-300 flex-shrink-0" />{lead.email}</div>
+                        {lead.phone && <div className="flex items-center gap-1.5 truncate"><Phone size={11} className="text-slate-300 flex-shrink-0" />{lead.phone}</div>}
+                      </div>
+                      <div className="col-span-4 min-w-0 flex items-center gap-3 text-xs">
+                        {lead.website && (
+                          <a href={lead.website} target="_blank" rel="noreferrer" className="text-indigo-500 underline truncate">{lead.website}</a>
+                        )}
+                        {lead.attachmentWebUrl && (
+                          <a href={lead.attachmentWebUrl} target="_blank" rel="noreferrer" className="text-emerald-600 underline whitespace-nowrap">📎 Portfolio</a>
+                        )}
+                      </div>
+                      <div className="col-span-2 flex justify-end">
+                        <select
+                          value={lead.status}
+                          onChange={e => updateLeadStatus(lead._id, e.target.value)}
+                          className="text-[11px] font-bold border border-slate-200 rounded-lg px-2 py-1.5"
+                        >
+                          <option value="new">New</option>
+                          <option value="contacted">Contacted</option>
+                          <option value="invited">Invited</option>
+                          <option value="declined">Declined</option>
+                        </select>
+                      </div>
+                    </div>
+
+                    <div className="flex items-center gap-3 flex-shrink-0 border-l border-slate-100 pl-4">
+                      {!lead.read && (
+                        <button onClick={() => markLeadRead(lead._id)} title="Mark read" className="text-slate-300 hover:text-indigo-500">
+                          <CheckCircle2 size={16} />
+                        </button>
+                      )}
+                      <button onClick={() => inviteLeadAsSupplier(lead)} title="Invite as Partner" className="text-slate-300 hover:text-emerald-600">
+                        <UserCheck size={16} />
+                      </button>
+                      <button onClick={() => openRejectModal(lead)} title="Delete & notify" className="text-slate-300 hover:text-red-500">
+                        <Trash2 size={16} />
+                      </button>
+                    </div>
+                  </div>
+                )) : (
+                  <div className="h-64 border-4 border-dashed border-slate-100 rounded-[3rem] flex items-center justify-center text-slate-300 font-serif italic">
+                    No partner leads yet.
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* ── ENROLLED SUPPLIERS ── */}
+            {partnerSubView === 'enrolled' && (
+              <div className="flex flex-col gap-3">
+                {loadingEnrolled ? (
+                  <p className="text-slate-400 text-sm flex items-center gap-2 justify-center py-16">
+                    <Loader2 size={16} className="animate-spin" /> Loading enrolled suppliers…
+                  </p>
+                ) : enrolledSuppliers.length > 0 ? enrolledSuppliers.map(u => {
+                  const badge = u.kind === 'invite'
+                    ? { label: 'Invited', cls: 'text-indigo-600 bg-indigo-50' }
+                    : u.status === 'active'
+                      ? { label: 'Active', cls: 'text-emerald-600 bg-emerald-50' }
+                      : { label: 'Pending Approval', cls: 'text-amber-600 bg-amber-50' };
+                  return (
+                    <div key={u.key} className="bg-white px-5 py-3 rounded-2xl shadow-sm border border-slate-100 flex items-center gap-4">
+                      <div className="w-9 h-9 rounded-full bg-amber-50 text-amber-600 flex items-center justify-center font-bold text-sm flex-shrink-0">
+                        {(u.supplierCompanyName || u.name || u.email || '?')[0].toUpperCase()}
+                      </div>
+                      <div className="flex-1 min-w-0">
+                        <p className="text-sm font-bold truncate">{u.supplierCompanyName || u.name || u.email}</p>
+                        <p className="text-xs text-slate-400 truncate">{u.name ? `${u.name} · ` : ''}{u.email}</p>
+                      </div>
+                      <span className={`text-[10px] font-black uppercase tracking-widest px-3 py-1 rounded-full flex-shrink-0 ${badge.cls}`}>{badge.label}</span>
+                    </div>
+                  );
+                }) : (
+                  <div className="h-64 border-4 border-dashed border-slate-100 rounded-[3rem] flex items-center justify-center text-slate-300 font-serif italic">
+                    No suppliers enrolled yet. Approve an invited partner in User Management with the "Partner" role to see them here.
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        )}
       </main>
+
+      {/* ── Reject & Notify modal (Partner Leads → Delete) ── */}
+      {rejectingLead && (
+        <div className="fixed inset-0 z-[110] flex items-center justify-center p-6" style={{ background: 'rgba(7,13,20,0.72)', backdropFilter: 'blur(4px)' }}>
+          <div className="popup-enter" style={{ background: 'var(--navy, #0D1B2A)', border: '1px solid var(--gold-border, rgba(201,168,76,0.25))', borderRadius: 12, width: '100%', maxWidth: 460, padding: 28 }}>
+            <div className="flex items-start justify-between mb-4">
+              <span style={{ fontFamily: "'Jost', 'Inter', sans-serif", fontSize: 11, fontWeight: 700, letterSpacing: '0.22em', textTransform: 'uppercase', color: '#ef4444' }}>
+                Delete Lead & Notify
+              </span>
+              <button onClick={() => setRejectingLead(null)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'rgba(240,236,228,0.35)' }}><X size={18} /></button>
+            </div>
+            <p style={{ fontFamily: "'Jost', 'Inter', sans-serif", fontSize: 12, color: 'rgba(240,236,228,0.65)', lineHeight: 1.6, marginBottom: 16 }}>
+              This will email <strong style={{ color: '#f0ece4' }}>{rejectingLead.email}</strong> letting them know we can't move forward,
+              then permanently delete this lead. Your note below is included in that email.
+            </p>
+            <textarea
+              rows={4}
+              value={rejectReason}
+              onChange={e => setRejectReason(e.target.value)}
+              placeholder="e.g. Our current supplier network doesn't have capacity for this product category right now…"
+              style={{
+                width: '100%', background: '#0D1B2A', border: '1px solid rgba(201,168,76,0.2)', color: '#f0ece4',
+                padding: '12px 14px', fontFamily: "'Jost','Inter',sans-serif", fontSize: 13, borderRadius: 8, resize: 'none', outline: 'none',
+              }}
+            />
+            <div className="flex justify-end gap-3 mt-5">
+              <button className="btn-ghost" onClick={() => setRejectingLead(null)}>Cancel</button>
+              <button className="btn-danger" onClick={submitReject} disabled={rejecting}>
+                {rejecting ? 'Sending…' : 'Send & Delete'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

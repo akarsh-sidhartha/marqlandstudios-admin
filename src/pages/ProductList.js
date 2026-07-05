@@ -22,6 +22,7 @@ import usePortalItems from '../hooks/usePortalItems';
 import ProductImageGallery from './ProductImageGallery';
 import { usePopup } from '../components/AppPopups';
 import { API_ROOT } from '../api';
+import PendingSupplierApprovals, { PendingApprovalsButton } from './PendingSupplierApprovals'; // NEW — Supplier Portal
 
 // ─── Logger ──────────────────────────────────────────────────────────────────
 const log = createLogger('ProductList');
@@ -405,7 +406,7 @@ const ProductList = () => {
   const [isSaving, setIsSaving]             = useState(false);
   const [formData, setFormData] = useState({
     brand: '', category: '', subCategory: '', name: '',
-    description: '', purchasePrice: '', markupPercent: 30,
+    description: '', purchasePrice: '', sellingPrice: '', markupPercent: 30,
   });
 
   // ── Image & AI processing ────────────────────────────────────────────────────
@@ -451,6 +452,9 @@ const ProductList = () => {
 
   // ── Image Gallery & Video modal ──────────────────────────────────────────────
   const [galleryProduct, setGalleryProduct] = useState(null);
+
+  // ── Pending Supplier Approvals panel (NEW) ───────────────────────────────────
+  const [showPendingApprovals, setShowPendingApprovals] = useState(false);
 
   // ── Client visit mode (hides cost/markup from view) ──────────────────────────
   // Persisted in localStorage so the setting survives navigation away and back.
@@ -532,7 +536,7 @@ const ProductList = () => {
 
   const resetForm = () => {
     imageFileRef.current = null;          // clear ref in sync with state
-    setFormData({ brand: '', category: '', subCategory: '', name: '', description: '', purchasePrice: '', markupPercent: 30 });
+    setFormData({ brand: '', category: '', subCategory: '', name: '', description: '', purchasePrice: '', sellingPrice: '', markupPercent: 30 });
     setImageFile(null);
     setImagePreviewUrl(null);
     setIsEditing(false);
@@ -603,6 +607,7 @@ const ProductList = () => {
       data.append('name',          formData.name);
       data.append('description',   formData.description);
       data.append('purchasePrice', formData.purchasePrice);
+      data.append('sellingPrice',  formData.sellingPrice);
       data.append('markupPercent', formData.markupPercent);
 
       // Read from ref — written synchronously in handleImageFileChange, survives re-renders
@@ -654,25 +659,37 @@ const ProductList = () => {
   };
 
   // ─── Delete product ──────────────────────────────────────────────────────────
-  const handleDelete = async (id, productName) => {
-    const ok = await confirm({
-      title:        'Delete Product',
-      message:      `"${productName}" will be permanently removed from your catalogue. This cannot be undone.`,
-      confirmLabel: 'Delete',
-      cancelLabel:  'Cancel',
-      variant:      'danger',
-    });
-    if (!ok) return;
-    log.info('Deleting product', { id, name: productName });
+  // NEW — deletion now requires a reason, since it may cascade a notification
+  // back to the partner who originally submitted this product.
+  const [deletingProduct, setDeletingProduct] = useState(null); // { id, name } | null
+  const [deleteReason, setDeleteReason] = useState('');
+  const [deletingInProgress, setDeletingInProgress] = useState(false);
+
+  const handleDelete = (id, productName) => {
+    setDeletingProduct({ id, name: productName });
+    setDeleteReason('');
+  };
+
+  const confirmDeleteWithReason = async () => {
+    if (!deleteReason.trim()) {
+      showToast('warning', 'Please enter a reason for deleting this product.');
+      return;
+    }
+    const { id, name: productName } = deletingProduct;
+    setDeletingInProgress(true);
+    log.info('Deleting product', { id, name: productName, reason: deleteReason });
     try {
-      await api.delete(`/products/${id}`);
+      await api.delete(`/products/${id}`, { data: { reason: deleteReason.trim() } });
       setSelectedProducts(prev => prev.filter(p => p._id !== id));
       showToast('success', `"${productName}" deleted`);
+      setDeletingProduct(null);
       fetchData();
     } catch (err) {
       const msg = err.response?.data?.message || 'Failed to delete product';
       log.error('Delete product failed', msg);
       showToast('error', msg);
+    } finally {
+      setDeletingInProgress(false);
     }
   };
 
@@ -688,6 +705,7 @@ const ProductList = () => {
       name:          p.name          || '',
       description:   p.description   || '',
       purchasePrice: p.purchasePrice || '',
+      sellingPrice:  p.sellingPrice  || '',
       markupPercent: p.markupPercent || 30,
     });
     const subCats = (meta.subCategories && p.category && meta.subCategories[p.category]) || [];
@@ -1201,6 +1219,9 @@ const ProductList = () => {
             >
               <FileText size={13} /> Import PDF
             </button>
+
+            {/* Pending Supplier Approvals (NEW) */}
+            <PendingApprovalsButton onClick={() => setShowPendingApprovals(true)} />
 
             {/* Studio Prompts Manager */}
             <button
@@ -1904,14 +1925,26 @@ const ProductList = () => {
                 />
               </div>
 
-              {/* Cost Price / Image */}
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
+              {/* Cost Price / Selling Price / Image */}
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 16 }}>
                 <div>
                   <FieldLabel>Cost Price (₹)</FieldLabel>
                   <input
                     type="number"
                     value={formData.purchasePrice}
                     onChange={e => setFormData(f => ({ ...f, purchasePrice: e.target.value }))}
+                    style={inputStyle()}
+                    onFocus={e => { e.currentTarget.style.borderColor = T.gold; }}
+                    onBlur={e => { e.currentTarget.style.borderColor = T.border; }}
+                  />
+                </div>
+                <div>
+                  <FieldLabel>Selling Price (₹) *</FieldLabel>
+                  <input
+                    type="number"
+                    required
+                    value={formData.sellingPrice}
+                    onChange={e => setFormData(f => ({ ...f, sellingPrice: e.target.value }))}
                     style={inputStyle()}
                     onFocus={e => { e.currentTarget.style.borderColor = T.gold; }}
                     onBlur={e => { e.currentTarget.style.borderColor = T.border; }}
@@ -2479,6 +2512,65 @@ const ProductList = () => {
           onClose={() => setGalleryProduct(null)}
           onSaved={fetchData}
         />
+      )}
+
+      {/* ════════════════════════════════════════════════════════════════════════
+          PENDING SUPPLIER APPROVALS (NEW)
+      ════════════════════════════════════════════════════════════════════════ */}
+      {showPendingApprovals && (
+        <PendingSupplierApprovals
+          meta={meta}
+          onClose={() => setShowPendingApprovals(false)}
+          onApproved={fetchData}
+        />
+      )}
+
+      {/* ════════════════════════════════════════════════════════════════════════
+          DELETE PRODUCT — requires a reason (NEW). If the product originated
+          from a Partner submission, this reason is emailed/shown back to them.
+      ════════════════════════════════════════════════════════════════════════ */}
+      {deletingProduct && (
+        <div style={{
+          position: 'fixed', inset: 0, zIndex: 400, background: 'rgba(14,21,32,0.55)',
+          display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 24,
+        }}>
+          <div style={{
+            background: 'white', width: '100%', maxWidth: 460, padding: 32, borderRadius: 4,
+            boxShadow: '0 24px 64px rgba(0,0,0,0.3)',
+          }}>
+            <h3 style={{ fontFamily: serif, fontSize: 22, fontWeight: 300, color: T.navy, marginBottom: 8 }}>
+              Delete "{deletingProduct.name}"?
+            </h3>
+            <p style={{ fontFamily: jost, fontSize: 12, color: T.muted, lineHeight: 1.6, marginBottom: 16 }}>
+              This permanently removes the product from the catalogue. If it was submitted by a Partner,
+              your reason below will be shown to them in their portal.
+            </p>
+            <textarea
+              rows={3}
+              value={deleteReason}
+              onChange={e => setDeleteReason(e.target.value)}
+              placeholder="e.g. Discontinued by manufacturer, duplicate listing, quality concerns…"
+              style={{
+                width: '100%', border: `1px solid ${T.border}`, borderRadius: 3, padding: '10px 12px',
+                fontFamily: jost, fontSize: 12, resize: 'none', outline: 'none', boxSizing: 'border-box',
+              }}
+            />
+            <div style={{ display: 'flex', gap: 10, marginTop: 20, justifyContent: 'flex-end' }}>
+              <button onClick={() => setDeletingProduct(null)} style={{
+                background: 'transparent', border: `1px solid ${T.border}`, color: T.muted, padding: '10px 20px',
+                borderRadius: 2, fontFamily: jost, fontSize: 11, cursor: 'pointer',
+              }}>
+                Cancel
+              </button>
+              <button onClick={confirmDeleteWithReason} disabled={deletingInProgress} style={{
+                background: T.red, color: 'white', border: 'none', padding: '10px 20px', borderRadius: 2,
+                fontFamily: jost, fontSize: 11, fontWeight: 500, letterSpacing: '0.1em', textTransform: 'uppercase', cursor: 'pointer',
+              }}>
+                {deletingInProgress ? 'Deleting…' : 'Delete'}
+              </button>
+            </div>
+          </div>
+        </div>
       )}
 
       <PortalModal />
