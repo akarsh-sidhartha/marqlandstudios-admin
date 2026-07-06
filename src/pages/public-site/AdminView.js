@@ -65,11 +65,12 @@ const AdminView = () => {
   const refreshData = async () => {
     try {
       setError('');
-      const [storeRes, leadsRes] = await Promise.all([
+      const [storeRes, leadsRes, inquiriesRes] = await Promise.all([
         psApi.get('/store'),
         psApi.get('/partner-leads'),
+        psApi.get('/inquiries'),
       ]);
-      setData({ ...storeRes.data, partnerLeads: leadsRes.data });
+      setData({ ...storeRes.data, partnerLeads: leadsRes.data, inquiries: inquiriesRes.data });
       if (selectedCat) {
         const updated = storeRes.data.categories.find(c => c.id === selectedCat.id);
         setSelectedCat(updated || null);
