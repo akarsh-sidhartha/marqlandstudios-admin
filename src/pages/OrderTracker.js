@@ -17,6 +17,8 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react';
 import api from '../api';
 import ClientPortalEditor from './ClientPortalEditor';
+import OrderTimeline from './OrderTimeline';
+import MessageTemplateManager from './MessageTemplateManager';
 import { initNotifications, requestNotifPermission, pushNotif } from '../utils/portalNotifications';
 import { createLogger } from '../utils/logger';
 import CreatableSelect from 'react-select/creatable';
@@ -24,7 +26,7 @@ import {
   Plus, ArrowRight, CheckCircle, Clock, FileText, Image as ImageIcon,
   Trash2, ChevronRight, ChevronDown, X, FileSpreadsheet, Download,
   AlertTriangle, FolderOpen, Calendar, Hash, Receipt, Table as TableIcon,
-  Search, Loader2, Link2, Copy, Send, Package, MapPin, UserPlus,
+  Search, Loader2, Link2, Copy, Send, Package, MapPin, UserPlus, Settings, History, Truck,
 } from 'lucide-react';
 import { usePopup } from '../components/AppPopups';
 
@@ -725,8 +727,8 @@ const AttachmentLightbox = ({ file, onClose }) => {
 // OrderRow
 // ─────────────────────────────────────────────────────────────────────────────
 const OrderRow = ({
-  order, loading, unreadCounts, sentLinks, copiedId,
-  onRowClick, onStartProject, onMarkComplete,
+  order, loading, unreadCounts, sentLinks, copiedId, shipmentCounts,
+  onRowClick, onStartProject, onMarkComplete, onOpenTimeline, onOpenShipments,
   onOpenPortalChat, onCopyLink, onDelete, onOpenFile,
 }) => {
   const isCompleted = order.status === 'completed';
@@ -751,28 +753,47 @@ const OrderRow = ({
     >
       {/* ── Identifiers ── */}
       <td style={{ padding: '16px 20px', borderBottom: `1px solid ${T.border}` }}>
-        {isCompleted ? (
-          order.invoiceNumber && (
+        <div style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: 4 }}>
+          {order.refNumber && (
             <span style={{
               fontFamily: jost, fontSize: 9, fontWeight: 500,
-              letterSpacing: '0.2em', textTransform: 'uppercase',
-              background: T.emerald, color: 'white',
-              padding: '4px 10px', display: 'inline-flex', alignItems: 'center', gap: 5,
-            }}>
-              <Receipt size={10} /> {order.invoiceNumber}
-            </span>
-          )
-        ) : (
-          order.refNumber ? (
-            <span style={{
-              fontFamily: jost, fontSize: 9, fontWeight: 500,
-              letterSpacing: '0.2em', textTransform: 'uppercase',
+              letterSpacing: '0.15em', textTransform: 'uppercase',
               background: T.gold, color: 'white',
-              padding: '4px 10px',
+              padding: '4px 8px', display: 'inline-flex', alignItems: 'center', gap: 4,
             }}>
               {order.refNumber}
             </span>
-          ) : (
+          )}
+
+          {order.quoteNumber && (
+            <>
+              {order.refNumber && <ChevronRight size={10} style={{ color: T.muted, flexShrink: 0 }} />}
+              <span style={{
+                fontFamily: jost, fontSize: 9, fontWeight: 500,
+                letterSpacing: '0.15em', textTransform: 'uppercase',
+                background: T.indigo, color: 'white',
+                padding: '4px 8px', display: 'inline-flex', alignItems: 'center', gap: 4,
+              }}>
+                <Hash size={9} /> {order.quoteNumber}
+              </span>
+            </>
+          )}
+
+          {order.invoiceNumber && (
+            <>
+              {(order.refNumber || order.quoteNumber) && <ChevronRight size={10} style={{ color: T.muted, flexShrink: 0 }} />}
+              <span style={{
+                fontFamily: jost, fontSize: 9, fontWeight: 500,
+                letterSpacing: '0.15em', textTransform: 'uppercase',
+                background: T.emerald, color: 'white',
+                padding: '4px 8px', display: 'inline-flex', alignItems: 'center', gap: 4,
+              }}>
+                <Receipt size={9} /> {order.invoiceNumber}
+              </span>
+            </>
+          )}
+
+          {!order.refNumber && !order.quoteNumber && !order.invoiceNumber && (
             <span style={{
               fontFamily: jost, fontSize: 9, fontWeight: 400,
               letterSpacing: '0.15em', color: T.muted,
@@ -781,8 +802,8 @@ const OrderRow = ({
             }}>
               #{order._id.slice(-6)}
             </span>
-          )
-        )}
+          )}
+        </div>
       </td>
 
       {/* ── Project ── */}
@@ -844,6 +865,36 @@ const OrderRow = ({
       <td style={{ padding: '16px 20px', textAlign: 'right', borderBottom: `1px solid ${T.border}` }}>
         <div style={{ display: 'flex', justifyContent: 'flex-end', alignItems: 'center', gap: 4 }}>
 
+          {/* Timeline — jump straight to posting/viewing updates, no detour through Update Record */}
+          <button
+            onClick={e => { e.stopPropagation(); onOpenTimeline(order); }}
+            title={order.timeline?.length ? `Timeline (${order.timeline.length})` : 'Timeline'}
+            style={{
+              background: 'none', border: 'none', cursor: 'pointer',
+              color: T.muted, padding: 6, display: 'flex', transition: 'color 0.2s',
+            }}
+            onMouseEnter={e => e.currentTarget.style.color = T.gold}
+            onMouseLeave={e => e.currentTarget.style.color = T.muted}
+          >
+            <History size={15} />
+          </button>
+
+          {/* Linked shipments — only shown when the order actually has any */}
+          {shipmentCounts[order._id] > 0 && (
+            <button
+              onClick={e => { e.stopPropagation(); onOpenShipments(order); }}
+              title={`Linked shipments (${shipmentCounts[order._id]})`}
+              style={{
+                background: 'none', border: 'none', cursor: 'pointer',
+                color: T.muted, padding: 6, display: 'flex', transition: 'color 0.2s',
+              }}
+              onMouseEnter={e => e.currentTarget.style.color = T.gold}
+              onMouseLeave={e => e.currentTarget.style.color = T.muted}
+            >
+              <Truck size={15} />
+            </button>
+          )}
+
           {/* Start Project */}
           {order.status === 'inquiry' && (
             <button
@@ -879,86 +930,82 @@ const OrderRow = ({
             </button>
           )}
 
-          {/* Portal chat */}
-          {!isCompleted && (
+          {/* Portal chat — available at every stage, including completed */}
+          <button
+            onClick={e => { e.stopPropagation(); onOpenPortalChat(order, ordData); }}
+            title={hasUnread ? `${unread} new client message${unread !== 1 ? 's' : ''}` : 'Open portal chat'}
+            style={{
+              position: 'relative', background: 'none', border: 'none',
+              cursor: 'pointer', padding: 6, display: 'flex',
+              color: hasUnread ? '#7c3aed' : T.muted,
+              transition: 'color 0.2s',
+            }}
+          >
+            <Link2 size={15} />
+            {hasUnread && (
+              <span style={{
+                position: 'absolute', top: -2, right: -2,
+                minWidth: 15, height: 15,
+                background: '#ef4444', color: 'white',
+                fontSize: 8, fontFamily: jost, fontWeight: 700,
+                borderRadius: '50%', display: 'flex', alignItems: 'center',
+                justifyContent: 'center', padding: '0 3px',
+              }}>
+                {unread > 9 ? '9+' : unread}
+              </span>
+            )}
+          </button>
+
+          {/* Copy/Send portal link — available at every stage, including completed */}
+          {alreadySent ? (
+            <div style={{ position: 'relative' }} className="group">
+              <button
+                disabled
+                style={{
+                  background: 'none', border: 'none', padding: 6,
+                  color: '#d1d5db', cursor: 'not-allowed', display: 'flex',
+                }}
+                title="Link already sent"
+              >
+                <Send size={15} />
+              </button>
+              {/* Hover tooltip */}
+              <div style={{
+                position: 'absolute', right: 0, top: 32,
+                background: T.navy, color: 'white',
+                padding: '10px 14px', zIndex: 50,
+                minWidth: 160, display: 'none',
+              }}
+                className="group-hover:!block"
+              >
+                <p style={{ fontFamily: jost, fontSize: 9, letterSpacing: '0.2em', color: '#94a3b8', margin: '0 0 8px', textTransform: 'uppercase' }}>
+                  Link sent
+                </p>
+                <button
+                  onClick={e => { e.stopPropagation(); onCopyLink(order, portalUrl); }}
+                  style={{
+                    background: 'none', border: 'none', cursor: 'pointer',
+                    fontFamily: jost, fontSize: 10, color: '#a5b4fc',
+                    display: 'flex', alignItems: 'center', gap: 6,
+                  }}
+                >
+                  {justCopied ? <CheckCircle size={11} /> : <Copy size={11} />}
+                  {justCopied ? 'Copied!' : 'Copy link again'}
+                </button>
+              </div>
+            </div>
+          ) : (
             <button
-              onClick={e => { e.stopPropagation(); onOpenPortalChat(order, ordData); }}
-              title={hasUnread ? `${unread} new client message${unread !== 1 ? 's' : ''}` : 'Open portal chat'}
+              onClick={e => { e.stopPropagation(); onCopyLink(order, portalUrl); }}
+              title="Copy & send client link"
               style={{
-                position: 'relative', background: 'none', border: 'none',
-                cursor: 'pointer', padding: 6, display: 'flex',
-                color: hasUnread ? '#7c3aed' : T.muted,
+                background: 'none', border: 'none', cursor: 'pointer',
+                padding: 6, display: 'flex', color: justCopied ? T.emerald : T.muted,
                 transition: 'color 0.2s',
               }}
             >
-              <Link2 size={15} />
-              {hasUnread && (
-                <span style={{
-                  position: 'absolute', top: -2, right: -2,
-                  minWidth: 15, height: 15,
-                  background: '#ef4444', color: 'white',
-                  fontSize: 8, fontFamily: jost, fontWeight: 700,
-                  borderRadius: '50%', display: 'flex', alignItems: 'center',
-                  justifyContent: 'center', padding: '0 3px',
-                }}>
-                  {unread > 9 ? '9+' : unread}
-                </span>
-              )}
+              {justCopied ? <CheckCircle size={15} /> : <Send size={15} />}
             </button>
-          )}
-
-          {/* Copy/Send portal link */}
-          {!isCompleted && (
-            alreadySent ? (
-              <div style={{ position: 'relative' }} className="group">
-                <button
-                  disabled
-                  style={{
-                    background: 'none', border: 'none', padding: 6,
-                    color: '#d1d5db', cursor: 'not-allowed', display: 'flex',
-                  }}
-                  title="Link already sent"
-                >
-                  <Send size={15} />
-                </button>
-                {/* Hover tooltip */}
-                <div style={{
-                  position: 'absolute', right: 0, top: 32,
-                  background: T.navy, color: 'white',
-                  padding: '10px 14px', zIndex: 50,
-                  minWidth: 160, display: 'none',
-                }}
-                  className="group-hover:!block"
-                >
-                  <p style={{ fontFamily: jost, fontSize: 9, letterSpacing: '0.2em', color: '#94a3b8', margin: '0 0 8px', textTransform: 'uppercase' }}>
-                    Link sent
-                  </p>
-                  <button
-                    onClick={e => { e.stopPropagation(); onCopyLink(order, portalUrl); }}
-                    style={{
-                      background: 'none', border: 'none', cursor: 'pointer',
-                      fontFamily: jost, fontSize: 10, color: '#a5b4fc',
-                      display: 'flex', alignItems: 'center', gap: 6,
-                    }}
-                  >
-                    {justCopied ? <CheckCircle size={11} /> : <Copy size={11} />}
-                    {justCopied ? 'Copied!' : 'Copy link again'}
-                  </button>
-                </div>
-              </div>
-            ) : (
-              <button
-                onClick={e => { e.stopPropagation(); onCopyLink(order, portalUrl); }}
-                title="Copy & send client link"
-                style={{
-                  background: 'none', border: 'none', cursor: 'pointer',
-                  padding: 6, display: 'flex', color: justCopied ? T.emerald : T.muted,
-                  transition: 'color 0.2s',
-                }}
-              >
-                {justCopied ? <CheckCircle size={15} /> : <Send size={15} />}
-              </button>
-            )
           )}
 
           {/* Delete */}
@@ -994,6 +1041,8 @@ export default function OrderTracker() {
   const [activeTab,        setActiveTab]        = useState('inquiry');
   const [isModalOpen,      setIsModalOpen]      = useState(false);
   const [editOrder,        setEditOrder]        = useState(null);
+  const [timelineOrder,    setTimelineOrder]    = useState(null);   // order whose Timeline modal is open
+  const [templateMgrOpen,  setTemplateMgrOpen]  = useState(false);
   const [loading,          setLoading]          = useState(false);
   const [fetchLoading,     setFetchLoading]     = useState(true);
   const [expandedFolders,  setExpandedFolders]  = useState({});
@@ -1008,6 +1057,8 @@ export default function OrderTracker() {
   const [chatOrder,        setChatOrder]        = useState(null);
   const [clientCheckModal, setClientCheckModal] = useState(null);
   const [unreadCounts,     setUnreadCounts]     = useState({});
+  const [shipmentCounts,   setShipmentCounts]   = useState({});   // orderId -> linked shipment count
+  const [shipmentsOrder,   setShipmentsOrder]   = useState(null); // order whose Linked Shipments modal is open
   const [lightboxFile,     setLightboxFile]     = useState(null);  // attachment lightbox
 
   // meta: populated from /clients, not from orders
@@ -1108,6 +1159,19 @@ export default function OrderTracker() {
     }
   };
 
+  // ── Shipment counts — powers the row-level Linked Shipments icon ──────────
+  // One-time fetch (shipments change far less often than portal messages),
+  // refreshed after closing the Linked Shipments modal in case anything
+  // changed in Courier Tracking meanwhile.
+  const fetchShipmentCounts = async () => {
+    try {
+      const { data } = await api.get('/orders/shipment-counts');
+      setShipmentCounts(data || {});
+    } catch (err) {
+      log.warn('Shipment counts fetch failed', err.message);
+    }
+  };
+
   // ── Bootstrap — runs once on mount ────────────────────────────────────────
   // All three functions are plain declarations above this effect,
   // so there is no TDZ issue. The empty dep array is intentional:
@@ -1117,6 +1181,7 @@ export default function OrderTracker() {
     initNotifications();
     fetchOrders();
     fetchClients();
+    fetchShipmentCounts();
     pollUnreadMessages();
     unreadPollTimer.current = setInterval(pollUnreadMessages, UNREAD_POLL_INTERVAL);
     return () => clearInterval(unreadPollTimer.current);
@@ -1149,6 +1214,7 @@ export default function OrderTracker() {
         o.clientName?.toLowerCase().includes(term) ||
         o.title?.toLowerCase().includes(term) ||
         o.invoiceNumber?.toLowerCase().includes(term) ||
+        o.quoteNumber?.toLowerCase().includes(term) ||
         o.refNumber?.toLowerCase().includes(term) ||
         o.orderPlacedBy?.toLowerCase().includes(term)
       );
@@ -1429,10 +1495,12 @@ export default function OrderTracker() {
 
   // ── Shared row props ───────────────────────────────────────────────────────
   const rowProps = {
-    loading, unreadCounts, sentLinks, copiedId,
+    loading, unreadCounts, sentLinks, copiedId, shipmentCounts,
     onRowClick:       loadOrderAttachments,
     onStartProject:   (order) => setQuotePrompt(order),
     onMarkComplete:   (order) => setCompletionPrompt(order),
+    onOpenTimeline:   (order) => setTimelineOrder(order),
+    onOpenShipments:  (order) => setShipmentsOrder(order),
     onOpenPortalChat: handleOpenPortalChat,
     onCopyLink:       handleCopyLink,
     onDelete:         deleteOrder,
@@ -1588,6 +1656,24 @@ export default function OrderTracker() {
               : Array.from(new Set(Object.values(meta.clientContacts).flat()))
             ).map(c => <option key={c} value={c}>{c}</option>)}
           </select>
+
+          {/* Manage Statements — canned timeline messages */}
+          <button
+            onClick={() => setTemplateMgrOpen(true)}
+            style={{
+              display: 'inline-flex', alignItems: 'center', gap: 6,
+              padding: '10px 14px', background: 'white',
+              border: `1px solid ${T.border}`, borderRadius: 3,
+              cursor: 'pointer', color: T.text,
+              fontFamily: jost, fontSize: 11, fontWeight: 400,
+              transition: 'border-color 0.2s, color 0.2s',
+            }}
+            onMouseEnter={e => { e.currentTarget.style.borderColor = T.gold; e.currentTarget.style.color = T.gold; }}
+            onMouseLeave={e => { e.currentTarget.style.borderColor = T.border; e.currentTarget.style.color = T.text; }}
+            title="Manage timeline statement templates"
+          >
+            <Settings size={13} /> Statements
+          </button>
 
           {/* Reset filters */}
           {(searchTerm || selectedClient || selectedContact) && (
@@ -1869,11 +1955,23 @@ export default function OrderTracker() {
                   </div>
                 </div>
 
-                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16, marginBottom: 16 }}>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: 16, marginBottom: 16 }}>
                   <div>
-                    <FieldLabel>{activeTab === 'ongoing' ? 'Quote Number' : 'Ref Number'}</FieldLabel>
+                    <FieldLabel>Ref Number</FieldLabel>
                     <FocusInput value={editOrder.refNumber || ''} readOnly />
                   </div>
+                  {(editOrder.quoteNumber || editOrder.status !== 'inquiry') && (
+                    <div>
+                      <FieldLabel>Quote Number</FieldLabel>
+                      <FocusInput value={editOrder.quoteNumber || '—'} readOnly />
+                    </div>
+                  )}
+                  {(editOrder.invoiceNumber || editOrder.status === 'completed') && (
+                    <div>
+                      <FieldLabel>Invoice Number</FieldLabel>
+                      <FocusInput value={editOrder.invoiceNumber || '—'} readOnly />
+                    </div>
+                  )}
                   <div>
                     <FieldLabel>Order Placed By</FieldLabel>
                     <FocusInput
@@ -1947,13 +2045,6 @@ export default function OrderTracker() {
                   </div>
                 </div>
 
-                {/* Linked shipments — product orders only */}
-                {editOrder.orderType !== 'offsite' && (
-                  <div style={{ marginBottom: 20 }}>
-                    <LinkedShipmentsPanel orderId={editOrder._id} />
-                  </div>
-                )}
-
                 {/* Footer actions */}
                 <div style={{
                   display: 'flex', justifyContent: 'flex-end', gap: 14,
@@ -1972,6 +2063,127 @@ export default function OrderTracker() {
           </div>
         </div>
       )}
+
+      {/* ════════════════════════════════════════════════════════════════════
+          TIMELINE MODAL — opened directly from the order row, no need to
+          go through Update Record first.
+      ════════════════════════════════════════════════════════════════════ */}
+      {timelineOrder && (
+        <div style={{
+          position: 'fixed', inset: 0,
+          background: 'rgba(14,21,32,0.78)', backdropFilter: 'blur(6px)',
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          padding: 24, zIndex: 50,
+        }}>
+          <div style={{
+            background: 'white', border: `1px solid ${T.border}`,
+            width: '100%', maxWidth: 640,
+            maxHeight: '88vh', overflowY: 'auto',
+            padding: '36px 36px 28px',
+          }}>
+            {/* Header */}
+            <div style={{
+              display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start',
+              marginBottom: 24, paddingBottom: 18, borderBottom: `1px solid ${T.border}`,
+            }}>
+              <div>
+                <p style={{
+                  fontFamily: jost, fontSize: 9, fontWeight: 400,
+                  letterSpacing: '0.28em', textTransform: 'uppercase',
+                  color: T.muted, marginBottom: 6,
+                }}>
+                  {timelineOrder.refNumber || `#${timelineOrder._id.slice(-6)}`}
+                </p>
+                <h2 style={{ fontFamily: serif, fontSize: 26, fontWeight: 300, color: T.navy, margin: 0 }}>
+                  {timelineOrder.title || 'Timeline'}
+                </h2>
+              </div>
+              <button
+                onClick={() => setTimelineOrder(null)}
+                style={{
+                  background: 'none', border: 'none', cursor: 'pointer',
+                  color: T.muted, fontSize: 20, lineHeight: 1, padding: 4,
+                }}
+              >
+                ✕
+              </button>
+            </div>
+
+            <OrderTimeline
+              order={timelineOrder}
+              onPosted={(newEvent) => {
+                setTimelineOrder(prev => (
+                  prev ? { ...prev, timeline: [...(prev.timeline || []), newEvent] } : prev
+                ));
+                setOrders(prev => prev.map(o => (
+                  o._id === timelineOrder._id
+                    ? { ...o, timeline: [...(o.timeline || []), newEvent] }
+                    : o
+                )));
+              }}
+            />
+          </div>
+        </div>
+      )}
+
+      {/* ════════════════════════════════════════════════════════════════════
+          LINKED SHIPMENTS MODAL — opened directly from the order row.
+          Sized larger than the other popups since the shipment table
+          carries a lot of columns/data.
+      ════════════════════════════════════════════════════════════════════ */}
+      {shipmentsOrder && (
+        <div style={{
+          position: 'fixed', inset: 0,
+          background: 'rgba(14,21,32,0.78)', backdropFilter: 'blur(6px)',
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          padding: 24, zIndex: 50,
+        }}>
+          <div style={{
+            background: 'white', border: `1px solid ${T.border}`,
+            width: '100%', maxWidth: 980,
+            maxHeight: '90vh', overflowY: 'auto',
+            padding: '36px 40px 32px',
+          }}>
+            {/* Header */}
+            <div style={{
+              display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start',
+              marginBottom: 24, paddingBottom: 18, borderBottom: `1px solid ${T.border}`,
+            }}>
+              <div>
+                <p style={{
+                  fontFamily: jost, fontSize: 9, fontWeight: 400,
+                  letterSpacing: '0.28em', textTransform: 'uppercase',
+                  color: T.muted, marginBottom: 6,
+                }}>
+                  {shipmentsOrder.refNumber || `#${shipmentsOrder._id.slice(-6)}`}
+                </p>
+                <h2 style={{ fontFamily: serif, fontSize: 26, fontWeight: 300, color: T.navy, margin: 0 }}>
+                  Linked Shipments — {shipmentsOrder.title || shipmentsOrder.clientName}
+                </h2>
+              </div>
+              <button
+                onClick={() => { setShipmentsOrder(null); fetchShipmentCounts(); }}
+                style={{
+                  background: 'none', border: 'none', cursor: 'pointer',
+                  color: T.muted, fontSize: 20, lineHeight: 1, padding: 4,
+                }}
+              >
+                ✕
+              </button>
+            </div>
+
+            <LinkedShipmentsPanel orderId={shipmentsOrder._id} />
+          </div>
+        </div>
+      )}
+
+      {/* ════════════════════════════════════════════════════════════════════
+          MANAGE STATEMENTS MODAL
+      ════════════════════════════════════════════════════════════════════ */}
+      <MessageTemplateManager
+        isOpen={templateMgrOpen}
+        onClose={() => setTemplateMgrOpen(false)}
+      />
 
       {/* ════════════════════════════════════════════════════════════════════
           NEW INQUIRY MODAL
@@ -2185,13 +2397,13 @@ export default function OrderTracker() {
                 fontFamily: jost, fontSize: 9, fontWeight: 400,
                 letterSpacing: '0.18em', textTransform: 'uppercase', color: T.muted,
               }}>
-                Assign a reference number to move to production
+                Assign a quote number to move to production
               </p>
             </div>
 
             <FocusInput
               inputRef={quoteInputRef}
-              placeholder="e.g. Q-2024-001"
+              placeholder="e.g. QT-26-27/0095"
               style={{ textAlign: 'center', fontWeight: 500, textTransform: 'uppercase', marginBottom: 20 }}
             />
 
@@ -2202,7 +2414,7 @@ export default function OrderTracker() {
               <GoldBtn
                 onClick={() => {
                   const val = quoteInputRef.current?.value?.trim();
-                  if (val) { updateOrder(quotePrompt._id, { status: 'ongoing', refNumber: val }); setQuotePrompt(null); }
+                  if (val) { updateOrder(quotePrompt._id, { status: 'ongoing', quoteNumber: val }); setQuotePrompt(null); }
                 }}
                 style={{ flex: 1, textAlign: 'center' }}
               >

@@ -607,7 +607,7 @@ const ProductList = () => {
       data.append('name',          formData.name);
       data.append('description',   formData.description);
       data.append('purchasePrice', formData.purchasePrice);
-      data.append('sellingPrice',  formData.sellingPrice);
+      data.append('sellingPrice',  calculateSellingPrice(formData.purchasePrice, formData.markupPercent));
       data.append('markupPercent', formData.markupPercent);
 
       // Read from ref — written synchronously in handleImageFileChange, survives re-renders
@@ -1022,6 +1022,9 @@ const ProductList = () => {
         .animate-modal-up { animation: modal-up 0.28s cubic-bezier(0.16,1,0.3,1) forwards; }
         .no-scrollbar::-webkit-scrollbar { display: none; }
         .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+        .no-spinner::-webkit-outer-spin-button,
+        .no-spinner::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+        .no-spinner { -moz-appearance: textfield; }
       `}</style>
 
       {/* ── Page header ──────────────────────────────────────────────────────── */}
@@ -1925,26 +1928,15 @@ const ProductList = () => {
                 />
               </div>
 
-              {/* Cost Price / Selling Price / Image */}
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 16 }}>
+              {/* Cost Price / Image */}
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
                 <div>
                   <FieldLabel>Cost Price (₹)</FieldLabel>
                   <input
                     type="number"
+                    className="no-spinner"
                     value={formData.purchasePrice}
                     onChange={e => setFormData(f => ({ ...f, purchasePrice: e.target.value }))}
-                    style={inputStyle()}
-                    onFocus={e => { e.currentTarget.style.borderColor = T.gold; }}
-                    onBlur={e => { e.currentTarget.style.borderColor = T.border; }}
-                  />
-                </div>
-                <div>
-                  <FieldLabel>Selling Price (₹) *</FieldLabel>
-                  <input
-                    type="number"
-                    required
-                    value={formData.sellingPrice}
-                    onChange={e => setFormData(f => ({ ...f, sellingPrice: e.target.value }))}
                     style={inputStyle()}
                     onFocus={e => { e.currentTarget.style.borderColor = T.gold; }}
                     onBlur={e => { e.currentTarget.style.borderColor = T.border; }}
