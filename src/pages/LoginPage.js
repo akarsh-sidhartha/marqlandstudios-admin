@@ -2,6 +2,24 @@ import React, { useState, useEffect } from 'react';
 import { useAuth } from '../context/AuthContext';
 import { BASE_URL } from '../api';
 
+// ── Partner routing guard ─────────────────────────────────────────────────────
+// Suppliers with role "partner" must never land on the internal admin app or any
+// marqlandstudios.com subdomain — they get bounced to the public partner portal.
+// (Primary enforcement lives server-side in authRoutes.js; this is a fast, purely
+// cosmetic client-side redirect for the case where the server-side check already
+// blocked the login and returned a `redirect` field on the error response.)
+const MARQLAND_ROOT_DOMAIN = 'marqlandstudios.com';
+const PARTNER_PORTAL_URL   = 'https://marqlandstudios.com/partner';
+
+const isMarqlandStudiosHost = (hostname = '') => {
+  const h = hostname.toLowerCase();
+  // Matches admin.marqlandstudios.com and any other subdomain (not the bare root).
+  // Deliberately excludes the bare root domain (marqlandstudios.com) — that's
+  // where the partner portal itself lives, so matching it here would block
+  // partners from logging in on the very page we redirect them to.
+  return h.endsWith(`.${MARQLAND_ROOT_DOMAIN}`);
+};
+
 // ── Reusable input field with optional eye toggle for passwords ───────────────
 const Field = ({ label, type = 'text', value, onChange, placeholder, required, disabled }) => {
   const [show, setShow] = React.useState(false);
@@ -154,8 +172,25 @@ const LoginPage = () => {
   // ── Handlers ──────────────────────────────────────────────────────────────────
   const handleLogin = async (e) => {
     e.preventDefault(); setError(''); setLoading(true);
-    try   { await login(loginEmail, loginPassword); }
-    catch (err) { setError(err.message); }
+    try {
+      // NOTE: `login()` is expected to resolve with the logged-in user object
+      // (e.g. `return data.user;` at the end of AuthContext's login function),
+      // and to reject with an Error that carries a `redirect` field when the
+      // server blocks the login for routing reasons (see authRoutes.js).
+      const user = await login(loginEmail, loginPassword);
+
+      if (user?.role === 'partner' && isMarqlandStudiosHost(window.location.hostname)) {
+        window.location.href = PARTNER_PORTAL_URL;
+        return;
+      }
+    } catch (err) {
+      if (err?.redirect) {
+        // Server-side guard already blocked this login and told us where to send them.
+        window.location.href = err.redirect;
+        return;
+      }
+      setError(err.message);
+    }
     finally { setLoading(false); }
   };
 

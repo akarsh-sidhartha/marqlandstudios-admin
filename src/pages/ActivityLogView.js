@@ -7,6 +7,7 @@ import {
   ChevronLeft, ChevronRight, CheckCircle, XCircle,
   Shield, Package, Users, CreditCard, Globe, Settings,
   LogIn, AlertTriangle, Download, Truck, Archive,
+  Layers, FileText, Handshake,
 } from 'lucide-react';
 
 const log = createLogger('ActivityLogView');
@@ -41,6 +42,9 @@ const CATEGORIES = [
   { key: 'logistics', label: 'Logistics', icon: Truck,     color: '#7a8a9a' },
   { key: 'portal',    label: 'Portal',    icon: Globe,     color: '#c47a30' },
   { key: 'finance',   label: 'Finance',   icon: CreditCard,color: '#7cac4a' },
+  { key: 'combos',    label: 'Combos',    icon: Layers,    color: '#c4708a' },
+  { key: 'suppliers', label: 'Suppliers', icon: Handshake, color: '#5a9a7a' },
+  { key: 'templates', label: 'Templates', icon: FileText,  color: '#9a7a4a' },
   { key: 'general',   label: 'General',   icon: Activity,  color: T.muted  },
 ];
 
@@ -73,6 +77,10 @@ const ACTION_LABELS = {
   CREATE_PORTAL:'Created portal',SEND_PORTAL_MSG:'Sent portal message',UPDATE_PORTAL_ITEMS:'Updated portal items',DELETE_PORTAL:'Deleted portal',PATCH_PORTAL:'Updated portal',
   PAYMENT_ACTION:'Payment tracker action',UPDATE_PAYMENT:'Updated payment record',DELETE_PAYMENT:'Deleted payment record',PATCH_PAYMENT:'Updated payment status',
   IMAGE_PROCESS:'Image processing task',
+  GENERATE_COMBOS:'Generated combos',DELETE_COMBO:'Deleted combo',
+  SUPPLIER_SUBMIT_PRODUCTS:'Submitted products for review',SUPPLIER_RESUBMIT_PRODUCT:'Resubmitted product',SUPPLIER_DELETE_PRODUCT:'Deleted product submission',
+  APPROVE_SUPPLIER_PRODUCT:'Approved supplier product',REJECT_SUPPLIER_PRODUCT:'Rejected supplier product',
+  CREATE_TEMPLATE:'Created statement template',UPDATE_TEMPLATE:'Updated statement template',DELETE_TEMPLATE:'Deleted statement template',
 };
 const actionLabel = (action) => ACTION_LABELS[action] || action?.replace(/_/g,' ')?.toLowerCase() || '—';
 

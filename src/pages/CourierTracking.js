@@ -161,6 +161,74 @@ const isDelayed = (shipment) => {
 const getApiError = (err) =>
   err?.response?.data?.message || err?.message || 'An unexpected error occurred.';
 
+// ─────────────────────────────────────────────────────────────────────────────
+// INPUT SANITIZATION
+// Defense-in-depth against script / markup injection via free-text fields.
+// React already escapes text when it renders (no dangerouslySetInnerHTML is
+// used in this file), so a stored "<script>" would not execute as HTML here —
+// but these fields are also read by other surfaces (emails, PDFs, other
+// admin tools, the backend itself) that may not escape the same way, so we
+// still strip markup at the point of entry rather than trust the render path.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** Max length applied to sanitized free-text fields, by field key. */
+const FIELD_MAX_LENGTHS = {
+  recipientName:    120,
+  phone:            24,
+  recipientAddress: 300,
+  trackingId:       40,
+  notes:            500,
+  partnerName:      80,
+  city:             80,
+  state:            80,
+};
+
+/**
+ * Strips HTML tags, inline event-handler attributes (onerror=, onclick=…),
+ * and script/vbscript/data URI schemes out of a plain-text value. None of
+ * the fields this is used on (names, addresses, phone, notes, tracking IDs)
+ * ever legitimately need to contain markup, so anything tag-like is removed
+ * outright rather than escaped. Safe to run on every keystroke and paste.
+ * @param {string} value
+ * @param {number} [maxLength] optional hard length cap
+ * @returns {string}
+ */
+const sanitizeText = (value, maxLength) => {
+  if (typeof value !== 'string' || !value) return value ?? '';
+  let clean = value
+    // Drop <script>...</script> blocks (and their contents) outright
+    .replace(/<script\b[^>]*>[\s\S]*?<\/script\s*>/gi, '')
+    // Strip any other HTML/XML-ish tags
+    .replace(/<\/?[a-zA-Z!][^>]*>/g, '')
+    // Neutralize any leftover angle brackets so a tag can't be reassembled
+    .replace(/[<>]/g, '')
+    // Strip dangerous URI schemes that could appear in pasted text
+    .replace(/\b(javascript|vbscript|data):/gi, '')
+    // Strip inline event-handler attribute patterns (onerror=, onclick=, …)
+    .replace(/\bon\w+\s*=/gi, '');
+  if (maxLength) clean = clean.slice(0, maxLength);
+  return clean;
+};
+
+/**
+ * Validates a user-supplied URL is safe to use as a link target — http(s)
+ * only. Returns '' for javascript:/data:/vbscript: schemes, malformed
+ * input, or anything else that isn't a plain web URL.
+ * @param {string} value
+ * @returns {string}
+ */
+const sanitizeUrl = (value) => {
+  if (typeof value !== 'string' || !value.trim()) return '';
+  const trimmed = value.trim();
+  try {
+    const parsed = new URL(trimmed, window.location.origin);
+    if (parsed.protocol === 'http:' || parsed.protocol === 'https:') return trimmed;
+  } catch {
+    // malformed URL — reject
+  }
+  return '';
+};
+
 /**
  * Resolve a status badge's inline style from the T token map.
  * @param {string} status
@@ -295,6 +363,186 @@ const DarkSelect = ({ style: extra = {}, children, ...props }) => {
     >
       {children}
     </select>
+  );
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ORDER PICKER HELPERS
+// Shared across every place an order needs to be searched/linked:
+//   · Only "inquiry" and "ongoing" orders are ever linkable — "completed"
+//     orders are excluded everywhere except the dedicated Completed tab
+//     inside LinkOrderModal / BulkOrderLinkModal.
+//   · Ongoing orders always list before inquiries.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** Best-effort extraction of the "order placed by" contact name. */
+const getOrderPerson = (o) => o?.personName || o?.contactName || o?.contact || '';
+
+const LINKABLE_STATUS_RANK = { ongoing: 0, inquiry: 1 };
+
+/** Inquiry + ongoing orders only, ongoing first. Never includes completed. */
+const getLinkableOrders = (orders = []) =>
+  [...orders]
+    .filter((o) => o.status === 'inquiry' || o.status === 'ongoing')
+    .sort((a, b) => (LINKABLE_STATUS_RANK[a.status] ?? 9) - (LINKABLE_STATUS_RANK[b.status] ?? 9));
+
+/** One year in ms, used to scope the Completed tab to the last year of orders. */
+const ONE_YEAR_MS = 365 * 24 * 60 * 60 * 1000;
+
+/**
+ * Orders for a given picker tab: 'inquiry' | 'ongoing' | 'completed'.
+ * Completed is scoped to the last 1 year (by completedAt/updatedAt/createdAt).
+ */
+const getOrdersForTab = (orders = [], tab) => {
+  if (tab === 'completed') {
+    const cutoff = Date.now() - ONE_YEAR_MS;
+    return orders.filter((o) => {
+      if (o.status !== 'completed') return false;
+      const ts = new Date(o.completedAt || o.updatedAt || o.createdAt || 0).getTime();
+      return Number.isFinite(ts) && ts >= cutoff;
+    });
+  }
+  return orders.filter((o) => o.status === tab);
+};
+
+/** "<ref/number> - <client> - <order placed by>" row label. */
+const formatOrderLabel = (o) => {
+  const person = getOrderPerson(o);
+  return `${o.refNumber || o._id.slice(-6)} - ${o.clientName || 'Unknown client'}${person ? ` - ${person}` : ''}`;
+};
+
+/**
+ * Searchable, typeahead order picker — a drop-in replacement for a plain
+ * <select> when choosing an order to link. Only lists inquiry/ongoing
+ * orders (ongoing first); completed orders are never selectable here.
+ */
+const OrderSearchSelect = ({
+  orders, value, onChange,
+  placeholder = '— Link order (assign later) —',
+  style: extra = {},
+}) => {
+  const [open, setOpen] = useState(false);
+  const [term, setTerm] = useState('');
+  const rootRef = useRef(null);
+
+  useEffect(() => {
+    const onDocClick = (e) => {
+      if (rootRef.current && !rootRef.current.contains(e.target)) {
+        setOpen(false);
+        setTerm('');
+      }
+    };
+    document.addEventListener('mousedown', onDocClick);
+    return () => document.removeEventListener('mousedown', onDocClick);
+  }, []);
+
+  const linkable = getLinkableOrders(orders);
+  const filtered = term
+    ? linkable.filter((o) => {
+        const blob = [o.refNumber, o.clientName, getOrderPerson(o)].filter(Boolean).join(' ').toLowerCase();
+        return blob.includes(term.toLowerCase());
+      })
+    : linkable;
+
+  const selected = orders.find((o) => o._id === value);
+
+  const pick = (id) => {
+    onChange(id);
+    setOpen(false);
+    setTerm('');
+  };
+
+  return (
+    <div ref={rootRef} style={{ position: 'relative', ...extra }}>
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        style={{
+          ...darkInput,
+          display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+          cursor: 'pointer', textAlign: 'left',
+          borderColor: open ? T.gold : '#2a3a52',
+          boxShadow: open ? `0 0 0 2px ${T.gold}14` : 'none',
+        }}
+      >
+        <span style={{
+          overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+          color: selected ? '#c8d8e8' : '#4a6080',
+        }}>
+          {selected ? formatOrderLabel(selected) : placeholder}
+        </span>
+        <Search size={12} style={{ color: '#4a6080', flexShrink: 0, marginLeft: 8 }} />
+      </button>
+
+      {open && (
+        <div style={{
+          position: 'absolute', zIndex: 30, top: '100%', left: 0, right: 0, marginTop: 4,
+          background: T.navyBg2, border: `1px solid ${T.gold}44`, borderRadius: 3,
+          boxShadow: '0 8px 24px rgba(0,0,0,0.45)', overflow: 'hidden',
+        }}>
+          <div style={{ padding: 8, borderBottom: '1px solid #1e2d40' }}>
+            <input
+              autoFocus
+              type="text"
+              value={term}
+              onChange={(e) => setTerm(e.target.value)}
+              placeholder="Search client, order placed by, ref…"
+              style={{ ...darkInput, padding: '6px 10px', fontSize: 12 }}
+            />
+          </div>
+          <div style={{ maxHeight: 220, overflowY: 'auto' }}>
+            <button
+              type="button"
+              onClick={() => pick('')}
+              style={{
+                width: '100%', textAlign: 'left', padding: '8px 12px',
+                background: !value ? `${T.gold}0a` : 'none', border: 'none',
+                borderBottom: '1px solid #1e2d40', cursor: 'pointer',
+                fontFamily: jost, fontSize: 12, fontWeight: 500, color: '#4a6080',
+              }}
+              onMouseEnter={(e) => { e.currentTarget.style.background = '#0d1c2c'; }}
+              onMouseLeave={(e) => { e.currentTarget.style.background = !value ? `${T.gold}0a` : 'none'; }}
+            >
+              {placeholder}
+            </button>
+            {filtered.length === 0 ? (
+              <div style={{ padding: '16px 12px', textAlign: 'center' }}>
+                <p style={{ fontFamily: jost, fontSize: 11, fontWeight: 300, color: '#3d5070', margin: 0 }}>
+                  No matching orders
+                </p>
+              </div>
+            ) : (
+              filtered.map((o) => (
+                <button
+                  key={o._id}
+                  type="button"
+                  onClick={() => pick(o._id)}
+                  style={{
+                    width: '100%', textAlign: 'left', padding: '8px 12px',
+                    background: value === o._id ? `${T.gold}0a` : 'none', border: 'none',
+                    borderBottom: '1px solid #1e2d40', cursor: 'pointer',
+                    display: 'flex', alignItems: 'center', gap: 8,
+                  }}
+                  onMouseEnter={(e) => { e.currentTarget.style.background = '#0d1c2c'; }}
+                  onMouseLeave={(e) => { e.currentTarget.style.background = value === o._id ? `${T.gold}0a` : 'none'; }}
+                >
+                  <span style={{
+                    width: 6, height: 6, borderRadius: '50%', flexShrink: 0,
+                    background: o.status === 'ongoing' ? '#6ab07a' : '#6a9abf',
+                  }} />
+                  <span style={{
+                    fontFamily: jost, fontSize: 12, fontWeight: 500, color: '#c8d8e8',
+                    overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                  }}>
+                    {formatOrderLabel(o)}
+                  </span>
+                </button>
+              ))
+            )}
+          </div>
+        </div>
+      )}
+    </div>
   );
 };
 
@@ -492,6 +740,12 @@ const ShippingPartnerModal = ({ onClose, partners, onSaved, showToast, confirm }
       logPartnerModal.warn('Save attempted with empty name');
       return;
     }
+    // Reject anything that isn't a plain http(s) URL — blocks javascript:/data:/vbscript: payloads
+    if (form.trackingUrl.trim() && !sanitizeUrl(form.trackingUrl)) {
+      logPartnerModal.warn('Save blocked: unsafe or malformed tracking URL', { trackingUrl: form.trackingUrl });
+      showToast('error', 'Tracking URL must be a valid http:// or https:// link');
+      return;
+    }
     setSaving(true);
     logPartnerModal.info(editId ? 'Updating partner' : 'Creating partner', { editId, name: form.name });
     try {
@@ -585,10 +839,10 @@ const ShippingPartnerModal = ({ onClose, partners, onSaved, showToast, confirm }
               <p style={{ fontFamily: jost, fontSize: 13, fontWeight: 500, color: '#c8d8e8', margin: 0 }}>
                 {partner.name}
               </p>
-              {partner.trackingUrl
+              {sanitizeUrl(partner.trackingUrl)
                 ? (
                   <a
-                    href={partner.trackingUrl} target="_blank" rel="noreferrer"
+                    href={sanitizeUrl(partner.trackingUrl)} target="_blank" rel="noopener noreferrer"
                     style={{
                       fontFamily: jost, fontSize: 10, color: `${T.gold}99`,
                       display: 'flex', alignItems: 'center', gap: 3,
@@ -655,14 +909,15 @@ const ShippingPartnerModal = ({ onClose, partners, onSaved, showToast, confirm }
         <Field label="Name *">
           <DarkInput
             value={form.name}
-            onChange={(e) => setField('name', e.target.value)}
+            onChange={(e) => setField('name', sanitizeText(e.target.value, FIELD_MAX_LENGTHS.partnerName))}
             placeholder="e.g. Blue Dart, DTDC"
+            maxLength={FIELD_MAX_LENGTHS.partnerName}
           />
         </Field>
         <Field label="Public Tracking URL (optional)">
           <DarkInput
             value={form.trackingUrl}
-            onChange={(e) => setField('trackingUrl', e.target.value)}
+            onChange={(e) => setField('trackingUrl', e.target.value.replace(/[<>]/g, ''))}
             placeholder="https://..."
           />
         </Field>
@@ -688,6 +943,8 @@ const EMPTY_SHIPMENT_FORM = (shipment, showOrderLink) => ({
   shippingPartner:    shipment?.shippingPartner  || '',
   status:             shipment?.status           || 'Pending',
   orderId:            shipment?.orderId          || '',
+  // Unlinked defaults to "Link order" (not Ad-hoc) — ad-hoc is only ever
+  // set via an explicit "Mark as Ad-hoc" action elsewhere.
   isAdhoc:            showOrderLink ? (shipment?.isAdhoc ?? false) : true,
   notes:              shipment?.notes            || '',
   assignedVendorId:   shipment?.vendorId         || '',
@@ -786,17 +1043,16 @@ const ShipmentModal = ({ shipment, orders, partners, vendors, showOrderLink, onS
           </Field>
           {showOrderLink && (
             <Field label="Linked Order (optional)">
-              <DarkSelect
+              <OrderSearchSelect
+                orders={orders}
                 value={form.orderId}
-                onChange={(e) => { setField('orderId', e.target.value); setField('isAdhoc', !e.target.value); }}
-              >
-                <option value="">— Ad-hoc / assign later —</option>
-                {orders.map((o) => (
-                  <option key={o._id} value={o._id}>
-                    {o.refNumber || o._id.slice(-6)} — {o.clientName}
-                  </option>
-                ))}
-              </DarkSelect>
+                onChange={(id) => {
+                  setField('orderId', id);
+                  // Leaving it unlinked just means "not linked yet" — it
+                  // still shows as "Link order", never auto-marked Ad-hoc.
+                  setField('isAdhoc', false);
+                }}
+              />
             </Field>
           )}
         </div>
@@ -806,15 +1062,17 @@ const ShipmentModal = ({ shipment, orders, partners, vendors, showOrderLink, onS
           <Field label="Recipient Name *">
             <DarkInput
               value={form.recipientName}
-              onChange={(e) => setField('recipientName', e.target.value)}
+              onChange={(e) => setField('recipientName', sanitizeText(e.target.value, FIELD_MAX_LENGTHS.recipientName))}
               placeholder="Full name"
+              maxLength={FIELD_MAX_LENGTHS.recipientName}
             />
           </Field>
           <Field label="Phone">
             <DarkInput
               value={form.phone}
-              onChange={(e) => setField('phone', e.target.value)}
+              onChange={(e) => setField('phone', sanitizeText(e.target.value, FIELD_MAX_LENGTHS.phone))}
               placeholder="Mobile number"
+              maxLength={FIELD_MAX_LENGTHS.phone}
             />
           </Field>
         </div>
@@ -822,9 +1080,10 @@ const ShipmentModal = ({ shipment, orders, partners, vendors, showOrderLink, onS
         <Field label="Delivery Address">
           <DarkTextarea
             value={form.recipientAddress}
-            onChange={(e) => setField('recipientAddress', e.target.value)}
+            onChange={(e) => setField('recipientAddress', sanitizeText(e.target.value, FIELD_MAX_LENGTHS.recipientAddress))}
             rows={2}
             placeholder="Full delivery address"
+            maxLength={FIELD_MAX_LENGTHS.recipientAddress}
           />
         </Field>
 
@@ -865,9 +1124,10 @@ const ShipmentModal = ({ shipment, orders, partners, vendors, showOrderLink, onS
           <Field label="Tracking / AWB">
             <DarkInput
               value={form.trackingId}
-              onChange={(e) => setField('trackingId', e.target.value)}
+              onChange={(e) => setField('trackingId', sanitizeText(e.target.value, FIELD_MAX_LENGTHS.trackingId))}
               placeholder="AWB / Tracking number"
               style={{ fontFamily: 'monospace' }}
+              maxLength={FIELD_MAX_LENGTHS.trackingId}
             />
           </Field>
           <Field label="Shipping Partner">
@@ -893,8 +1153,9 @@ const ShipmentModal = ({ shipment, orders, partners, vendors, showOrderLink, onS
           <Field label="Notes">
             <DarkInput
               value={form.notes}
-              onChange={(e) => setField('notes', e.target.value)}
+              onChange={(e) => setField('notes', sanitizeText(e.target.value, FIELD_MAX_LENGTHS.notes))}
               placeholder="Optional note"
+              maxLength={FIELD_MAX_LENGTHS.notes}
             />
           </Field>
         </div>
@@ -965,18 +1226,20 @@ const ExcelImportModal = ({ orders, partners, vendors, showOrderLink, onImported
         const parsed = dataRows
           .map((r) => ({
             shippedDate:      new Date().toISOString().slice(0, 10),
-            recipientName:    colMap.nameIdx  >= 0 ? String(r[colMap.nameIdx]  || '').trim() : '',
-            recipientAddress: colMap.addrIdx  >= 0 ? String(r[colMap.addrIdx]  || '').trim() : '',
-            city:             colMap.cityIdx  >= 0 ? String(r[colMap.cityIdx]  || '').trim() : '',
-            state:            colMap.stateIdx >= 0 ? String(r[colMap.stateIdx] || '').trim() : '',
+            recipientName:    colMap.nameIdx  >= 0 ? sanitizeText(String(r[colMap.nameIdx]  || '').trim(), FIELD_MAX_LENGTHS.recipientName)    : '',
+            recipientAddress: colMap.addrIdx  >= 0 ? sanitizeText(String(r[colMap.addrIdx]  || '').trim(), FIELD_MAX_LENGTHS.recipientAddress) : '',
+            city:             colMap.cityIdx  >= 0 ? sanitizeText(String(r[colMap.cityIdx]  || '').trim(), FIELD_MAX_LENGTHS.city)             : '',
+            state:            colMap.stateIdx >= 0 ? sanitizeText(String(r[colMap.stateIdx] || '').trim(), FIELD_MAX_LENGTHS.state)            : '',
             country:          'India',
-            phone:            colMap.phoneIdx >= 0 ? String(r[colMap.phoneIdx] || '').trim() : '',
+            phone:            colMap.phoneIdx >= 0 ? sanitizeText(String(r[colMap.phoneIdx] || '').trim(), FIELD_MAX_LENGTHS.phone)             : '',
             trackingId:       '',
             shippingPartner:  '',
             status:           'Pending',
             notes:            '',
             orderId:          linkedOrderId    || null,
-            isAdhoc:          !linkedOrderId,
+            // Not yet linked ≠ ad-hoc; unlinked rows show "Link order" until
+            // someone explicitly marks them ad-hoc.
+            isAdhoc:          false,
             vendorId:         assignedVendorId || null,
             vendorName:       vendor ? (vendor.name || vendor.email) : '',
           }))
@@ -1105,20 +1368,16 @@ const ExcelImportModal = ({ orders, partners, vendors, showOrderLink, onImported
               fontFamily: jost, fontSize: 9, fontWeight: 400,
               letterSpacing: '0.2em', textTransform: 'uppercase', color: `${T.gold}66`,
             }}>Link all to:</span>
-            <DarkSelect
+            <OrderSearchSelect
+              orders={orders}
               value={linkedOrderId}
-              onChange={(e) => {
-                setLinkedOrderId(e.target.value);
-                setRows((prev) => prev.map((row) => ({ ...row, orderId: e.target.value || null, isAdhoc: !e.target.value })));
-                logExcelModal.debug('Linked order applied to all rows', { orderId: e.target.value });
+              onChange={(id) => {
+                setLinkedOrderId(id);
+                setRows((prev) => prev.map((row) => ({ ...row, orderId: id || null, isAdhoc: false })));
+                logExcelModal.debug('Linked order applied to all rows', { orderId: id });
               }}
-              style={{ minWidth: 200, padding: '6px 10px' }}
-            >
-              <option value="">— Ad-hoc (assign later) —</option>
-              {orders.map((o) => (
-                <option key={o._id} value={o._id}>{o.refNumber || o._id.slice(-6)} — {o.clientName}</option>
-              ))}
-            </DarkSelect>
+              style={{ minWidth: 260 }}
+            />
           </div>
         )}
       </div>
@@ -1157,21 +1416,21 @@ const ExcelImportModal = ({ orders, partners, vendors, showOrderLink, onImported
                 <tr key={i} style={{ background: T.navyBg2 }}>
                   {[
                     <input type="date" value={r.shippedDate} onChange={(e) => updateRow(i, 'shippedDate', e.target.value)} style={{ ...cellInput, width: 130 }} />,
-                    <input value={r.recipientName} onChange={(e) => updateRow(i, 'recipientName', e.target.value)} style={{ ...cellInput, width: 130 }} />,
-                    <input value={r.recipientAddress} onChange={(e) => updateRow(i, 'recipientAddress', e.target.value)} style={{ ...cellInput, width: 150 }} />,
+                    <input value={r.recipientName} onChange={(e) => updateRow(i, 'recipientName', sanitizeText(e.target.value, FIELD_MAX_LENGTHS.recipientName))} maxLength={FIELD_MAX_LENGTHS.recipientName} style={{ ...cellInput, width: 130 }} />,
+                    <input value={r.recipientAddress} onChange={(e) => updateRow(i, 'recipientAddress', sanitizeText(e.target.value, FIELD_MAX_LENGTHS.recipientAddress))} maxLength={FIELD_MAX_LENGTHS.recipientAddress} style={{ ...cellInput, width: 150 }} />,
                     <select value={r.country} onChange={(e) => updateRow(i, 'country', e.target.value)} style={{ ...cellInput, width: 100, cursor: 'pointer' }}>
                       {COUNTRIES.map((c) => <option key={c} value={c}>{c}</option>)}
                     </select>,
-                    <input value={r.city} onChange={(e) => updateRow(i, 'city', e.target.value)} style={{ ...cellInput, width: 100 }} />,
-                    <input value={r.state} onChange={(e) => updateRow(i, 'state', e.target.value)} style={{ ...cellInput, width: 100 }} />,
-                    <input value={r.phone} onChange={(e) => updateRow(i, 'phone', e.target.value)} style={{ ...cellInput, width: 115 }} />,
+                    <input value={r.city} onChange={(e) => updateRow(i, 'city', sanitizeText(e.target.value, FIELD_MAX_LENGTHS.city))} maxLength={FIELD_MAX_LENGTHS.city} style={{ ...cellInput, width: 100 }} />,
+                    <input value={r.state} onChange={(e) => updateRow(i, 'state', sanitizeText(e.target.value, FIELD_MAX_LENGTHS.state))} maxLength={FIELD_MAX_LENGTHS.state} style={{ ...cellInput, width: 100 }} />,
+                    <input value={r.phone} onChange={(e) => updateRow(i, 'phone', sanitizeText(e.target.value, FIELD_MAX_LENGTHS.phone))} maxLength={FIELD_MAX_LENGTHS.phone} style={{ ...cellInput, width: 115 }} />,
                     ...(showOrderLink ? [
                       <select value={r.vendorId || ''} onChange={(e) => { const v = vendors.find((v) => v._id === e.target.value); updateRow(i, 'vendorId', e.target.value || null); updateRow(i, 'vendorName', v ? (v.name || v.email) : ''); }} style={{ ...cellInput, width: 130, cursor: 'pointer' }}>
                         <option value="">— unassigned —</option>
                         {vendors.map((v) => <option key={v._id} value={v._id}>{v.name || v.email}</option>)}
                       </select>,
                     ] : []),
-                    <input value={r.trackingId} onChange={(e) => updateRow(i, 'trackingId', e.target.value)} placeholder="AWB #" style={{ ...cellInput, width: 115, fontFamily: 'monospace' }} />,
+                    <input value={r.trackingId} onChange={(e) => updateRow(i, 'trackingId', sanitizeText(e.target.value, FIELD_MAX_LENGTHS.trackingId))} maxLength={FIELD_MAX_LENGTHS.trackingId} placeholder="AWB #" style={{ ...cellInput, width: 115, fontFamily: 'monospace' }} />,
                     <select value={r.shippingPartner} onChange={(e) => updateRow(i, 'shippingPartner', e.target.value)} style={{ ...cellInput, width: 115, cursor: 'pointer' }}>
                       <option value="">— Select —</option>
                       {partners.map((p) => <option key={p._id} value={p.name}>{p.name}</option>)}
@@ -1217,31 +1476,87 @@ const ExcelImportModal = ({ orders, partners, vendors, showOrderLink, onImported
 };
 
 
+/**
+ * Tab bar for order-picker modals — Inquiries / Ongoing / Completed
+ * (Completed is scoped to the last 1 year via getOrdersForTab).
+ */
+const ORDER_PICKER_TABS = [
+  { key: 'inquiry',   label: 'Inquiries' },
+  { key: 'ongoing',   label: 'Ongoing' },
+  { key: 'completed', label: 'Completed' },
+];
+
+const OrderPickerTabs = ({ tab, onChange, counts = {} }) => (
+  <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+    {ORDER_PICKER_TABS.map((t) => {
+      const isActive = tab === t.key;
+      return (
+        <button
+          key={t.key}
+          type="button"
+          onClick={() => onChange(t.key)}
+          style={{
+            display: 'inline-flex', alignItems: 'center', gap: 6,
+            padding: '6px 14px', borderRadius: 3,
+            border: `1px solid ${isActive ? `${T.gold}66` : '#1e2d40'}`,
+            background: isActive ? `${T.gold}14` : 'transparent',
+            cursor: 'pointer',
+            fontFamily: jost, fontSize: 9, fontWeight: isActive ? 600 : 400,
+            letterSpacing: '0.15em', textTransform: 'uppercase',
+            color: isActive ? T.gold : '#4a6080',
+            transition: 'all 0.2s',
+          }}
+        >
+          {t.label}
+          {typeof counts[t.key] === 'number' && (
+            <span style={{
+              fontSize: 9, fontWeight: 700, padding: '1px 6px', borderRadius: 10,
+              background: isActive ? `${T.gold}22` : '#0a1018',
+              color: isActive ? T.gold : '#4a6080',
+              border: `1px solid ${isActive ? `${T.gold}33` : '#1e2d40'}`,
+            }}>{counts[t.key]}</span>
+          )}
+        </button>
+      );
+    })}
+  </div>
+);
+
+
 // ─────────────────────────────────────────────────────────────────────────────
 // BULK ORDER LINK MODAL
 // ─────────────────────────────────────────────────────────────────────────────
 
 const BulkOrderLinkModal = ({ selectedIds, orders, onDone, onClose, showToast }) => {
   const [orderId, setOrderId]           = useState('');
+  const [tab, setTab]                   = useState('ongoing');
   const [search, setSearch]             = useState('');
   const [filterClient, setFilterClient] = useState('');
   const [filterPerson, setFilterPerson] = useState('');
   const [saving, setSaving]             = useState(false);
   const [searchFocused, setSearchFocused] = useState(false);
 
-  // Only inquiry + ongoing
-  const eligibleOrders = orders.filter((o) => o.status === 'inquiry' || o.status === 'ongoing');
-  const clientNames = [...new Set(eligibleOrders.map((o) => o.clientName).filter(Boolean))].sort();
+  // Orders scoped to the active tab (Inquiries / Ongoing / Completed-last-year)
+  const tabOrders = getOrdersForTab(orders, tab);
+
+  const tabCounts = {
+    inquiry:   getOrdersForTab(orders, 'inquiry').length,
+    ongoing:   getOrdersForTab(orders, 'ongoing').length,
+    completed: getOrdersForTab(orders, 'completed').length,
+  };
+
+  // Client selected → every person linked to that client (within this tab) shows up here.
+  const clientNames = [...new Set(tabOrders.map((o) => o.clientName).filter(Boolean))].sort();
   const personNames = [...new Set(
-    eligibleOrders
+    tabOrders
       .filter((o) => !filterClient || o.clientName === filterClient)
-      .map((o) => o.personName || o.contactName || o.contact)
+      .map((o) => getOrderPerson(o))
       .filter(Boolean)
   )].sort();
 
-  const filtered = eligibleOrders.filter((o) => {
+  const filtered = tabOrders.filter((o) => {
     if (filterClient && o.clientName !== filterClient) return false;
-    const person = o.personName || o.contactName || o.contact || '';
+    const person = getOrderPerson(o);
     if (filterPerson && person !== filterPerson) return false;
     if (search) {
       const term = search.toLowerCase();
@@ -1250,6 +1565,12 @@ const BulkOrderLinkModal = ({ selectedIds, orders, onDone, onClose, showToast })
     }
     return true;
   });
+
+  const switchTab = (nextTab) => {
+    setTab(nextTab);
+    setFilterClient('');
+    setFilterPerson('');
+  };
 
   const apply = async () => {
     setSaving(true);
@@ -1278,8 +1599,9 @@ const BulkOrderLinkModal = ({ selectedIds, orders, onDone, onClose, showToast })
 
   const statusBadge = (status) => {
     const map = {
-      inquiry: { bg: '#1a2a3e', color: '#6a9abf', label: 'Inquiry' },
-      ongoing: { bg: '#1a2e1a', color: '#6ab07a', label: 'Ongoing' },
+      inquiry:   { bg: '#1a2a3e', color: '#6a9abf', label: 'Inquiry' },
+      ongoing:   { bg: '#1a2e1a', color: '#6ab07a', label: 'Ongoing' },
+      completed: { bg: '#2a2a2a', color: '#9a9a9a', label: 'Completed' },
     };
     const s = map[status] || map.inquiry;
     return (
@@ -1314,6 +1636,9 @@ const BulkOrderLinkModal = ({ selectedIds, orders, onDone, onClose, showToast })
           <strong style={{ color: '#c8d8e8', fontWeight: 600 }}>{selectedIds.length}</strong>{' '}
           selected shipment{selectedIds.length !== 1 ? 's' : ''} to an order.
         </p>
+
+        {/* Inquiries / Ongoing / Completed tabs */}
+        <OrderPickerTabs tab={tab} onChange={switchTab} counts={tabCounts} />
 
         {/* Filters */}
         <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
@@ -1351,7 +1676,7 @@ const BulkOrderLinkModal = ({ selectedIds, orders, onDone, onClose, showToast })
         </div>
 
         <p style={{ fontFamily: jost, fontSize: 9, fontWeight: 400, letterSpacing: '0.2em', textTransform: 'uppercase', color: `${T.gold}66`, margin: 0 }}>
-          {filtered.length} order{filtered.length !== 1 ? 's' : ''} · inquiry & ongoing only
+          {filtered.length} order{filtered.length !== 1 ? 's' : ''} · {tab === 'completed' ? 'completed, last 1 year' : tab}
         </p>
       </div>
 
@@ -1382,7 +1707,7 @@ const BulkOrderLinkModal = ({ selectedIds, orders, onDone, onClose, showToast })
           </div>
         ) : (
           filtered.map((o) => {
-            const person = o.personName || o.contactName || o.contact || '';
+            const person = getOrderPerson(o);
             const isSelected = orderId === o._id;
             return (
               <button
@@ -1411,7 +1736,7 @@ const BulkOrderLinkModal = ({ selectedIds, orders, onDone, onClose, showToast })
                   </div>
                   <p style={{ fontFamily: jost, fontSize: 12, fontWeight: 500, color: '#c8d8e8', margin: 0 }}>
                     {o.clientName}
-                    {person && <span style={{ color: '#4a6080', fontWeight: 300 }}> · {person}</span>}
+                    {person && <span style={{ color: '#4a6080', fontWeight: 300 }}> - {person}</span>}
                   </p>
                 </div>
               </button>
@@ -1430,27 +1755,34 @@ const BulkOrderLinkModal = ({ selectedIds, orders, onDone, onClose, showToast })
 // ─────────────────────────────────────────────────────────────────────────────
 
 const LinkOrderModal = ({ shipmentId, shipmentRecipient, orders, onAssigned, onClose, showToast }) => {
+  const [tab, setTab]               = useState('ongoing');
   const [search, setSearch]         = useState('');
   const [filterClient, setFilterClient] = useState('');
   const [filterPerson, setFilterPerson] = useState('');
   const [saving, setSaving]         = useState(false);
   const [searchFocused, setSearchFocused] = useState(false);
 
-  // Only show inquiry + ongoing orders
-  const eligibleOrders = orders.filter((o) => o.status === 'inquiry' || o.status === 'ongoing');
+  // Orders scoped to the active tab (Inquiries / Ongoing / Completed-last-year)
+  const tabOrders = getOrdersForTab(orders, tab);
 
-  // Unique client names and person names from eligible orders
-  const clientNames = [...new Set(eligibleOrders.map((o) => o.clientName).filter(Boolean))].sort();
+  const tabCounts = {
+    inquiry:   getOrdersForTab(orders, 'inquiry').length,
+    ongoing:   getOrdersForTab(orders, 'ongoing').length,
+    completed: getOrdersForTab(orders, 'completed').length,
+  };
+
+  // Client selected → every person linked to that client (within this tab) shows up here.
+  const clientNames = [...new Set(tabOrders.map((o) => o.clientName).filter(Boolean))].sort();
   const personNames = [...new Set(
-    eligibleOrders
+    tabOrders
       .filter((o) => !filterClient || o.clientName === filterClient)
-      .map((o) => o.personName || o.contactName || o.contact)
+      .map((o) => getOrderPerson(o))
       .filter(Boolean)
   )].sort();
 
-  const filtered = eligibleOrders.filter((o) => {
+  const filtered = tabOrders.filter((o) => {
     if (filterClient && o.clientName !== filterClient) return false;
-    const person = o.personName || o.contactName || o.contact || '';
+    const person = getOrderPerson(o);
     if (filterPerson && person !== filterPerson) return false;
     if (search) {
       const term = search.toLowerCase();
@@ -1459,6 +1791,12 @@ const LinkOrderModal = ({ shipmentId, shipmentRecipient, orders, onAssigned, onC
     }
     return true;
   });
+
+  const switchTab = (nextTab) => {
+    setTab(nextTab);
+    setFilterClient('');
+    setFilterPerson('');
+  };
 
   const assign = async (orderId) => {
     setSaving(true);
@@ -1484,8 +1822,9 @@ const LinkOrderModal = ({ shipmentId, shipmentRecipient, orders, onAssigned, onC
 
   const statusBadge = (status) => {
     const map = {
-      inquiry: { bg: '#1a2a3e', color: '#6a9abf', label: 'Inquiry' },
-      ongoing: { bg: '#1a2e1a', color: '#6ab07a', label: 'Ongoing' },
+      inquiry:   { bg: '#1a2a3e', color: '#6a9abf', label: 'Inquiry' },
+      ongoing:   { bg: '#1a2e1a', color: '#6ab07a', label: 'Ongoing' },
+      completed: { bg: '#2a2a2a', color: '#9a9a9a', label: 'Completed' },
     };
     const s = map[status] || map.inquiry;
     return (
@@ -1539,6 +1878,9 @@ const LinkOrderModal = ({ shipmentId, shipmentRecipient, orders, onAssigned, onC
           </div>
         )}
 
+        {/* Inquiries / Ongoing / Completed tabs */}
+        <OrderPickerTabs tab={tab} onChange={switchTab} counts={tabCounts} />
+
         {/* Filters row */}
         <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
           {/* Search */}
@@ -1573,7 +1915,8 @@ const LinkOrderModal = ({ shipmentId, shipmentRecipient, orders, onAssigned, onC
             )}
           </div>
 
-          {/* Client filter */}
+          {/* Client filter — selecting a client narrows the Person filter to
+              only the people linked to that client */}
           <DarkSelect
             value={filterClient}
             onChange={(e) => { setFilterClient(e.target.value); setFilterPerson(''); }}
@@ -1600,7 +1943,7 @@ const LinkOrderModal = ({ shipmentId, shipmentRecipient, orders, onAssigned, onC
           letterSpacing: '0.2em', textTransform: 'uppercase',
           color: `${T.gold}66`, margin: 0,
         }}>
-          {filtered.length} order{filtered.length !== 1 ? 's' : ''} · inquiry & ongoing only
+          {filtered.length} order{filtered.length !== 1 ? 's' : ''} · {tab === 'completed' ? 'completed, last 1 year' : tab}
         </p>
       </div>
 
@@ -1614,7 +1957,7 @@ const LinkOrderModal = ({ shipmentId, shipmentRecipient, orders, onAssigned, onC
           </div>
         ) : (
           filtered.map((o) => {
-            const person = o.personName || o.contactName || o.contact || '';
+            const person = getOrderPerson(o);
             return (
               <button
                 key={o._id}
@@ -1644,7 +1987,7 @@ const LinkOrderModal = ({ shipmentId, shipmentRecipient, orders, onAssigned, onC
                   </div>
                   <p style={{ fontFamily: jost, fontSize: 12, fontWeight: 500, color: '#c8d8e8', margin: 0, lineHeight: 1.3 }}>
                     {o.clientName}
-                    {person && <span style={{ color: '#4a6080', fontWeight: 300 }}> · {person}</span>}
+                    {person && <span style={{ color: '#4a6080', fontWeight: 300 }}> - {person}</span>}
                   </p>
                   {o.title && (
                     <p style={{ fontFamily: jost, fontSize: 10, fontWeight: 300, color: '#3d5070', margin: '2px 0 0', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
@@ -1817,10 +2160,10 @@ const ShipmentRow = memo(({
               }}>
                 {shipment.trackingId}
               </span>
-              {partnerObj?.trackingUrl && (
+              {sanitizeUrl(partnerObj?.trackingUrl) && (
                 <a
-                  href={partnerObj.trackingUrl}
-                  target="_blank" rel="noreferrer"
+                  href={sanitizeUrl(partnerObj.trackingUrl)}
+                  target="_blank" rel="noopener noreferrer"
                   title={`Open ${partnerObj.name} portal — copy tracking number: ${shipment.trackingId}`}
                   style={{ color: T.muted, display: 'flex', transition: 'color 0.2s' }}
                   onMouseEnter={e => e.currentTarget.style.color = T.gold}
