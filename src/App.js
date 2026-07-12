@@ -5,11 +5,19 @@
  * (navy sidebar, gold accents, Cormorant Garamond / Jost, grain texture).
  *
  * All routing logic, permission checks and auth flow are unchanged.
- * Only visual treatment of Sidebar + AppShell wrapper has changed.
+ *
+ * Route-level code-splitting: every page/route component below is loaded via
+ * React.lazy() instead of a static import, so the initial bundle only ships
+ * App shell + whichever single route the user actually lands on — not all 20+
+ * page files (some of which are 100–200KB of source each). PageLoader (already
+ * built and already used as the "Authenticating…" fallback) doubles as the
+ * Suspense fallback. LoginPage stays a static import since it's rendered
+ * synchronously outside of <Routes> and is on the critical path for almost
+ * every visitor — lazy-loading it would add Suspense boundaries for no benefit.
  * ─────────────────────────────────────────────────────────────────────────────
  */
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, Suspense, lazy } from 'react';
 import {
   BrowserRouter as Router,
   Routes,
@@ -46,28 +54,29 @@ import { AppPopupStyles }        from './components/AppPopups';
 import { PageLoader }            from './components/PageLoader';
 import { createLogger }          from './utils/logger';
 
-import LoginPage           from './pages/LoginPage';
-import UserManagement      from './pages/UserManagement';
-import PublicAdminPortal   from './pages/public-site/AdminView';
-import ChangePassword      from './pages/ChangePassword';
-import ProductList         from './pages/ProductList';
-import VendorList          from './pages/VendorList';
-import ClientList          from './pages/ClientList';
-import SavedCatalogues     from './pages/SavedCatalogues';
-import CatalogueBuilder    from './components/CatalogueBuilder';
-import OffsiteBuilder      from './components/OffsiteBuilder';
-import PropertyList        from './pages/PropertyList';
-import OffsiteCatalogues   from './pages/OffsiteCatalogues';
-import MarqlandLetterHead  from './pages/MarqlandLetterHead';
-import OrderTracker        from './pages/OrderTracker';
-import SamplesProvided     from './pages/SamplesProvided';
-import SourcingHub         from './pages/SourcingHub';
-import PaymentTracker      from './pages/PaymentTracker';
-import ClientPortalView    from './pages/ClientPortalView';
-import ActivityLogView     from './pages/ActivityLogView';
-import TrendingProducts    from './pages/TrendingProducts';
-import CourierTracking     from './pages/CourierTracking';
-import LeadScout           from './pages/LeadScout';
+import LoginPage from './pages/LoginPage';
+
+const UserManagement      = lazy(() => import('./pages/UserManagement'));
+const PublicAdminPortal   = lazy(() => import('./pages/public-site/AdminView'));
+const ChangePassword      = lazy(() => import('./pages/ChangePassword'));
+const ProductList         = lazy(() => import('./pages/ProductList'));
+const VendorList          = lazy(() => import('./pages/VendorList'));
+const ClientList          = lazy(() => import('./pages/ClientList'));
+const SavedCatalogues     = lazy(() => import('./pages/SavedCatalogues'));
+const CatalogueBuilder    = lazy(() => import('./components/CatalogueBuilder'));
+const OffsiteBuilder      = lazy(() => import('./components/OffsiteBuilder'));
+const PropertyList        = lazy(() => import('./pages/PropertyList'));
+const OffsiteCatalogues   = lazy(() => import('./pages/OffsiteCatalogues'));
+const MarqlandLetterHead  = lazy(() => import('./pages/MarqlandLetterHead'));
+const OrderTracker        = lazy(() => import('./pages/OrderTracker'));
+const SamplesProvided     = lazy(() => import('./pages/SamplesProvided'));
+const SourcingHub         = lazy(() => import('./pages/SourcingHub'));
+const PaymentTracker      = lazy(() => import('./pages/PaymentTracker'));
+const ClientPortalView    = lazy(() => import('./pages/ClientPortalView'));
+const ActivityLogView     = lazy(() => import('./pages/ActivityLogView'));
+const TrendingProducts    = lazy(() => import('./pages/TrendingProducts'));
+const CourierTracking     = lazy(() => import('./pages/CourierTracking'));
+const LeadScout           = lazy(() => import('./pages/LeadScout'));
 
 const log = createLogger('App');
 
@@ -605,10 +614,12 @@ const AppShell = () => {
   const PUBLIC_PREFIXES = ['/p/', '/respond/'];
   if (PUBLIC_PREFIXES.some((p) => window.location.pathname.startsWith(p))) {
     return (
-      <Routes>
-        <Route path="/p/:slug"     element={<ClientPortalView />} />
-        <Route path="/respond/:id" element={<SourcingHub />}      />
-      </Routes>
+      <Suspense fallback={<PageLoader />}>
+        <Routes>
+          <Route path="/p/:slug"     element={<ClientPortalView />} />
+          <Route path="/respond/:id" element={<SourcingHub />}      />
+        </Routes>
+      </Suspense>
     );
   }
 
@@ -626,43 +637,45 @@ const AppShell = () => {
     }}>
       <Sidebar />
       <main style={{ flex: 1, overflowY: 'auto', height: '100vh' }}>
-        <Routes>
-          {/* ── Orders & Tracking ── */}
-          <Route path="/"                 element={<ProtectedRoute routeKey="Order Tracker"><OrderTracker /></ProtectedRoute>} />
-          <Route path="/courier-tracking" element={<ProtectedRoute routeKey="Courier Tracking"><CourierTracking /></ProtectedRoute>} />
-          <Route path="/sourcinghub"      element={<ProtectedRoute routeKey="Sourcing Hub"><SourcingHub /></ProtectedRoute>} />
+        <Suspense fallback={<PageLoader />}>
+          <Routes>
+            {/* ── Orders & Tracking ── */}
+            <Route path="/"                 element={<ProtectedRoute routeKey="Order Tracker"><OrderTracker /></ProtectedRoute>} />
+            <Route path="/courier-tracking" element={<ProtectedRoute routeKey="Courier Tracking"><CourierTracking /></ProtectedRoute>} />
+            <Route path="/sourcinghub"      element={<ProtectedRoute routeKey="Sourcing Hub"><SourcingHub /></ProtectedRoute>} />
 
-          {/* ── Gifting ── */}
-          <Route path="/products"          element={<ProtectedRoute routeKey="Products"><ProductList /></ProtectedRoute>} />
-          <Route path="/samplesprovided"   element={<ProtectedRoute routeKey="Samples Provided"><SamplesProvided /></ProtectedRoute>} />
-          <Route path="/savedcatalogues"   element={<ProtectedRoute routeKey="Saved Catalogues"><SavedCatalogues /></ProtectedRoute>} />
-          <Route path="/builder"           element={<ProtectedRoute routeKey="Saved Catalogues"><CatalogueBuilder /></ProtectedRoute>} />
-          <Route path="/trending-products" element={<ProtectedRoute routeKey="Trending Products"><TrendingProducts /></ProtectedRoute>} />
+            {/* ── Gifting ── */}
+            <Route path="/products"          element={<ProtectedRoute routeKey="Products"><ProductList /></ProtectedRoute>} />
+            <Route path="/samplesprovided"   element={<ProtectedRoute routeKey="Samples Provided"><SamplesProvided /></ProtectedRoute>} />
+            <Route path="/savedcatalogues"   element={<ProtectedRoute routeKey="Saved Catalogues"><SavedCatalogues /></ProtectedRoute>} />
+            <Route path="/builder"           element={<ProtectedRoute routeKey="Saved Catalogues"><CatalogueBuilder /></ProtectedRoute>} />
+            <Route path="/trending-products" element={<ProtectedRoute routeKey="Trending Products"><TrendingProducts /></ProtectedRoute>} />
 
-          {/* ── Documentation ── */}
-          <Route path="/paymenttracker"     element={<ProtectedRoute routeKey="Payment Tracker"><PaymentTracker /></ProtectedRoute>} />
-          <Route path="/vendors"            element={<ProtectedRoute routeKey="Vendors"><VendorList /></ProtectedRoute>} />
-          <Route path="/clients"            element={<ProtectedRoute routeKey="Clients"><ClientList /></ProtectedRoute>} />
-          <Route path="/MarqlandLetterHead" element={<ProtectedRoute routeKey="Letter Head"><MarqlandLetterHead /></ProtectedRoute>} />
+            {/* ── Documentation ── */}
+            <Route path="/paymenttracker"     element={<ProtectedRoute routeKey="Payment Tracker"><PaymentTracker /></ProtectedRoute>} />
+            <Route path="/vendors"            element={<ProtectedRoute routeKey="Vendors"><VendorList /></ProtectedRoute>} />
+            <Route path="/clients"            element={<ProtectedRoute routeKey="Clients"><ClientList /></ProtectedRoute>} />
+            <Route path="/MarqlandLetterHead" element={<ProtectedRoute routeKey="Letter Head"><MarqlandLetterHead /></ProtectedRoute>} />
 
-          {/* ── Offsites ── */}
-          <Route path="/properties"     element={<ProtectedRoute routeKey="Property List"><PropertyList /></ProtectedRoute>} />
-          <Route path="/saved-offsites" element={<ProtectedRoute routeKey="Saved Offsites"><OffsiteCatalogues /></ProtectedRoute>} />
-          <Route path="/offsite-builder" element={<ProtectedRoute routeKey="Saved Offsites"><OffsiteBuilder /></ProtectedRoute>} />
+            {/* ── Offsites ── */}
+            <Route path="/properties"     element={<ProtectedRoute routeKey="Property List"><PropertyList /></ProtectedRoute>} />
+            <Route path="/saved-offsites" element={<ProtectedRoute routeKey="Saved Offsites"><OffsiteCatalogues /></ProtectedRoute>} />
+            <Route path="/offsite-builder" element={<ProtectedRoute routeKey="Saved Offsites"><OffsiteBuilder /></ProtectedRoute>} />
 
-          {/* ── Admin ── */}
-          <Route path="/admin/users"       element={<ProtectedRoute routeKey="User Management"><UserManagement /></ProtectedRoute>} />
-          <Route path="/admin/logs"        element={<ProtectedRoute routeKey="Activity Logs"><ActivityLogView /></ProtectedRoute>} />
-          <Route path="/public-site-admin" element={<ProtectedRoute routeKey="User Management"><PublicAdminPortal /></ProtectedRoute>} />
-          <Route path="/admin/lead-scout"  element={<ProtectedRoute routeKey="Lead Scout"><LeadScout /></ProtectedRoute>} />
+            {/* ── Admin ── */}
+            <Route path="/admin/users"       element={<ProtectedRoute routeKey="User Management"><UserManagement /></ProtectedRoute>} />
+            <Route path="/admin/logs"        element={<ProtectedRoute routeKey="Activity Logs"><ActivityLogView /></ProtectedRoute>} />
+            <Route path="/public-site-admin" element={<ProtectedRoute routeKey="User Management"><PublicAdminPortal /></ProtectedRoute>} />
+            <Route path="/admin/lead-scout"  element={<ProtectedRoute routeKey="Lead Scout"><LeadScout /></ProtectedRoute>} />
 
-          {/* ── All users ── */}
-          <Route path="/change-password" element={<ChangePassword />} />
+            {/* ── All users ── */}
+            <Route path="/change-password" element={<ChangePassword />} />
 
-          {/* ── Public (accessible when logged in too) ── */}
-          <Route path="/p/:slug"     element={<ClientPortalView />} />
-          <Route path="/respond/:id" element={<SourcingHub />}      />
-        </Routes>
+            {/* ── Public (accessible when logged in too) ── */}
+            <Route path="/p/:slug"     element={<ClientPortalView />} />
+            <Route path="/respond/:id" element={<SourcingHub />}      />
+          </Routes>
+        </Suspense>
       </main>
     </div>
   );

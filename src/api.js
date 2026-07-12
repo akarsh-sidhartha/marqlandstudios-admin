@@ -2,8 +2,10 @@
  * src/api.js
  * ─────────────────────────────────────────────────────────────────────────────
  * Single source of truth for all API communication in the Marqland Studios
- * admin app. Replaces both the old api.js and baseurl.js — import everything
- * you need from here.
+ * admin app, AND the single source of truth for the access token / refresh
+ * flow. AuthContext.js no longer implements its own competing HTTP client —
+ * it delegates all network calls to `api` and reads/writes the token via the
+ * exports below, so there is exactly one refresh-token flow in the app.
  *
  * BASE URL priority order:
  *  1. REACT_APP_API_URL env var   (set in .env / .env.production)
@@ -14,11 +16,16 @@
  *
  * Named exports
  * ─────────────
- *  BASE_URL   — fully-qualified API base including /api suffix
- *               e.g. "http://localhost:5000/api"
- *  API_ROOT   — server root without /api suffix
- *               e.g. "http://localhost:5000"  — use to build static asset URLs
- *  getBaseUrl — @deprecated, kept for backward compat
+ *  BASE_URL          — fully-qualified API base including /api suffix
+ *  API_ROOT           — server root without /api suffix
+ *  getBaseUrl          — @deprecated, kept for backward compat
+ *  getAccessToken      — current in-memory access token (or null)
+ *  setAccessToken      — set the in-memory access token (used by AuthContext after login/refresh)
+ *  clearAccessToken    — drop the in-memory access token
+ *  getCachedUser/setCachedUser/clearCachedUser — cached profile for instant UI paint on reload
+ *                         (display data only — never a credential, safe to keep in localStorage)
+ *  refreshAccessToken  — exchanges the httpOnly refresh-token cookie for a new access token.
+ *                         Single-flight: concurrent callers share one in-flight request.
  *
  * Default export
  * ──────────────
@@ -26,13 +33,24 @@
  *               api.get('/products')
  *               api.post('/vendors', payload)
  *
+ * Token storage — SECURITY NOTE
+ * ──────────────────────────────
+ *  The access token lives ONLY in memory (a module-level variable, never
+ *  localStorage), so it's naturally cleared on tab close/reload and can't be
+ *  read by an XSS payload trawling storage. The refresh token never reaches
+ *  the browser's JS at all — the backend sets it as an httpOnly, Secure,
+ *  SameSite cookie on /auth/login and /auth/refresh (see authRoutes.js), so
+ *  neither this file nor any component can read or leak it. On page load,
+ *  AuthContext calls refreshAccessToken() to silently re-establish an access
+ *  token using that cookie before rendering the authenticated app.
+ *
  * Features
  * ─────────
  *  • Structured logging on every request / response / error
  *  • Request timing (ms) logged on each response
  *  • Automatic JWT attach via request interceptor
  *  • Silent token-refresh on 401 with a single-flight queue
- *  • Force-logout when refresh fails or no refresh token exists
+ *  • Force-logout when refresh fails or no refresh-token cookie exists
  * ─────────────────────────────────────────────────────────────────────────────
  */
 
@@ -92,21 +110,33 @@ export const getBaseUrl = () => BASE_URL;
 const api = axios.create({
   baseURL: BASE_URL,
   timeout: 30_000,
+  // Required so the browser attaches the httpOnly refresh_token cookie on
+  // /auth/refresh and /auth/logout calls. Harmless on every other call — the
+  // cookie is path-scoped to /api/auth server-side, so it's simply omitted
+  // from requests to any other endpoint regardless of this flag.
+  withCredentials: true,
 });
 
-// ─── Token helpers ────────────────────────────────────────────────────────────
-const TOKEN_KEY   = 'marqland_token';
-const REFRESH_KEY = 'marqland_refresh';
-const USER_KEY    = 'marqland_user';
+// ─── Access-token store (in-memory only — see file header) ───────────────────
+let accessToken = null;
 
-const getToken        = ()      => localStorage.getItem(TOKEN_KEY);
-const getRefreshToken = ()      => localStorage.getItem(REFRESH_KEY);
-const setToken        = (token) => localStorage.setItem(TOKEN_KEY, token);
-const clearAuth       = ()      => {
-  localStorage.removeItem(TOKEN_KEY);
-  localStorage.removeItem(REFRESH_KEY);
-  localStorage.removeItem(USER_KEY);
+export const getAccessToken   = () => accessToken;
+export const setAccessToken   = (token) => { accessToken = token; };
+export const clearAccessToken = () => { accessToken = null; };
+
+// ─── Cached user profile (display data only, not a credential) ───────────────
+const USER_KEY = 'marqland_user';
+
+export const getCachedUser = () => {
+  try {
+    const raw = localStorage.getItem(USER_KEY);
+    return raw ? JSON.parse(raw) : null;
+  } catch {
+    return null;
+  }
 };
+export const setCachedUser   = (user) => localStorage.setItem(USER_KEY, JSON.stringify(user));
+export const clearCachedUser = () => localStorage.removeItem(USER_KEY);
 
 const bearerHeader = (token) => `Bearer ${token}`;
 
@@ -115,9 +145,8 @@ api.interceptors.request.use(
   (config) => {
     config.metadata = { startTime: Date.now() };
 
-    const token = getToken();
-    if (token) {
-      config.headers['Authorization'] = bearerHeader(token);
+    if (accessToken) {
+      config.headers['Authorization'] = bearerHeader(accessToken);
     }
 
     log.debug(`→ ${config.method?.toUpperCase()} ${config.url}`, {
@@ -132,7 +161,7 @@ api.interceptors.request.use(
   }
 );
 
-// ─── Response interceptor — log timing, handle 401 / refresh ─────────────────
+// ─── Silent token refresh — single source of truth for the whole app ─────────
 let isRefreshing = false;
 let failedQueue  = [];   // [{ resolve, reject }]
 
@@ -145,10 +174,64 @@ const flushQueue = (error, token = null) => {
 
 const forceLogout = () => {
   log.warn('Session expired — forcing logout');
-  clearAuth();
+  clearAccessToken();
+  clearCachedUser();
   window.location.href = '/';
 };
 
+/**
+ * Exchanges the httpOnly refresh_token cookie for a new access token.
+ * Single-flight: if a refresh is already in progress, concurrent callers
+ * park on the same result instead of firing their own request (this is what
+ * prevents the old two-refresh-implementations race between api.js and
+ * AuthContext.js — there is now exactly one implementation, called from both
+ * places).
+ *
+ * @param {object}  [opts]
+ * @param {boolean} [opts.silent=false] — when true, a failed refresh does NOT
+ *   force a redirect to "/". Used for the initial page-load session check,
+ *   where "no valid cookie" just means "not logged in yet", not "session
+ *   expired mid-use" — without this flag every anonymous page load would
+ *   bounce through forceLogout's window.location.href = '/' redirect.
+ */
+export const refreshAccessToken = async ({ silent = false } = {}) => {
+  if (isRefreshing) {
+    return new Promise((resolve, reject) => {
+      failedQueue.push({ resolve, reject });
+    });
+  }
+
+  isRefreshing = true;
+  log.info('Attempting silent token refresh…');
+
+  try {
+    const { data } = await axios.post(
+      `${BASE_URL}/auth/refresh`,
+      {},
+      { withCredentials: true }
+    );
+
+    const newToken = data.accessToken;
+    setAccessToken(newToken);
+
+    log.info('Token refreshed successfully');
+    flushQueue(null, newToken);
+    return newToken;
+
+  } catch (refreshError) {
+    log.error('Token refresh failed', refreshError.message);
+    flushQueue(refreshError, null);
+    clearAccessToken();
+    clearCachedUser();
+    if (!silent) forceLogout();
+    throw refreshError;
+
+  } finally {
+    isRefreshing = false;
+  }
+};
+
+// ─── Response interceptor — log timing, handle 401 / refresh ─────────────────
 api.interceptors.response.use(
   (response) => {
     const ms = Date.now() - (response.config.metadata?.startTime ?? Date.now());
@@ -172,50 +255,12 @@ api.interceptors.response.use(
     if (status === 401 && !originalRequest._retry) {
       originalRequest._retry = true;
 
-      if (isRefreshing) {
-        // Park this request until the in-flight refresh resolves
-        log.debug('Token refresh in progress — queuing request', originalRequest.url);
-        return new Promise((resolve, reject) => {
-          failedQueue.push({ resolve, reject });
-        }).then((newToken) => {
-          originalRequest.headers['Authorization'] = bearerHeader(newToken);
-          return api(originalRequest);
-        });
-      }
-
-      const refreshToken = getRefreshToken();
-      if (!refreshToken) {
-        log.warn('No refresh token found — logging out');
-        forceLogout();
-        return Promise.reject(error);
-      }
-
-      isRefreshing = true;
-      log.info('Attempting silent token refresh…');
-
       try {
-        // Plain axios call to avoid re-triggering this interceptor
-        const { data } = await axios.post(`${BASE_URL}/auth/refresh`, {
-          refreshToken,
-        });
-
-        const newToken = data.accessToken;
-        setToken(newToken);
-        api.defaults.headers.common['Authorization'] = bearerHeader(newToken);
-        originalRequest.headers['Authorization']     = bearerHeader(newToken);
-
-        log.info('Token refreshed successfully');
-        flushQueue(null, newToken);
+        const newToken = await refreshAccessToken();
+        originalRequest.headers['Authorization'] = bearerHeader(newToken);
         return api(originalRequest);
-
       } catch (refreshError) {
-        log.error('Token refresh failed', refreshError.message);
-        flushQueue(refreshError, null);
-        forceLogout();
         return Promise.reject(refreshError);
-
-      } finally {
-        isRefreshing = false;
       }
     }
 

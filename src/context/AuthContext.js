@@ -1,119 +1,132 @@
 import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
-import { API_ROOT } from '../api';
+import api, {
+  setAccessToken,
+  clearAccessToken,
+  getCachedUser,
+  setCachedUser,
+  clearCachedUser,
+  refreshAccessToken,
+} from '../api';
 
 const AuthContext = createContext(null);
 
 export const AuthProvider = ({ children }) => {
   const [user, setUser] = useState(null);
-  const [loading, setLoading] = useState(true); // true while we validate stored token
+  const [loading, setLoading] = useState(true); // true while we validate the session
 
   // ── On mount: restore session then fetch fresh user data from /api/auth/me ──
   // This ensures allowedRoutes changes made by admin are picked up on next login.
+  //
+  // There's no access token to read from storage anymore (it lives in memory
+  // only and is gone after a reload) — instead we silently exchange the
+  // httpOnly refresh-token cookie for a fresh one via refreshAccessToken().
+  // `silent: true` means "no cookie" is treated as "not logged in yet" rather
+  // than "session expired", so anonymous visitors don't get bounced through a
+  // forced redirect on first load.
   useEffect(() => {
-    const token = localStorage.getItem('marqland_token');
-    if (!token) { setLoading(false); return; }
+    let cancelled = false;
 
-    // Optimistically restore from storage so UI shows instantly
-    const stored = localStorage.getItem('marqland_user');
-    if (stored) {
-      try { setUser(JSON.parse(stored)); } catch { /* ignore */ }
-    }
+    // Optimistically restore the cached profile so the UI paints instantly.
+    const stored = getCachedUser();
+    if (stored) setUser(stored);
 
-    // Then fetch fresh data from server to pick up any allowedRoutes changes
-    fetch(`${API_ROOT}/api/auth/me`, {
-      headers: { Authorization: `Bearer ${token}` },
-    })
-      .then(res => res.ok ? res.json() : null)
-      .then(fresh => {
-        if (fresh) {
-          setUser(fresh);
-          localStorage.setItem('marqland_user', JSON.stringify(fresh));
-        }
+    refreshAccessToken({ silent: true })
+      .then(() => api.get('/auth/me'))
+      .then(({ data: fresh }) => {
+        if (cancelled) return;
+        setUser(fresh);
+        setCachedUser(fresh);
       })
-      .catch(() => { /* network error — keep using stored user */ })
-      .finally(() => setLoading(false));
+      .catch(() => {
+        // No valid session (never logged in, or refresh token expired/rotated
+        // out from another session). Don't keep showing a stale cached user.
+        if (cancelled) return;
+        clearCachedUser();
+        setUser(null);
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+
+    return () => { cancelled = true; };
   }, []);
 
-  // ── Attach token to every fetch call ─────────────────────────────────────
+  // ── Legacy fetch-shaped request helper ───────────────────────────────────
+  // Kept for backward compatibility with any existing call sites written
+  // against the old `authFetch(url, options) => Response`-like contract
+  // (e.g. `const res = await authFetch('/api/products'); const data = await
+  // res.json();`). Internally it now just delegates to `api` (the single
+  // axios client), so there is exactly one request pipeline, one token store,
+  // and one refresh implementation in the app — this no longer runs its own
+  // independent 401/refresh logic that could race with api.js's.
+  //
+  // ASSUMPTION: existing call sites pass a `/api/...`-prefixed path, matching
+  // this file's own previous internal convention (`${API_ROOT}${url}`). That
+  // leading `/api` is stripped below before delegating to `api`, whose
+  // baseURL already includes `/api`. Verify with a repo-wide search for
+  // `authFetch(` before relying on this in production — see the review notes.
   const authFetch = useCallback(async (url, options = {}) => {
-    let token = localStorage.getItem('marqland_token');
+    const path = url.replace(/^\/api(?=\/|$)/, '');
 
-    const makeRequest = async (t) => {
-      return fetch(`${API_ROOT}${url}`, {
-        ...options,
-        headers: {
-          'Content-Type': 'application/json',
-          ...(options.headers || {}),
-          Authorization: `Bearer ${t}`,
-        },
-      });
-    };
-
-    let res = await makeRequest(token);
-
-    // If access token expired, try refresh
-    if (res.status === 401) {
-      const refreshToken = localStorage.getItem('marqland_refresh');
-      if (refreshToken) {
-        try {
-          const refreshRes = await fetch(`${API_ROOT}/api/auth/refresh`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ refreshToken }),
-          });
-
-          if (refreshRes.ok) {
-            const { accessToken } = await refreshRes.json();
-            localStorage.setItem('marqland_token', accessToken);
-            res = await makeRequest(accessToken); // Retry original request
-          } else {
-            // Refresh also failed — force logout
-            logout();
-          }
-        } catch {
-          logout();
-        }
-      } else {
-        logout();
-      }
+    let data;
+    if (options.body) {
+      try { data = JSON.parse(options.body); } catch { data = options.body; }
     }
 
-    return res;
-  }, []); // eslint-disable-line
+    try {
+      const response = await api.request({
+        url:    path,
+        method: options.method || 'GET',
+        data,
+        headers: options.headers,
+      });
+      return {
+        ok:     true,
+        status: response.status,
+        json:   async () => response.data,
+        text:   async () => JSON.stringify(response.data),
+      };
+    } catch (err) {
+      const response = err.response;
+      return {
+        ok:     false,
+        status: response?.status ?? 0,
+        json:   async () => response?.data ?? { message: err.message },
+        text:   async () => JSON.stringify(response?.data ?? { message: err.message }),
+      };
+    }
+  }, []);
 
   // ── Login ─────────────────────────────────────────────────────────────────
   const login = async (email, password) => {
-    const res = await fetch(`${API_ROOT}/api/auth/login`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ email, password }),
-    });
+    try {
+      const { data } = await api.post('/auth/login', { email, password });
 
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.message || 'Login failed');
-
-    localStorage.setItem('marqland_token', data.accessToken);
-    localStorage.setItem('marqland_refresh', data.refreshToken);
-    localStorage.setItem('marqland_user', JSON.stringify(data.user));
-    setUser(data.user);
-    return data.user;
+      setAccessToken(data.accessToken);
+      setCachedUser(data.user);
+      setUser(data.user);
+      return data.user;
+    } catch (err) {
+      const payload = err.response?.data;
+      const loginError = new Error(payload?.message || 'Login failed');
+      // Preserve the server-side partner-routing redirect (see authRoutes.js)
+      // so LoginPage's existing `if (err?.redirect)` handling keeps working.
+      if (payload?.redirect) loginError.redirect = payload.redirect;
+      throw loginError;
+    }
   };
 
   // ── Logout ────────────────────────────────────────────────────────────────
   const logout = useCallback(async () => {
     try {
-      const token = localStorage.getItem('marqland_token');
-      if (token) {
-        await fetch(`${API_ROOT}/api/auth/logout`, {
-          method: 'POST',
-          headers: { Authorization: `Bearer ${token}` },
-        });
-      }
+      // Uses the current in-memory access token (attached automatically by
+      // api.js's request interceptor) and clears the refresh_token cookie
+      // server-side.
+      await api.post('/auth/logout');
     } catch { /* silent fail */ }
 
-    localStorage.removeItem('marqland_token');
-    localStorage.removeItem('marqland_refresh');
-    localStorage.removeItem('marqland_user');
+    clearAccessToken();
+    clearCachedUser();
     setUser(null);
   }, []);
 
@@ -156,17 +169,10 @@ export const AuthProvider = ({ children }) => {
 
   // ── Manually refresh current user from server (call after admin saves routes) ──
   const refreshUser = useCallback(async () => {
-    const token = localStorage.getItem('marqland_token');
-    if (!token) return;
     try {
-      const res = await fetch(`${API_ROOT}/api/auth/me`, {
-        headers: { Authorization: `Bearer ${token}` },
-      });
-      if (res.ok) {
-        const fresh = await res.json();
-        setUser(fresh);
-        localStorage.setItem('marqland_user', JSON.stringify(fresh));
-      }
+      const { data: fresh } = await api.get('/auth/me');
+      setUser(fresh);
+      setCachedUser(fresh);
     } catch { /* silent */ }
   }, []);
 

@@ -1,6 +1,9 @@
 import React, { useState, useEffect } from 'react';
 import { useAuth } from '../context/AuthContext';
-import { BASE_URL } from '../api';
+import api from '../api';
+import { createLogger } from '../utils/logger';
+
+const log = createLogger('LoginPage');
 
 // ── Partner routing guard ─────────────────────────────────────────────────────
 // Suppliers with role "partner" must never land on the internal admin app or any
@@ -147,12 +150,11 @@ const LoginPage = () => {
     if (!inviteToken) return;
     const verify = async () => {
       try {
-        console.log('🔵 Verifying invite token:', inviteToken);
-        const res  = await fetch(`${BASE_URL}/auth/invite/verify?token=${inviteToken}`);
-        const data = await res.json();
-        console.log('✅ Invite verification response:', res.status, data);
-        
-        if (res.ok && data.valid) {
+        log.debug('Verifying invite token', inviteToken);
+        const { data } = await api.get('/auth/invite/verify', { params: { token: inviteToken } });
+        log.info('Invite verification response', data);
+
+        if (data.valid) {
           setEmail(data.email);
           window.history.replaceState(null, '', window.location.pathname + window.location.hash.split('?')[0]);
           setInviteValid(true);
@@ -161,9 +163,9 @@ const LoginPage = () => {
           setInviteError(data.message || 'Invalid invite link.');
         }
       } catch (err) {
-        console.error('🔴 Invite verification error:', err);
+        log.error('Invite verification error', err.message);
         setInviteValid(false);
-        setInviteError('Could not verify invite. Please check your connection.');
+        setInviteError(err.response?.data?.message || 'Could not verify invite. Please check your connection.');
       }
     };
     verify();
@@ -200,18 +202,12 @@ const LoginPage = () => {
     if (password.length < 8)  return setError('Password must be at least 8 characters.');
     setLoading(true);
     try {
-      const res  = await fetch(`${BASE_URL}/auth/register`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name, email, password }),
-      });
-      const data = await res.json();
-      console.log('✅ Self-register response:', res.status, data);
-      if (!res.ok) throw new Error(data.message || 'Registration failed');
+      const { data } = await api.post('/auth/register', { name, email, password });
+      log.info('Self-register response', data);
       setMode('success');
-    } catch (err) { 
-      console.error('🔴 Self-register error:', err);
-      setError(err.message); 
+    } catch (err) {
+      log.error('Self-register error', err.message);
+      setError(err.response?.data?.message || 'Registration failed');
     }
     finally { setLoading(false); }
   };
@@ -222,20 +218,13 @@ const LoginPage = () => {
     if (password.length < 8)  return setError('Password must be at least 8 characters.');
     setLoading(true);
     try {
-      console.log('🔵 Submitting invite registration:', { token: inviteToken, name });
-      const res  = await fetch(`${BASE_URL}/auth/invite/register`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ token: inviteToken, name, password }),
-      });
-      const data = await res.json();
-      console.log('✅ Invite register response:', res.status, data);
-      
-      if (!res.ok) throw new Error(data.message || 'Registration failed');
+      log.debug('Submitting invite registration', { token: inviteToken, name });
+      const { data } = await api.post('/auth/invite/register', { token: inviteToken, name, password });
+      log.info('Invite register response', data);
       setMode('success');
-    } catch (err) { 
-      console.error('🔴 Invite register error:', err);
-      setError(err.message); 
+    } catch (err) {
+      log.error('Invite register error', err.message);
+      setError(err.response?.data?.message || 'Registration failed');
     }
     finally { setLoading(false); }
   };
@@ -244,15 +233,11 @@ const LoginPage = () => {
   const handleForgot = async (e) => {
     e.preventDefault(); setError(''); setLoading(true);
     try {
-      const res  = await fetch(`${BASE_URL}/auth/forgot-password`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email: forgotEmail }),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.message || 'Request failed.');
+      await api.post('/auth/forgot-password', { email: forgotEmail });
       setForgotSent(true);
-    } catch (err) { setError(err.message); }
+    } catch (err) {
+      setError(err.response?.data?.message || 'Request failed.');
+    }
     finally { setLoading(false); }
   };
 
@@ -263,17 +248,13 @@ const LoginPage = () => {
     if (resetNewPass !== resetConfirm) return setError('Passwords do not match.');
     setLoading(true);
     try {
-      const res  = await fetch(`${BASE_URL}/auth/reset-password`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ token: resetToken, newPassword: resetNewPass }),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.message || 'Reset failed.');
+      await api.post('/auth/reset-password', { token: resetToken, newPassword: resetNewPass });
       // Clear the token from URL
       window.history.replaceState(null, '', window.location.pathname + window.location.hash.split('?')[0]);
       setMode('reset-success');
-    } catch (err) { setError(err.message); }
+    } catch (err) {
+      setError(err.response?.data?.message || 'Reset failed.');
+    }
     finally { setLoading(false); }
   };
 
