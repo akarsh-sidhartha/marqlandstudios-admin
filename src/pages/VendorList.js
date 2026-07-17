@@ -5,7 +5,7 @@ import { SkeletonList } from '../components/PageLoader';
 import {
   Download, Plus, Search, ChevronDown, ChevronRight,
   Paperclip, FileText, Image as ImageIcon, Video, X, Building2,
-  MessageSquare, // Added for WhatsApp context
+  Star, ArrowUpRight, Globe, Loader2, MessageSquare,
 } from 'lucide-react';
 import { INDIA_STATES, CITIES_BY_STATE, SearchableSelect } from '../utils/indiaLocations';
 
@@ -75,11 +75,15 @@ const FocusTextarea = ({ value, onChange, placeholder, rows = 3 }) => {
 };
 
 // ── Sub Category autocomplete input ──────────────────────────────────────────
+// Renders a plain text input; when the user types, shows a dropdown of
+// previously-used sub categories that match. Clicking a suggestion fills
+// the field. Pressing Escape or clicking outside closes the dropdown.
 const SubCategoryInput = ({ value, onChange, suggestions = [], placeholder }) => {
   const [focused,  setFocused]  = useState(false);
   const [open,     setOpen]     = useState(false);
   const containerRef            = useRef(null);
 
+  // Filter suggestions: match typed text (case-insensitive), exclude exact match
   const filtered = useMemo(() => {
     if (!value.trim()) return suggestions;
     const q = value.toLowerCase();
@@ -88,6 +92,7 @@ const SubCategoryInput = ({ value, onChange, suggestions = [], placeholder }) =>
 
   const showDropdown = open && filtered.length > 0;
 
+  // Close on outside click
   useEffect(() => {
     const handler = (e) => {
       if (containerRef.current && !containerRef.current.contains(e.target)) {
@@ -156,45 +161,205 @@ const fmtSize = (bytes = 0) =>
     ? `${Math.round(bytes / 1024)} KB`
     : `${(bytes / 1_048_576).toFixed(1)} MB`;
 
+/**
+ * Returns the URL to use for displaying / downloading a media item.
+ *
+ * OneDrive items (storage === 'onedrive') must go through our backend proxy
+ * at /api/vendors/media/:vendorId/:mediaId because SharePoint webUrls require
+ * a logged-in Microsoft session (401 otherwise).
+ *
+ * R2 items are public CDN URLs — use directly.
+ * ?download=1 tells the proxy to set Content-Disposition: attachment.
+ */
+const mediaUrl = (vendorId, m, download = false) => {
+  if (!m) return '';
+  if (m.storage !== 'onedrive') return m.url || '';   // R2 or legacy local — direct
+  // Path is relative to the axios api baseURL (already includes /api)
+  // so we use /vendors/... not /api/vendors/...
+  const base = `/vendors/media/${vendorId}/${m._id}`;
+  return download ? `${base}?download=1` : base;
+};
+
+// Store reference to WhatsApp Web window for reuse if user switches to web
+let whatsappWebWindow = null;
+
+/**
+ * openWhatsApp — Opens WhatsApp with a phone number.
+ * 
+ * Priority Logic:
+ * 1. If WhatsApp Web window is already open → Reuse it (bring to front & update contact)
+ * 2. Try to launch WhatsApp App using deeplink (Windows/Mac/Linux installed app)
+ * 3. No automatic fallback to web - app is the priority!
+ * 
+ * On Windows with WhatsApp app installed and running:
+ * ✓ App deeplink launches the app immediately
+ * ✓ App is brought to foreground  
+ * ✓ Contact is ready for messaging
+ * ✗ No web tabs opened automatically
+ * 
+ * If you prefer to use WhatsApp Web when app isn't available,
+ * you can manually open web.whatsapp.com
+ * 
+ * Sanitizes phone number to remove non-digit characters.
+ */
+const openWhatsApp = (phoneNumber) => {
+  if (!phoneNumber) {
+    alert('No phone number available');
+    return;
+  }
+
+  // Sanitize phone number: remove everything except digits and +
+  const sanitized = phoneNumber.replace(/[^\d+]/g, '');
+  
+  if (!sanitized) {
+    alert('Invalid phone number');
+    return;
+  }
+
+  const whatsappWebUrl = `https://web.whatsapp.com/send?phone=${sanitized}`;
+  
+  // ===== CHECK: Is WhatsApp Web already open in a window? =====
+  // If yes, reuse that window
+  if (whatsappWebWindow && !whatsappWebWindow.closed) {
+    try {
+      whatsappWebWindow.location.href = whatsappWebUrl;
+      whatsappWebWindow.focus();
+      return;  // ← EXIT: Using existing web window
+    } catch (e) {
+      // Window reference is stale, continue to try app
+      whatsappWebWindow = null;
+    }
+  }
+  
+  // ===== TRY: Launch WhatsApp App (Primary) =====
+  // On Windows/Mac/Linux, this will launch the app if installed
+  const appDeeplink = `whatsapp://send?phone=${sanitized}`;
+  
+  // Create an invisible iframe and trigger the deeplink through it
+  // This prevents page navigation while still launching the app
+  const iframe = document.createElement('iframe');
+  iframe.style.display = 'none';
+  document.body.appendChild(iframe);
+  
+  try {
+    iframe.src = appDeeplink;
+  } catch (e) {
+    // Continue even if there's an error
+  }
+  
+  // Clean up iframe after a brief moment
+  setTimeout(() => {
+    try {
+      document.body.removeChild(iframe);
+    } catch (e) {
+      // Already removed, that's OK
+    }
+  }, 100);
+  
+  // If the app is installed and registered, it will now open
+  // No automatic fallback to web - app is the priority!
+};
+
+/**
+ * useAuthBlob — fetches a URL and converts the response to a blob object URL.
+ * /vendors/media/* is a public proxy endpoint (auth is handled server-side via
+ * the Microsoft Graph bearer token), so we use plain fetch — no JWT header needed.
+ * The blob object URL is revoked on unmount to avoid memory leaks.
+ * Returns { src, loading, error }.
+ */
+const useAuthBlob = (url) => {
+  const [src,     setSrc]     = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [error,   setError]   = useState(false);
+
+  useEffect(() => {
+    if (!url) { setLoading(false); return; }
+    let objectUrl = null;
+    let cancelled = false;
+
+    setLoading(true);
+    setError(false);
+    setSrc(null);
+
+    // Build the full URL — the api axios instance has baseURL set (e.g. http://localhost:5000/api).
+    // We reuse that so this works in both dev and production without hardcoding the port.
+    const apiBase = api.defaults.baseURL?.replace(/\/$/, '') || '';
+    const fullUrl = url.startsWith('http') ? url : `${apiBase}${url}`;
+
+    fetch(fullUrl)
+      .then(res => {
+        if (!res.ok) throw new Error(`${res.status}`);
+        return res.blob();
+      })
+      .then(blob => {
+        if (cancelled) return;
+        objectUrl = URL.createObjectURL(blob);
+        setSrc(objectUrl);
+      })
+      .catch(() => { if (!cancelled) setError(true); })
+      .finally(() => { if (!cancelled) setLoading(false); });
+
+    return () => {
+      cancelled = true;
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    };
+  }, [url]);
+
+  return { src, loading, error };
+};
+
+/**
+ * AuthMediaImg — drop-in <img> replacement for OneDrive-proxied images.
+ * Fetches with JWT, shows a subtle shimmer while loading, shows the file-icon
+ * placeholder on error.
+ */
+const AuthMediaImg = ({ proxyUrl, alt, style: extraStyle = {} }) => {
+  const { src, loading, error } = useAuthBlob(proxyUrl);
+  if (loading) return (
+    <div style={{
+      width: '100%', height: '100%',
+      background: 'linear-gradient(90deg, #f0ece4 25%, #faf8f5 50%, #f0ece4 75%)',
+      backgroundSize: '200% 100%',
+      animation: 'shimmer 1.2s infinite',
+    }} />
+  );
+  if (error || !src) return (
+    <div style={{ textAlign: 'center', color: T.gold }}>
+      <ImageIcon size={28} />
+      <p style={{ fontFamily: jost, fontSize: 8, letterSpacing: '0.2em', textTransform: 'uppercase', marginTop: 4 }}>
+        {alt?.split('.').pop()?.toUpperCase() || 'IMG'}
+      </p>
+    </div>
+  );
+  return <img src={src} alt={alt} style={{ width: '100%', height: '100%', objectFit: 'cover', ...extraStyle }} />;
+};
+
+/**
+ * AuthMediaLightbox — fetches the full-res blob for lightbox display.
+ * For images: renders <img>. For video: renders <video>. For docs: <iframe>.
+ */
+const AuthMediaLightbox = ({ proxyUrl, mimeType, name }) => {
+  const { src, loading } = useAuthBlob(proxyUrl);
+  if (loading) return (
+    <div style={{ color: 'rgba(255,255,255,0.4)', fontFamily: jost, fontSize: 12, letterSpacing: '0.1em' }}>
+      Loading…
+    </div>
+  );
+  if (!src) return null;
+  if (mimeType?.startsWith('image/')) {
+    return <img src={src} alt={name} style={{ maxHeight: '80vh', maxWidth: '100%', objectFit: 'contain', borderRadius: 2 }} />;
+  }
+  if (mimeType?.startsWith('video/')) {
+    return <video src={src} controls autoPlay style={{ maxHeight: '80vh', maxWidth: '100%', borderRadius: 2 }} />;
+  }
+  return <iframe src={src} title={name} style={{ width: '100%', height: '80vh', borderRadius: 2, background: 'white', border: 'none' }} />;
+};
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
 const mediaIcon = (mimeType = '') => {
   if (mimeType.startsWith('image/')) return <ImageIcon size={13} style={{ color: '#4f46e5', flexShrink: 0 }} />;
   if (mimeType.startsWith('video/')) return <Video     size={13} style={{ color: '#7c3aed', flexShrink: 0 }} />;
   return                                     <FileText  size={13} style={{ color: T.gold,   flexShrink: 0 }} />;
-};
-
-// Formats number and fires off deep link to desktop/web client
-// Formats number and handles direct OS protocol launch to bypass browser tabs
-const openWhatsApp = (phoneStr) => {
-  if (!phoneStr) return;
-  
-  let cleaned = phoneStr.replace(/[^\d+]/g, '');
-  if (cleaned.length === 10) {
-    cleaned = `91${cleaned}`;
-  } else if (cleaned.startsWith('+')) {
-    cleaned = cleaned.replace('+', '');
-  }
-  
-  const nativeUrl = `whatsapp://send?phone=${cleaned}`;
-  const webUrl = `https://wa.me/${cleaned}`;
-  
-  let appInstalled = false;
-  
-  // 1. Listen for the window losing focus (means native app successfully opened)
-  const handleBlur = () => {
-    appInstalled = true;
-  };
-  window.addEventListener('blur', handleBlur);
-  
-  // 2. Try forcing the OS to open the native desktop app
-  window.location.href = nativeUrl;
-  
-  // 3. Wait 500ms. If window never blurred, open WhatsApp Web instead
-  setTimeout(() => {
-    window.removeEventListener('blur', handleBlur);
-    if (!appInstalled) {
-      window.open(webUrl, '_blank');
-    }
-  }, 500);
 };
 
 // ── Spinner ───────────────────────────────────────────────────────────────────
@@ -221,13 +386,20 @@ const VendorList = () => {
   const [showModal,     setShowModal]     = useState(false);
   const [isEditing,     setIsEditing]     = useState(false);
   const [currentId,     setCurrentId]     = useState(null);
-  const [highlightId,   setHighlightId]   = useState(null);
+  const [highlightId,   setHighlightId]   = useState(null);   // briefly highlight a vendor row
   const [sortOrder,     setSortOrder]     = useState('asc');
   const [filterCategory,    setFilterCategory]    = useState('');
   const [filterSubCategory, setFilterSubCategory] = useState('');
   const [filterState,       setFilterState]       = useState('');
+  // F1 — "Preferred" filter: 'all' | 'preferred' | 'regular'
+  const [filterPreferred,   setFilterPreferred]   = useState('all');
+  // F2 — Website extraction
+  const [isExtractingMenu,  setIsExtractingMenu]  = useState(false);
 
+  // Card scanner
   const [cardImages,    setCardImages]    = useState({ front: null, back: null });
+
+  // Media attachments
   const [newMediaFiles, setNewMediaFiles] = useState([]);
   const [keepMediaIds,  setKeepMediaIds]  = useState([]);
   const [lightboxMedia, setLightboxMedia] = useState(null);
@@ -239,11 +411,14 @@ const VendorList = () => {
     category:         '',
     subCategory:      '',
     suppliedProducts: '',
+    isPreferred:      false,    // F1
+    websiteUrl:       '',       // F2
     contacts: [{ name: '', phone: '', email: '' }],
   });
 
   useEffect(() => { fetchVendors(); }, []);
 
+  // ── Data fetching ─────────────────────────────────────────────────────────
   const fetchVendors = async () => {
     log.debug('Fetching vendors…');
     setIsLoading(true);
@@ -258,6 +433,8 @@ const VendorList = () => {
     }
   };
 
+  // ── Derived data ──────────────────────────────────────────────────────────
+  // Map of category → sorted unique sub-categories seen across all vendors
   const subCategoriesByCategory = useMemo(() => {
     const map = {};
     for (const v of vendors) {
@@ -275,14 +452,21 @@ const VendorList = () => {
     return result;
   }, [vendors]);
 
+  // Sub-categories available for the currently-selected category (modal form)
   const availableSubCategories = formData.category
     ? (subCategoriesByCategory[formData.category] || [])
     : [];
 
+  // Sub-categories for the active filter category (filter bar)
   const filterSubCategoryOptions = filterCategory
     ? (subCategoriesByCategory[filterCategory] || [])
     : Object.values(subCategoriesByCategory).flat().filter((v, i, a) => a.indexOf(v) === i).sort();
 
+  // ── Duplicate vendor detection ────────────────────────────────────────────
+  // Only active when adding a new vendor (not editing).
+  // Returns vendors whose name is "close" to what's being typed:
+  //   • exact substring match (fastest, catches most cases), OR
+  //   • token overlap: ≥1 significant word in common (ignores Pvt/Ltd/etc.)
   const duplicateMatches = useMemo(() => {
     if (isEditing) return [];
     const raw = formData.companyName.trim();
@@ -299,7 +483,10 @@ const VendorList = () => {
       const nameLow    = v.companyName?.toLowerCase() ?? '';
       const nameTokens = tokens(v.companyName ?? '');
 
+      // Substring match
       if (nameLow.includes(inputLow) || inputLow.includes(nameLow)) return true;
+
+      // Token overlap — at least one meaningful word in common
       if (inputTokens.length > 0 && nameTokens.length > 0) {
         return inputTokens.some(t => nameTokens.includes(t));
       }
@@ -326,18 +513,24 @@ const VendorList = () => {
             c.email?.toLowerCase().includes(s)
           )
         );
-        const matchesCat    = !filterCategory    || v.category    === filterCategory;
-        const matchesSub    = !filterSubCategory || v.subCategory === filterSubCategory;
-        const matchesState  = !filterState       || v.state       === filterState;
-        return matchesSearch && matchesCat && matchesSub && matchesState;
+        const matchesCat       = !filterCategory    || v.category    === filterCategory;
+        const matchesSub       = !filterSubCategory || v.subCategory === filterSubCategory;
+        const matchesState     = !filterState       || v.state       === filterState;
+        // F1 — Preferred filter
+        const matchesPreferred =
+          filterPreferred === 'all'       ? true :
+          filterPreferred === 'preferred' ? !!v.isPreferred :
+          /* 'regular' */                   !v.isPreferred;
+        return matchesSearch && matchesCat && matchesSub && matchesState && matchesPreferred;
       })
       .sort((a, b) => {
         const na = a.companyName?.toLowerCase() ?? '';
         const nb = b.companyName?.toLowerCase() ?? '';
         return sortOrder === 'asc' ? na.localeCompare(nb) : nb.localeCompare(na);
       });
-  }, [vendors, searchTerm, filterCategory, filterSubCategory, filterState, sortOrder]);
+  }, [vendors, searchTerm, filterCategory, filterSubCategory, filterState, filterPreferred, sortOrder]);
 
+  // ── Handlers ──────────────────────────────────────────────────────────────
   const toggleSort = () => setSortOrder(p => (p === 'asc' ? 'desc' : 'asc'));
   const toggleRow  = (id) =>
     setExpandedRows(p => p.includes(id) ? p.filter(r => r !== id) : [...p, id]);
@@ -347,6 +540,7 @@ const VendorList = () => {
     setFilterCategory('');
     setFilterSubCategory('');
     setFilterState('');
+    setFilterPreferred('all');
     log.debug('Filters reset');
   };
 
@@ -376,10 +570,12 @@ const VendorList = () => {
     log.debug('Scanning business card…');
     setIsScanning(true);
     try {
+      // Build a combined prompt with whichever sides are available
       const imagesToScan = [];
       if (cardImages.front) imagesToScan.push({ side: 'front', data: cardImages.front });
       if (cardImages.back)  imagesToScan.push({ side: 'back',  data: cardImages.back  });
 
+      // Use the first available image as primary; fall back gracefully
       const primaryImage = cardImages.front || cardImages.back;
       const res = await api.post('/vendors/scan-card', {
         image:    primaryImage,
@@ -397,6 +593,7 @@ const VendorList = () => {
         }],
       }));
 
+      // Convert scanned card image(s) to File objects and add as attachments
       const cardFiles = [];
       for (const { side, data: dataUrl } of imagesToScan) {
         const res2 = await fetch(dataUrl);
@@ -408,7 +605,11 @@ const VendorList = () => {
         setNewMediaFiles(prev => [...prev, ...cardFiles]);
       }
 
-      log.info('Card scanned successfully');
+      if (data._provider && data._provider !== 'gemini') {
+        log.info('Card scanned via fallback provider', { provider: data._provider });
+      } else {
+        log.info('Card scanned successfully');
+      }
     } catch (err) {
       log.error('Card scan failed', err.message);
       alert('Card scan failed. Please fill in the details manually.');
@@ -417,6 +618,8 @@ const VendorList = () => {
     }
   };
 
+  // Jump to a vendor in the list: close modal, set search to the company name,
+  // scroll to that row and flash a highlight for 2 seconds.
   const handleJumpToVendor = (vendor) => {
     resetForm();
     setShowModal(false);
@@ -432,17 +635,20 @@ const VendorList = () => {
   const handleDeleteMedia = async (vendorId, mediaId, e) => {
     e.stopPropagation();
     if (!window.confirm('Remove this file?')) return;
+    log.info('Deleting media', { vendorId, mediaId });
     try {
       await api.delete(`/vendors/${vendorId}/media/${mediaId}`);
       setKeepMediaIds(prev => prev.filter(id => id !== mediaId));
       fetchVendors();
     } catch (err) {
       log.error('Media delete failed', err.message);
+      alert('Failed to delete file.');
     }
   };
 
   const handleEdit = (v, e) => {
     e.stopPropagation();
+    log.debug('Opening edit modal', { id: v._id, name: v.companyName });
     setIsEditing(true);
     setCurrentId(v._id);
     setFormData({
@@ -452,6 +658,8 @@ const VendorList = () => {
       category:         v.category         || '',
       subCategory:      v.subCategory      || '',
       suppliedProducts: v.suppliedProducts || '',
+      isPreferred:      !!v.isPreferred,      // F1
+      websiteUrl:       v.websiteUrl       || '', // F2
       contacts: v.contacts?.length > 0 ? [...v.contacts] : [{ name: '', phone: '', email: '' }],
     });
     setKeepMediaIds((v.media || []).map(m => m._id));
@@ -462,15 +670,18 @@ const VendorList = () => {
   const handleDelete = async (id, name, e) => {
     e.stopPropagation();
     if (!window.confirm(`Delete "${name}"?`)) return;
+    log.info('Deleting vendor', { id, name });
     try {
       await api.delete(`/vendors/${id}`);
       fetchVendors();
     } catch (err) {
+      log.error('Delete failed', err.message);
       alert('Failed to delete vendor.');
     }
   };
 
   const handleSave = async () => {
+    log.info(isEditing ? 'Updating vendor' : 'Creating vendor', { name: formData.companyName });
     setIsSaving(true);
     try {
       const fd = new FormData();
@@ -480,6 +691,8 @@ const VendorList = () => {
       fd.append('category',         formData.category);
       fd.append('subCategory',      formData.subCategory || '');
       fd.append('suppliedProducts', formData.suppliedProducts);
+      fd.append('isPreferred',      formData.isPreferred ? 'true' : 'false'); // F1
+      fd.append('websiteUrl',       formData.websiteUrl || '');               // F2
       fd.append('contacts',         JSON.stringify(formData.contacts));
       if (isEditing) fd.append('keepMediaIds', keepMediaIds.join(','));
       newMediaFiles.forEach(f => fd.append('mediaFiles', f));
@@ -489,10 +702,12 @@ const VendorList = () => {
       } else {
         await api.post('/vendors', fd);
       }
+      log.info('Vendor saved successfully');
       setShowModal(false);
       resetForm();
       fetchVendors();
     } catch (err) {
+      log.error('Save failed', err.response?.data?.message || err.message);
       alert('Error saving vendor: ' + (err.response?.data?.message || err.message));
     } finally {
       setIsSaving(false);
@@ -500,7 +715,13 @@ const VendorList = () => {
   };
 
   const resetForm = () => {
-    setFormData({ companyName: '', state: '', city: '', category: '', subCategory: '', suppliedProducts: '', contacts: [{ name: '', phone: '', email: '' }] });
+    setFormData({
+      companyName: '', state: '', city: '', category: '', subCategory: '',
+      suppliedProducts: '',
+      isPreferred: false,    // F1
+      websiteUrl:  '',       // F2
+      contacts: [{ name: '', phone: '', email: '' }],
+    });
     setCardImages({ front: null, back: null });
     setIsEditing(false);
     setCurrentId(null);
@@ -508,7 +729,37 @@ const VendorList = () => {
     setKeepMediaIds([]);
   };
 
+  // ── F2: Extract vendor website menu categories ────────────────────────────
+  const handleExtractMenu = async () => {
+    const url = formData.websiteUrl?.trim();
+    if (!url) return alert('Please enter a Website URL first.');
+    log.info('Extracting website menu', { url });
+    setIsExtractingMenu(true);
+    try {
+      const res = await api.post('/vendors/extract-menu', { url });
+      const { text } = res.data;
+      if (!text?.trim()) {
+        alert('No navigation categories found on that page. You can still type them manually.');
+        return;
+      }
+      // Append extracted text to whatever is already in the textarea (non-destructive)
+      setFormData(prev => ({
+        ...prev,
+        suppliedProducts: prev.suppliedProducts
+          ? `${prev.suppliedProducts}\n\n--- Extracted from website ---\n${text}`
+          : text,
+      }));
+      log.info('Menu extraction complete', { categoryCount: res.data.categories?.length });
+    } catch (err) {
+      log.error('Menu extraction failed', err.response?.data?.message || err.message);
+      alert('Could not extract menu: ' + (err.response?.data?.message || err.message));
+    } finally {
+      setIsExtractingMenu(false);
+    }
+  };
+
   const exportToExcel = () => {
+    log.debug('Exporting vendors to CSV');
     const headers = ['Vendor Name', 'State', 'Category', 'Products', 'Contact Name', 'Phone', 'Email'];
     const rows = filteredVendors.flatMap(v =>
       v.contacts.map(c => [v.companyName, v.state, v.category, v.suppliedProducts, c.name, c.phone, c.email])
@@ -521,24 +772,40 @@ const VendorList = () => {
     document.body.appendChild(a); a.click(); document.body.removeChild(a);
   };
 
+  // ── Render ────────────────────────────────────────────────────────────────
   return (
     <div style={{ minHeight: '100vh', background: T.offwhite, fontFamily: jost, padding: '56px 48px' }}>
-      <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
+
+      <style>{`
+        @keyframes spin { to { transform: rotate(360deg); } }
+        @keyframes shimmer { to { background-position: -200% 0; } }
+      `}</style>
 
       {/* ── Page header ────────────────────────────────────────────────── */}
       <div style={{ marginBottom: 40 }}>
         <div style={{ width: 32, height: 1, background: T.gold, marginBottom: 20 }} />
-        <p style={{ fontSize: 9, fontWeight: 400, letterSpacing: '0.3em', textTransform: 'uppercase', color: T.muted, marginBottom: 10 }}>
+        <p style={{
+          fontSize: 9, fontWeight: 400, letterSpacing: '0.3em',
+          textTransform: 'uppercase', color: T.muted, marginBottom: 10,
+        }}>
           Procurement
         </p>
-        <h1 style={{ fontFamily: serif, fontSize: 40, fontWeight: 300, color: T.navy, lineHeight: 1.05, margin: '0 0 24px' }}>
+        <h1 style={{
+          fontFamily: serif, fontSize: 40, fontWeight: 300,
+          color: T.navy, lineHeight: 1.05, margin: '0 0 24px',
+        }}>
           Vendor <em style={{ color: T.gold }}>Management.</em>
         </h1>
 
+        {/* Controls row */}
         <div style={{ display: 'flex', gap: 14, flexWrap: 'wrap', alignItems: 'center' }}>
+
           {/* Search */}
           <div style={{ position: 'relative', flex: '1 1 260px', maxWidth: 420 }}>
-            <Search size={13} style={{ position: 'absolute', left: 13, top: '50%', transform: 'translateY(-50%)', color: T.muted, pointerEvents: 'none' }} />
+            <Search size={13} style={{
+              position: 'absolute', left: 13, top: '50%',
+              transform: 'translateY(-50%)', color: T.muted, pointerEvents: 'none',
+            }} />
             <input
               type="text"
               placeholder="Search by company, product or contact…"
@@ -547,41 +814,153 @@ const VendorList = () => {
               onFocus={() => setSearchFocused(true)}
               onBlur={() => setSearchFocused(false)}
               style={{
-                width: '100%', padding: '10px 36px', background: 'white',
-                border: `1px solid ${searchFocused ? T.gold : T.border}`, borderRadius: 3,
-                fontFamily: jost, fontSize: 12, fontWeight: 300, color: T.text, outline: 'none',
-                boxSizing: 'box-sizing', transition: 'border-color 0.2s',
+                width: '100%', padding: '10px 36px',
+                background: 'white',
+                border: `1px solid ${searchFocused ? T.gold : T.border}`,
+                borderRadius: 3,
+                fontFamily: jost, fontSize: 12, fontWeight: 300,
+                color: T.text, outline: 'none',
+                boxSizing: 'border-box', transition: 'border-color 0.2s',
               }}
             />
-            {searchTerm && <button onClick={() => setSearchTerm('')} style={{ position: 'absolute', right: 12, top: '50%', transform: 'translateY(-50%)', background: 'none', border: 'none', cursor: 'pointer', color: T.muted, padding: 0 }}>✕</button>}
+            {searchTerm && (
+              <button
+                onClick={() => setSearchTerm('')}
+                style={{
+                  position: 'absolute', right: 12, top: '50%',
+                  transform: 'translateY(-50%)', background: 'none',
+                  border: 'none', cursor: 'pointer', color: T.muted, padding: 0,
+                }}
+              >✕</button>
+            )}
           </div>
 
-          {/* Filters */}
-          <select value={filterCategory} onChange={e => { setFilterCategory(e.target.value); setFilterSubCategory(''); }} style={{ padding: '10px 14px', background: 'white', border: `1px solid ${T.border}`, borderRadius: 3, fontFamily: jost, fontSize: 11, fontWeight: 300, color: filterCategory ? T.text : T.muted, outline: 'none', cursor: 'pointer' }}>
+          {/* Category filter */}
+          <select
+            value={filterCategory}
+            onChange={e => { setFilterCategory(e.target.value); setFilterSubCategory(''); }}
+            style={{
+              padding: '10px 14px', background: 'white',
+              border: `1px solid ${T.border}`, borderRadius: 3,
+              fontFamily: jost, fontSize: 11, fontWeight: 300,
+              color: filterCategory ? T.text : T.muted,
+              outline: 'none', cursor: 'pointer',
+            }}
+          >
             <option value="">All Categories</option>
             <option value="Gifting">Gifting</option>
             <option value="Travel">Travel</option>
             <option value="Events">Events</option>
           </select>
 
+          {/* Sub-category filter — shown when category is selected OR sub-cats exist */}
           {filterSubCategoryOptions.length > 0 && (
-            <select value={filterSubCategory} onChange={e => setFilterSubCategory(e.target.value)} style={{ padding: '10px 14px', background: 'white', border: `1px solid ${T.border}`, borderRadius: 3, fontFamily: jost, fontSize: 11, fontWeight: 300, color: filterSubCategory ? T.text : T.muted, outline: 'none', cursor: 'pointer' }}>
+            <select
+              value={filterSubCategory}
+              onChange={e => setFilterSubCategory(e.target.value)}
+              style={{
+                padding: '10px 14px', background: 'white',
+                border: `1px solid ${T.border}`, borderRadius: 3,
+                fontFamily: jost, fontSize: 11, fontWeight: 300,
+                color: filterSubCategory ? T.text : T.muted,
+                outline: 'none', cursor: 'pointer',
+              }}
+            >
               <option value="">All Sub-Categories</option>
               {filterSubCategoryOptions.map(s => <option key={s} value={s}>{s}</option>)}
             </select>
           )}
 
-          <select value={filterState} onChange={e => setFilterState(e.target.value)} style={{ padding: '10px 14px', background: 'white', border: `1px solid ${T.border}`, borderRadius: 3, fontFamily: jost, fontSize: 11, fontWeight: 300, color: filterState ? T.text : T.muted, outline: 'none', cursor: 'pointer' }}>
+          {/* State filter */}
+          <select
+            value={filterState}
+            onChange={e => setFilterState(e.target.value)}
+            style={{
+              padding: '10px 14px', background: 'white',
+              border: `1px solid ${T.border}`, borderRadius: 3,
+              fontFamily: jost, fontSize: 11, fontWeight: 300,
+              color: filterState ? T.text : T.muted,
+              outline: 'none', cursor: 'pointer',
+            }}
+          >
             <option value="">All States</option>
             {INDIA_STATES.map(s => <option key={s} value={s}>{s}</option>)}
           </select>
 
-          {(searchTerm || filterCategory || filterSubCategory || filterState) && (
-            <button onClick={handleResetFilters} style={{ background: 'none', border: 'none', cursor: 'pointer', fontFamily: jost, fontSize: 9, fontWeight: 400, letterSpacing: '0.2em', textTransform: 'uppercase', color: T.danger, transition: 'color 0.2s' }} onMouseEnter={e => e.currentTarget.style.color = T.dangerHover} onMouseLeave={e => e.currentTarget.style.color = T.danger}>Reset</button>
+          {/* F1 — Preferred Vendor filter */}
+          <select
+            value={filterPreferred}
+            onChange={e => setFilterPreferred(e.target.value)}
+            style={{
+              padding: '10px 14px', background: 'white',
+              border: `1px solid ${filterPreferred !== 'all' ? T.gold : T.border}`,
+              borderRadius: 3,
+              fontFamily: jost, fontSize: 11, fontWeight: 300,
+              color: filterPreferred !== 'all' ? T.gold : T.muted,
+              outline: 'none', cursor: 'pointer',
+            }}
+          >
+            <option value="all">All Vendors</option>
+            <option value="preferred">⭐ Preferred Only</option>
+            <option value="regular">Regular Only</option>
+          </select>
+
+          {/* Reset filters */}
+          {(searchTerm || filterCategory || filterSubCategory || filterState || filterPreferred !== 'all') && (
+            <button
+              onClick={handleResetFilters}
+              style={{
+                background: 'none', border: 'none', cursor: 'pointer',
+                fontFamily: jost, fontSize: 9, fontWeight: 400,
+                letterSpacing: '0.2em', textTransform: 'uppercase',
+                color: T.danger, transition: 'color 0.2s',
+              }}
+              onMouseEnter={e => e.currentTarget.style.color = T.dangerHover}
+              onMouseLeave={e => e.currentTarget.style.color = T.danger}
+            >
+              Reset
+            </button>
           )}
 
-          <button onClick={() => { resetForm(); setShowModal(true); }} style={{ display: 'inline-flex', alignItems: 'center', gap: 8, background: T.gold, color: T.navy, border: 'none', padding: '11px 28px', fontFamily: jost, fontSize: 10, fontWeight: 500, letterSpacing: '0.22em', textTransform: 'uppercase', cursor: 'pointer', transition: 'background 0.25s', flexShrink: 0 }} onMouseEnter={e => e.currentTarget.style.background = T.gold2} onMouseLeave={e => e.currentTarget.style.background = T.gold}><Plus size={12} /> Add Vendor</button>
-          <button onClick={exportToExcel} style={{ display: 'inline-flex', alignItems: 'center', gap: 8, background: 'transparent', color: T.muted, border: `1px solid ${T.border}`, padding: '10px 20px', fontFamily: jost, fontSize: 10, fontWeight: 400, letterSpacing: '0.2em', textTransform: 'uppercase', cursor: 'pointer', transition: 'border-color 0.25s, color 0.25s', flexShrink: 0 }} onMouseEnter={e => { e.currentTarget.style.borderColor = T.gold; e.currentTarget.style.color = T.gold; }} onMouseLeave={e => { e.currentTarget.style.borderColor = T.border; e.currentTarget.style.color = T.muted; }}><Download size={13} /> Export</button>
+          {/* Add vendor */}
+          <button
+            onClick={() => { resetForm(); setShowModal(true); }}
+            style={{
+              display: 'inline-flex', alignItems: 'center', gap: 8,
+              background: T.gold, color: T.navy,
+              border: 'none', padding: '11px 28px',
+              fontFamily: jost, fontSize: 10, fontWeight: 500,
+              letterSpacing: '0.22em', textTransform: 'uppercase',
+              cursor: 'pointer', transition: 'background 0.25s', flexShrink: 0,
+            }}
+            onMouseEnter={e => e.currentTarget.style.background = T.gold2}
+            onMouseLeave={e => e.currentTarget.style.background = T.gold}
+          >
+            <Plus size={12} /> Add Vendor
+          </button>
+
+          {/* Export */}
+          <button
+            onClick={exportToExcel}
+            style={{
+              display: 'inline-flex', alignItems: 'center', gap: 8,
+              background: 'transparent', color: T.muted,
+              border: `1px solid ${T.border}`, padding: '10px 20px',
+              fontFamily: jost, fontSize: 10, fontWeight: 400,
+              letterSpacing: '0.2em', textTransform: 'uppercase',
+              cursor: 'pointer', transition: 'border-color 0.25s, color 0.25s', flexShrink: 0,
+            }}
+            onMouseEnter={e => {
+              e.currentTarget.style.borderColor = T.gold;
+              e.currentTarget.style.color = T.gold;
+            }}
+            onMouseLeave={e => {
+              e.currentTarget.style.borderColor = T.border;
+              e.currentTarget.style.color = T.muted;
+            }}
+          >
+            <Download size={13} /> Export
+          </button>
         </div>
       </div>
 
@@ -591,11 +970,48 @@ const VendorList = () => {
           <thead>
             <tr style={{ borderBottom: `1px solid ${T.border}`, background: T.offwhite }}>
               <th style={{ width: 44, padding: '12px 16px' }} />
-              <th onClick={toggleSort} style={{ padding: '12px 16px', textAlign: 'left', fontFamily: jost, fontSize: 9, fontWeight: 400, letterSpacing: '0.25em', textTransform: 'uppercase', color: T.muted, cursor: 'pointer', userSelect: 'none', transition: 'color 0.2s', whiteSpace: 'nowrap' }} onMouseEnter={e => e.currentTarget.style.color = T.gold} onMouseLeave={e => e.currentTarget.style.color = T.muted}>Company {sortOrder === 'asc' ? '↑' : '↓'}</th>
-              <th style={{ padding: '12px 16px', textAlign: 'left', fontFamily: jost, fontSize: 9, fontWeight: 400, letterSpacing: '0.25em', textTransform: 'uppercase', color: T.muted }}>Category / State</th>
-              <th style={{ padding: '12px 16px', textAlign: 'left', fontFamily: jost, fontSize: 9, fontWeight: 400, letterSpacing: '0.25em', textTransform: 'uppercase', color: T.muted }}>Primary Contact</th>
-              <th style={{ padding: '12px 16px', textAlign: 'left', fontFamily: jost, fontSize: 9, fontWeight: 400, letterSpacing: '0.25em', textTransform: 'uppercase', color: T.muted }}>Products Supplied</th>
-              <th style={{ padding: '12px 16px', textAlign: 'right', fontFamily: jost, fontSize: 9, fontWeight: 400, letterSpacing: '0.25em', textTransform: 'uppercase', color: T.muted }}>Actions</th>
+              <th
+                onClick={toggleSort}
+                style={{
+                  padding: '12px 16px', textAlign: 'left',
+                  fontFamily: jost, fontSize: 9, fontWeight: 400,
+                  letterSpacing: '0.25em', textTransform: 'uppercase',
+                  color: T.muted, cursor: 'pointer', userSelect: 'none',
+                  transition: 'color 0.2s', whiteSpace: 'nowrap',
+                }}
+                onMouseEnter={e => e.currentTarget.style.color = T.gold}
+                onMouseLeave={e => e.currentTarget.style.color = T.muted}
+              >
+                Company {sortOrder === 'asc' ? '↑' : '↓'}
+              </th>
+              <th style={{
+                padding: '12px 16px', textAlign: 'left',
+                fontFamily: jost, fontSize: 9, fontWeight: 400,
+                letterSpacing: '0.25em', textTransform: 'uppercase', color: T.muted,
+              }}>
+                Category / State
+              </th>
+              <th style={{
+                padding: '12px 16px', textAlign: 'left',
+                fontFamily: jost, fontSize: 9, fontWeight: 400,
+                letterSpacing: '0.25em', textTransform: 'uppercase', color: T.muted,
+              }}>
+                Primary Contact
+              </th>
+              <th style={{
+                padding: '12px 16px', textAlign: 'left',
+                fontFamily: jost, fontSize: 9, fontWeight: 400,
+                letterSpacing: '0.25em', textTransform: 'uppercase', color: T.muted,
+              }}>
+                Products Supplied
+              </th>
+              <th style={{
+                padding: '12px 16px', textAlign: 'right',
+                fontFamily: jost, fontSize: 9, fontWeight: 400,
+                letterSpacing: '0.25em', textTransform: 'uppercase', color: T.muted,
+              }}>
+                Actions
+              </th>
             </tr>
           </thead>
 
@@ -606,111 +1022,348 @@ const VendorList = () => {
               <tr>
                 <td colSpan={6} style={{ padding: '64px 0', textAlign: 'center' }}>
                   <Building2 size={28} style={{ color: 'rgba(0,0,0,0.12)', margin: '0 auto 12px', display: 'block' }} />
-                  <p style={{ fontFamily: jost, fontSize: 12, fontWeight: 300, letterSpacing: '0.1em', color: T.muted }}>No vendors found</p>
+                  <p style={{
+                    fontFamily: jost, fontSize: 12, fontWeight: 300,
+                    letterSpacing: '0.1em', color: T.muted,
+                  }}>
+                    No vendors found
+                  </p>
                 </td>
               </tr>
             ) : filteredVendors.map(v => {
               const isExpanded = expandedRows.includes(v._id);
               return (
                 <React.Fragment key={v._id}>
+                  {/* ── Row ── */}
                   <tr
                     id={`vendor-row-${v._id}`}
                     onClick={() => toggleRow(v._id)}
                     style={{
-                      cursor: 'pointer', borderBottom: `1px solid ${T.border}`,
-                      background: highlightId === v._id ? '#fffbeb' : isExpanded ? T.dimBg : 'transparent',
-                      outline: highlightId === v._id ? '2px solid #f59e0b' : 'none', outlineOffset: -2,
+                      cursor: 'pointer',
+                      borderBottom: `1px solid ${T.border}`,
+                      background: highlightId === v._id
+                        ? '#fffbeb'
+                        : isExpanded ? T.dimBg : 'transparent',
+                      outline: highlightId === v._id ? '2px solid #f59e0b' : 'none',
+                      outlineOffset: -2,
                       transition: 'background 0.4s, outline 0.4s',
                     }}
                     onMouseEnter={e => { if (!isExpanded && highlightId !== v._id) e.currentTarget.style.background = 'rgba(0,0,0,0.015)'; }}
                     onMouseLeave={e => { if (!isExpanded && highlightId !== v._id) e.currentTarget.style.background = isExpanded ? T.dimBg : 'transparent'; }}
                   >
+                    {/* Expand chevron */}
                     <td style={{ padding: '14px 16px', textAlign: 'center', width: 44 }}>
-                      {isExpanded ? <ChevronDown size={13} style={{ color: T.gold }} /> : <ChevronRight size={13} style={{ color: T.muted }} />}
+                      {isExpanded
+                        ? <ChevronDown  size={13} style={{ color: T.gold }} />
+                        : <ChevronRight size={13} style={{ color: T.muted }} />}
                     </td>
-                    <td style={{ padding: '14px 16px', fontFamily: jost, fontSize: 12, fontWeight: 500, letterSpacing: '0.06em', textTransform: 'uppercase', color: T.text }}>
-                      {v.companyName}
-                      {v.media?.length > 0 && (
-                        <span style={{ marginLeft: 10, display: 'inline-flex', alignItems: 'center', gap: 4, fontFamily: jost, fontSize: 9, fontWeight: 400, letterSpacing: '0.12em', textTransform: 'uppercase', color: T.gold, border: `1px solid ${T.borderG}`, padding: '2px 6px' }}>
-                          <Paperclip size={9} /> {v.media.length}
+
+                    {/* Company name */}
+                    <td style={{
+                      padding: '14px 16px',
+                      fontFamily: jost, fontSize: 12, fontWeight: 500,
+                      letterSpacing: '0.06em', textTransform: 'uppercase', color: T.text,
+                    }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                        {/* F1 — Preferred star badge */}
+                        {v.isPreferred && (
+                          <span title="Preferred Vendor" style={{
+                            display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+                            width: 20, height: 20, flexShrink: 0,
+                          }}>
+                            <Star size={14} style={{ fill: T.gold, color: T.gold }} />
+                          </span>
+                        )}
+                        <span>{v.companyName}</span>
+                        {v.media?.length > 0 && (
+                          <span style={{
+                            display: 'inline-flex', alignItems: 'center', gap: 4,
+                            fontFamily: jost, fontSize: 9, fontWeight: 400,
+                            letterSpacing: '0.12em', textTransform: 'uppercase',
+                            color: T.gold, border: `1px solid ${T.borderG}`, padding: '2px 6px',
+                          }}>
+                            <Paperclip size={9} /> {v.media.length}
+                          </span>
+                        )}
+                        {/* Website URL shortcut — only when saved */}
+                        {v.websiteUrl && (
+                          <a
+                            href={/^https?:\/\//i.test(v.websiteUrl) ? v.websiteUrl : `https://${v.websiteUrl}`}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            title={`Open ${v.websiteUrl}`}
+                            onClick={e => e.stopPropagation()}
+                            style={{
+                              display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+                              width: 20, height: 20, flexShrink: 0,
+                              color: T.muted, transition: 'color 0.18s',
+                              textDecoration: 'none',
+                            }}
+                            onMouseEnter={e => e.currentTarget.style.color = T.gold}
+                            onMouseLeave={e => e.currentTarget.style.color = T.muted}
+                          >
+                            <ArrowUpRight size={13} />
+                          </a>
+                        )}
+                      </div>
+                    </td>
+
+                    {/* Category / State */}
+                    <td style={{ padding: '14px 16px' }}>
+                      {v.category && (
+                        <span style={{
+                          display: 'inline-block', marginBottom: 2,
+                          fontFamily: jost, fontSize: 10, fontWeight: 400,
+                          letterSpacing: '0.15em', textTransform: 'uppercase',
+                          color: T.gold, border: `1px solid ${T.borderG}`, padding: '2px 8px',
+                        }}>
+                          {v.category}
+                        </span>
+                      )}
+                      {v.state && (
+                        <p style={{
+                          fontFamily: jost, fontSize: 12, fontWeight: 300,
+                          color: T.text, margin: 0,
+                        }}>
+                          {v.state}{v.city ? `, ${v.city}` : ''}
+                        </p>
+                      )}
+                    </td>
+
+                    {/* Primary contact */}
+                    <td style={{
+                      padding: '14px 16px',
+                      fontFamily: jost, fontSize: 15, fontWeight: 300, color: T.text,
+                    }}>
+                      {v.contacts?.[0]?.name || '—'}
+                      {v.contacts?.length > 1 && (
+                        <span style={{
+                          marginLeft: 8,
+                          fontFamily: jost, fontSize: 9, fontWeight: 400,
+                          letterSpacing: '0.15em', textTransform: 'uppercase',
+                          color: T.gold, border: `1px solid ${T.borderG}`, padding: '2px 7px',
+                        }}>
+                          +{v.contacts.length - 1}
                         </span>
                       )}
                     </td>
-                    <td style={{ padding: '14px 16px' }}>
-                      {v.category && <span style={{ display: 'inline-block', marginBottom: 2, fontFamily: jost, fontSize: 10, fontWeight: 400, letterSpacing: '0.15em', textTransform: 'uppercase', color: T.gold, border: `1px solid ${T.borderG}`, padding: '2px 8px' }}>{v.category}</span>}
-                      {v.state && <p style={{ fontFamily: jost, fontSize: 12, fontWeight: 300, color: T.text, margin: 0 }}>{v.state}{v.city ? `, ${v.city}` : ''}</p>}
+
+                    {/* Products Supplied */}
+                    <td style={{
+                      padding: '14px 16px', maxWidth: 220,
+                      fontFamily: jost, fontSize: 12, fontWeight: 300, color: T.muted,
+                      overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                    }}>
+                      {v.suppliedProducts || '—'}
                     </td>
-                    <td style={{ padding: '14px 16px', fontFamily: jost, fontSize: 15, fontWeight: 300, color: T.text }}>
-                      {v.contacts?.[0]?.name || '—'}
-                      {v.contacts?.length > 1 && <span style={{ marginLeft: 8, fontFamily: jost, fontSize: 9, fontWeight: 400, letterSpacing: '0.15em', textTransform: 'uppercase', color: T.gold, border: `1px solid ${T.borderG}`, padding: '2px 7px' }}>+{v.contacts.length - 1}</span>}
-                    </td>
-                    <td style={{ padding: '14px 16px', maxWidth: 220, fontFamily: jost, fontSize: 12, fontWeight: 300, color: T.muted, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{v.suppliedProducts || '—'}</td>
+
+                    {/* Actions */}
                     <td style={{ padding: '14px 16px', textAlign: 'right' }}>
-                      <button onClick={e => handleEdit(v, e)} style={{ background: 'none', border: 'none', cursor: 'pointer', fontFamily: jost, fontSize: 12, fontWeight: 400, letterSpacing: '0.2em', textTransform: 'uppercase', color: T.gold, marginRight: 20, transition: 'color 0.2s' }} onMouseEnter={e => e.currentTarget.style.color = T.gold2} onMouseLeave={e => e.currentTarget.style.color = T.gold}>Edit</button>
-                      <button onClick={e => handleDelete(v._id, v.companyName, e)} style={{ background: 'none', border: 'none', cursor: 'pointer', fontFamily: jost, fontSize: 12, fontWeight: 400, letterSpacing: '0.2em', textTransform: 'uppercase', color: T.danger, transition: 'color 0.2s' }} onMouseEnter={e => e.currentTarget.style.color = T.dangerHover} onMouseLeave={e => e.currentTarget.style.color = T.danger}>Delete</button>
+                      <button
+                        onClick={e => handleEdit(v, e)}
+                        style={{
+                          background: 'none', border: 'none', cursor: 'pointer',
+                          fontFamily: jost, fontSize: 12, fontWeight: 400,
+                          letterSpacing: '0.2em', textTransform: 'uppercase',
+                          color: T.gold, marginRight: 20, transition: 'color 0.2s',
+                        }}
+                        onMouseEnter={e => e.currentTarget.style.color = T.gold2}
+                        onMouseLeave={e => e.currentTarget.style.color = T.gold}
+                      >
+                        Edit
+                      </button>
+                      <button
+                        onClick={e => handleDelete(v._id, v.companyName, e)}
+                        style={{
+                          background: 'none', border: 'none', cursor: 'pointer',
+                          fontFamily: jost, fontSize: 12, fontWeight: 400,
+                          letterSpacing: '0.2em', textTransform: 'uppercase',
+                          color: T.danger, transition: 'color 0.2s',
+                        }}
+                        onMouseEnter={e => e.currentTarget.style.color = T.dangerHover}
+                        onMouseLeave={e => e.currentTarget.style.color = T.danger}
+                      >
+                        Delete
+                      </button>
                     </td>
                   </tr>
 
-                  {/* Expanded Detail View */}
+                  {/* ── Expanded detail ── */}
                   {isExpanded && (
                     <tr>
-                      <td colSpan={6} style={{ padding: '24px 24px 24px 48px', borderBottom: `1px solid ${T.border}`, background: T.dimBg }}>
+                      <td colSpan={6} style={{
+                        padding: '24px 24px 24px 48px',
+                        borderBottom: `1px solid ${T.border}`,
+                        background: T.dimBg,
+                      }}>
                         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 32 }}>
+
+                          {/* Products */}
                           <div>
-                            <p style={{ fontFamily: jost, fontSize: 9, fontWeight: 400, letterSpacing: '0.28em', textTransform: 'uppercase', color: 'rgba(184,151,90,0.6)', marginBottom: 10 }}>Products Supplied</p>
-                            <p style={{ fontFamily: jost, fontSize: 12, fontWeight: 300, color: T.text, background: 'white', border: `1px solid ${T.border}`, padding: '12px 14px', fontStyle: 'italic', margin: 0 }}>{v.suppliedProducts || 'N/A'}</p>
+                            <p style={{
+                              fontFamily: jost, fontSize: 9, fontWeight: 400,
+                              letterSpacing: '0.28em', textTransform: 'uppercase',
+                              color: 'rgba(184,151,90,0.6)', marginBottom: 10,
+                            }}>
+                              Products Supplied
+                            </p>
+                            <p style={{
+                              fontFamily: jost, fontSize: 12, fontWeight: 300,
+                              color: T.text, background: 'white',
+                              border: `1px solid ${T.border}`, padding: '12px 14px',
+                              fontStyle: 'italic', margin: 0,
+                            }}>
+                              {v.suppliedProducts || 'N/A'}
+                            </p>
                           </div>
 
+                          {/* Contacts */}
                           <div>
-                            <p style={{ fontFamily: jost, fontSize: 9, fontWeight: 400, letterSpacing: '0.28em', textTransform: 'uppercase', color: 'rgba(184,151,90,0.6)', marginBottom: 10 }}>Contact Directory</p>
-                            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(200px, 1fr))', gap: 10 }}>
+                            <p style={{
+                              fontFamily: jost, fontSize: 9, fontWeight: 400,
+                              letterSpacing: '0.28em', textTransform: 'uppercase',
+                              color: 'rgba(184,151,90,0.6)', marginBottom: 10,
+                            }}>
+                              Contact Directory
+                            </p>
+                            <div style={{
+                              display: 'grid',
+                              gridTemplateColumns: 'repeat(auto-fill, minmax(200px, 1fr))',
+                              gap: 10,
+                            }}>
                               {v.contacts?.length > 0 ? v.contacts.map((c, i) => (
-                                <div key={i} style={{ background: 'white', border: `1px solid ${T.border}`, padding: '14px 16px', display: 'flex', flexDirection: 'column', gap: 4 }}>
-                                  <p style={{ fontFamily: jost, fontSize: 12, fontWeight: 500, color: T.gold, margin: 0 }}>{c.name || '—'}</p>
-                                  
-                                  {/* Phone layout updated to feature the desktop app link */}
-                                  <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                                    <p style={{ fontFamily: jost, fontSize: 11, fontWeight: 300, color: T.muted, margin: 0 }}>{c.phone || 'No phone'}</p>
+                                <div key={i} style={{
+                                  background: 'white', border: `1px solid ${T.border}`,
+                                  padding: '14px 16px', display: 'flex', flexDirection: 'column', gap: 4,
+                                }}>
+                                  <p style={{ fontFamily: jost, fontSize: 12, fontWeight: 500, color: T.gold, margin: 0 }}>
+                                    {c.name || '—'}
+                                  </p>
+                                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, justifyContent: 'space-between' }}>
+                                    <p style={{ fontFamily: jost, fontSize: 11, fontWeight: 300, color: T.muted, margin: 0, flex: 1 }}>
+                                      {c.phone || 'No phone'}
+                                    </p>
                                     {c.phone && (
-                                      <button 
-                                        type="button"
-                                        onClick={(e) => { e.stopPropagation(); openWhatsApp(c.phone); }}
-                                        title="Open chat in WhatsApp application"
-                                        style={{ background: 'none', border: 'none', padding: 0, margin: 0, cursor: 'pointer', display: 'inline-flex', alignItems: 'center', color: 'rgba(0,0,0,0.25)', transition: 'color 0.2s' }}
+                                      <button
+                                        onClick={() => openWhatsApp(c.phone)}
+                                        title="Message via WhatsApp"
+                                        style={{
+                                          background: 'none', border: 'none', cursor: 'pointer',
+                                          color: T.muted, display: 'flex', alignItems: 'center', justifyContent: 'center',
+                                          padding: '4px 6px', flexShrink: 0, transition: 'color 0.18s',
+                                        }}
                                         onMouseEnter={e => e.currentTarget.style.color = T.gold}
-                                        onMouseLeave={e => e.currentTarget.style.color = 'rgba(0,0,0,0.25)'}
+                                        onMouseLeave={e => e.currentTarget.style.color = T.muted}
                                       >
-                                        <MessageSquare size={12} />
+                                        <MessageSquare size={14} />
                                       </button>
                                     )}
                                   </div>
-
-                                  <p style={{ fontFamily: jost, fontSize: 11, fontWeight: 300, color: T.muted, margin: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{c.email || 'No email'}</p>
+                                  <p style={{
+                                    fontFamily: jost, fontSize: 11, fontWeight: 300, color: T.muted,
+                                    margin: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                                  }}>
+                                    {c.email || 'No email'}
+                                  </p>
                                 </div>
                               )) : (
-                                <p style={{ fontFamily: jost, fontSize: 11, fontWeight: 300, color: T.muted }}>No contacts listed.</p>
+                                <p style={{ fontFamily: jost, fontSize: 11, fontWeight: 300, color: T.muted }}>
+                                  No contacts listed.
+                                </p>
                               )}
                             </div>
                           </div>
 
-                          {/* Media attachments template unchanged... */}
+                          {/* Media */}
                           {v.media?.length > 0 && (
                             <div style={{ gridColumn: '1 / -1' }}>
-                              <p style={{ fontFamily: jost, fontSize: 9, fontWeight: 400, letterSpacing: '0.28em', textTransform: 'uppercase', color: 'rgba(184,151,90,0.6)', marginBottom: 10, display: 'flex', alignItems: 'center', gap: 6 }}><Paperclip size={10} /> Attached Files ({v.media.length})</p>
-                              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(160px, 1fr))', gap: 10 }}>
+                              <p style={{
+                                fontFamily: jost, fontSize: 9, fontWeight: 400,
+                                letterSpacing: '0.28em', textTransform: 'uppercase',
+                                color: 'rgba(184,151,90,0.6)', marginBottom: 10,
+                                display: 'flex', alignItems: 'center', gap: 6,
+                              }}>
+                                <Paperclip size={10} /> Attached Files ({v.media.length})
+                              </p>
+                              <div style={{
+                                display: 'grid',
+                                gridTemplateColumns: 'repeat(auto-fill, minmax(160px, 1fr))',
+                                gap: 10,
+                              }}>
                                 {v.media.map(m => {
                                   const isImg = m.mimeType?.startsWith('image/');
                                   const isVid = m.mimeType?.startsWith('video/');
+                                  const srcUrl      = mediaUrl(v._id, m);
+                                  const downloadSrc = mediaUrl(v._id, m, true);
                                   return (
-                                    <div key={m._id} style={{ background: 'white', border: `1px solid ${T.border}`, overflow: 'hidden', cursor: 'pointer', transition: 'box-shadow 0.2s' }} onClick={() => setLightboxMedia({ url: m.url, mimeType: m.mimeType, name: m.name })} onMouseEnter={e => e.currentTarget.style.boxShadow = `0 4px 12px rgba(184,151,90,0.15)`} onMouseLeave={e => e.currentTarget.style.boxShadow = 'none'}>
-                                      <div style={{ height: 100, background: T.offwhite, display: 'flex', alignItems: 'center', justifyContent: 'center', overflow: 'hidden' }}>
-                                        {isImg ? <img src={m.url} alt={m.name} style={{ width: '100%', height: '100%', objectFit: 'cover' }} /> : isVid ? <div style={{ textAlign: 'center', color: '#7c3aed' }}><Video size={28} /><p style={{ fontFamily: jost, fontSize: 8, letterSpacing: '0.2em', textTransform: 'uppercase', marginTop: 4 }}>Video</p></div> : <div style={{ textAlign: 'center', color: T.gold }}><FileText size={28} /><p style={{ fontFamily: jost, fontSize: 8, letterSpacing: '0.2em', textTransform: 'uppercase', marginTop: 4 }}>{m.name.split('.').pop()?.toUpperCase()}</p></div>}
+                                    <div
+                                      key={m._id}
+                                      style={{
+                                        background: 'white', border: `1px solid ${T.border}`,
+                                        overflow: 'hidden', cursor: 'pointer',
+                                        transition: 'box-shadow 0.2s',
+                                      }}
+                                      onClick={() => setLightboxMedia({ url: srcUrl, downloadUrl: downloadSrc, mimeType: m.mimeType, name: m.name })}
+                                      onMouseEnter={e => e.currentTarget.style.boxShadow = `0 4px 12px rgba(184,151,90,0.15)`}
+                                      onMouseLeave={e => e.currentTarget.style.boxShadow = 'none'}
+                                    >
+                                      {/* Thumbnail */}
+                                      <div style={{
+                                        height: 100, background: T.offwhite,
+                                        display: 'flex', alignItems: 'center', justifyContent: 'center',
+                                        overflow: 'hidden',
+                                      }}>
+                                        {isImg ? (
+                                          <AuthMediaImg proxyUrl={srcUrl} alt={m.name} />
+                                        ) : isVid ? (
+                                          <div style={{ textAlign: 'center', color: '#7c3aed' }}>
+                                            <Video size={28} />
+                                            <p style={{ fontFamily: jost, fontSize: 8, letterSpacing: '0.2em', textTransform: 'uppercase', marginTop: 4 }}>Video</p>
+                                          </div>
+                                        ) : (
+                                          <div style={{ textAlign: 'center', color: T.gold }}>
+                                            <FileText size={28} />
+                                            <p style={{ fontFamily: jost, fontSize: 8, letterSpacing: '0.2em', textTransform: 'uppercase', marginTop: 4 }}>
+                                              {m.name.split('.').pop()?.toUpperCase()}
+                                            </p>
+                                          </div>
+                                        )}
                                       </div>
+                                      {/* Meta */}
                                       <div style={{ padding: '8px 10px' }}>
-                                        <p style={{ fontFamily: jost, fontSize: 10, fontWeight: 500, color: T.text, margin: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{m.name}</p>
+                                        <p style={{
+                                          fontFamily: jost, fontSize: 10, fontWeight: 500,
+                                          color: T.text, margin: 0,
+                                          overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                                        }}>
+                                          {m.name}
+                                        </p>
                                         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: 4 }}>
-                                          <p style={{ fontFamily: jost, fontSize: 9, fontWeight: 300, color: T.muted, margin: 0 }}>{fmtSize(m.size)}</p>
-                                          <a href={m.url} download={m.name} onClick={e => e.stopPropagation()} style={{ color: T.gold, display: 'flex' }}><Download size={11} /></a>
+                                          <p style={{ fontFamily: jost, fontSize: 9, fontWeight: 300, color: T.muted, margin: 0 }}>
+                                            {fmtSize(m.size)}
+                                          </p>
+                                          <button
+                                            onClick={async (e) => {
+                                              e.stopPropagation();
+                                              try {
+                                                const apiBase = api.defaults.baseURL?.replace(/\/$/, '') || '';
+                                                const fullUrl = downloadSrc.startsWith('http')
+                                                  ? downloadSrc
+                                                  : `${apiBase}${downloadSrc}`;
+                                                const res = await fetch(fullUrl);
+                                                const blob = await res.blob();
+                                                const blobUrl = URL.createObjectURL(blob);
+                                                const a = document.createElement('a');
+                                                a.href = blobUrl; a.download = m.name;
+                                                document.body.appendChild(a); a.click();
+                                                document.body.removeChild(a);
+                                                setTimeout(() => URL.revokeObjectURL(blobUrl), 10000);
+                                              } catch { alert('Download failed.'); }
+                                            }}
+                                            style={{ background: 'none', border: 'none', cursor: 'pointer', color: T.gold, display: 'flex', padding: 0 }}
+                                          >
+                                            <Download size={11} />
+                                          </button>
                                         </div>
                                       </div>
                                     </div>
@@ -728,48 +1381,156 @@ const VendorList = () => {
             })}
           </tbody>
         </table>
+
+        {/* Footer count */}
+        {!isLoading && (
+          <div style={{
+            borderTop: `1px solid ${T.border}`, padding: '10px 18px',
+            fontFamily: jost, fontSize: 10, fontWeight: 300,
+            letterSpacing: '0.12em', color: T.muted, textAlign: 'right',
+          }}>
+            {filteredVendors.length} of {vendors.length} vendor{vendors.length !== 1 ? 's' : ''}
+          </div>
+        )}
       </div>
 
       {/* ── Add / Edit Modal ────────────────────────────────────────────── */}
       {showModal && (
-        <div style={{ position: 'fixed', inset: 0, background: 'rgba(14,21,32,0.75)', backdropFilter: 'blur(4px)', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 24, zIndex: 50 }}>
-          <div style={{ background: 'white', border: `1px solid ${T.border}`, padding: '36px 36px 0', width: '100%', maxWidth: 680, maxHeight: '90vh', overflowY: 'auto' }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 32, paddingBottom: 20, borderBottom: `1px solid ${T.border}` }}>
+        <div style={{
+          position: 'fixed', inset: 0,
+          background: 'rgba(14,21,32,0.75)',
+          backdropFilter: 'blur(4px)',
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          padding: 24, zIndex: 50,
+        }}>
+          <div style={{
+            background: 'white', border: `1px solid ${T.border}`,
+            padding: '36px 36px 0',
+            width: '100%', maxWidth: 680,
+            maxHeight: '90vh', overflowY: 'auto',
+          }}>
+            {/* Modal header */}
+            <div style={{
+              display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start',
+              marginBottom: 32, paddingBottom: 20, borderBottom: `1px solid ${T.border}`,
+            }}>
               <div>
-                <p style={{ fontFamily: jost, fontSize: 9, fontWeight: 400, letterSpacing: '0.28em', textTransform: 'uppercase', color: T.muted, marginBottom: 6 }}>{isEditing ? 'Update Record' : 'New Registration'}</p>
-                <h2 style={{ fontFamily: serif, fontSize: 28, fontWeight: 300, color: T.navy, margin: 0 }}>{isEditing ? 'Edit Vendor' : 'Add Vendor'}</h2>
+                <p style={{
+                  fontFamily: jost, fontSize: 9, fontWeight: 400,
+                  letterSpacing: '0.28em', textTransform: 'uppercase',
+                  color: T.muted, marginBottom: 6,
+                }}>
+                  {isEditing ? 'Update Record' : 'New Registration'}
+                </p>
+                <h2 style={{ fontFamily: serif, fontSize: 28, fontWeight: 300, color: T.navy, margin: 0 }}>
+                  {isEditing ? 'Edit Vendor' : 'Add Vendor'}
+                </h2>
               </div>
-              <button onClick={() => setShowModal(false)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: T.muted, fontSize: 20, lineHeight: 1, padding: 4, transition: 'color 0.2s' }} onMouseEnter={e => e.currentTarget.style.color = T.text} onMouseLeave={e => e.currentTarget.style.color = T.muted}>✕</button>
+              <button
+                onClick={() => setShowModal(false)}
+                style={{
+                  background: 'none', border: 'none', cursor: 'pointer',
+                  color: T.muted, fontSize: 20, lineHeight: 1, padding: 4, transition: 'color 0.2s',
+                }}
+                onMouseEnter={e => e.currentTarget.style.color = T.text}
+                onMouseLeave={e => e.currentTarget.style.color = T.muted}
+              >
+                ✕
+              </button>
             </div>
 
-            {/* AI Card Scanner */}
-            <div style={{ background: T.dimBg, border: `1px dashed ${T.borderG}`, padding: 20, marginBottom: 28 }}>
+            {/* ── AI Card Scanner ── */}
+            <div style={{
+              background: T.dimBg, border: `1px dashed ${T.borderG}`,
+              padding: 20, marginBottom: 28,
+            }}>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14 }}>
-                <p style={{ fontFamily: jost, fontSize: 9, fontWeight: 400, letterSpacing: '0.28em', textTransform: 'uppercase', color: T.gold, margin: 0 }}>AI Card Scanner</p>
+                <p style={{
+                  fontFamily: jost, fontSize: 9, fontWeight: 400,
+                  letterSpacing: '0.28em', textTransform: 'uppercase', color: T.gold, margin: 0,
+                }}>
+                  AI Card Scanner
+                </p>
                 {isScanning && <Spinner />}
               </div>
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
                 {['front', 'back'].map(side => (
-                  <label key={side} style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', height: 100, background: 'white', border: `1px solid ${T.border}`, cursor: 'pointer', transition: 'border-color 0.2s' }} onMouseEnter={e => e.currentTarget.style.borderColor = T.gold} onMouseLeave={e => e.currentTarget.style.borderColor = T.border}>
-                    {cardImages[side] ? <img src={cardImages[side]} alt={side} style={{ height: '100%', width: '100%', objectFit: 'cover' }} /> : <><span style={{ fontSize: 20 }}>📷</span><p style={{ fontFamily: jost, fontSize: 9, fontWeight: 400, letterSpacing: '0.2em', textTransform: 'uppercase', color: T.muted, marginTop: 6, marginBottom: 0 }}>Scan {side}</p></>}
-                    <input type="file" accept="image/*" capture="environment" style={{ display: 'none' }} onChange={e => handleCardCapture(side, e)} />
+                  <label key={side} style={{
+                    display: 'flex', flexDirection: 'column', alignItems: 'center',
+                    justifyContent: 'center', height: 100,
+                    background: 'white', border: `1px solid ${T.border}`,
+                    cursor: 'pointer', transition: 'border-color 0.2s',
+                  }}
+                  onMouseEnter={e => e.currentTarget.style.borderColor = T.gold}
+                  onMouseLeave={e => e.currentTarget.style.borderColor = T.border}
+                  >
+                    {cardImages[side] ? (
+                      <img src={cardImages[side]} alt={side} style={{ height: '100%', width: '100%', objectFit: 'cover' }} />
+                    ) : (
+                      <>
+                        <span style={{ fontSize: 20 }}>📷</span>
+                        <p style={{
+                          fontFamily: jost, fontSize: 9, fontWeight: 400,
+                          letterSpacing: '0.2em', textTransform: 'uppercase',
+                          color: T.muted, marginTop: 6, marginBottom: 0,
+                        }}>
+                          Scan {side}
+                        </p>
+                      </>
+                    )}
+                    <input type="file" accept="image/*" capture="environment" style={{ display: 'none' }}
+                      onChange={e => handleCardCapture(side, e)} />
                   </label>
                 ))}
               </div>
               {(cardImages.front || cardImages.back) && (
-                <button onClick={handleScanCard} disabled={isScanning} style={{ width: '100%', marginTop: 12, padding: '11px 0', background: isScanning ? T.borderG : T.gold, color: T.navy, border: 'none', cursor: isScanning ? 'not-allowed' : 'pointer', fontFamily: jost, fontSize: 10, fontWeight: 500, letterSpacing: '0.22em', textTransform: 'uppercase', transition: 'background 0.25s' }}>{isScanning ? 'Extracting…' : '✨ Auto-Fill Fields'}</button>
+                <button
+                  onClick={handleScanCard}
+                  disabled={isScanning}
+                  style={{
+                    width: '100%', marginTop: 12, padding: '11px 0',
+                    background: isScanning ? T.borderG : T.gold,
+                    color: T.navy, border: 'none', cursor: isScanning ? 'not-allowed' : 'pointer',
+                    fontFamily: jost, fontSize: 10, fontWeight: 500,
+                    letterSpacing: '0.22em', textTransform: 'uppercase',
+                    transition: 'background 0.25s',
+                  }}
+                >
+                  {isScanning ? 'Extracting…' : '✨ Auto-Fill Fields'}
+                </button>
               )}
             </div>
 
-            {/* Core Fields */}
+            {/* ── Core fields ── */}
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 20, marginBottom: 20 }}>
               <div>
-                <label style={{ display: 'block', fontFamily: jost, fontSize: 9, fontWeight: 400, letterSpacing: '0.25em', textTransform: 'uppercase', color: T.muted, marginBottom: 8 }}>Company Name</label>
-                <FocusInput value={formData.companyName} onChange={e => setFormData({ ...formData, companyName: e.target.value })} placeholder="Company name" />
+                <label style={{
+                  display: 'block', fontFamily: jost, fontSize: 9, fontWeight: 400,
+                  letterSpacing: '0.25em', textTransform: 'uppercase', color: T.muted, marginBottom: 8,
+                }}>
+                  Company Name
+                </label>
+                <FocusInput
+                  value={formData.companyName}
+                  onChange={e => setFormData({ ...formData, companyName: e.target.value })}
+                  placeholder="Company name"
+                />
               </div>
               <div>
-                <label style={{ display: 'block', fontFamily: jost, fontSize: 9, fontWeight: 400, letterSpacing: '0.25em', textTransform: 'uppercase', color: T.muted, marginBottom: 8 }}>Category</label>
-                <select value={formData.category} onChange={e => setFormData({ ...formData, category: e.target.value, subCategory: '' })} style={{ ...inputStyle(false), appearance: 'none', cursor: 'pointer', color: formData.category ? T.text : T.muted }}>
+                <label style={{
+                  display: 'block', fontFamily: jost, fontSize: 9, fontWeight: 400,
+                  letterSpacing: '0.25em', textTransform: 'uppercase', color: T.muted, marginBottom: 8,
+                }}>
+                  Category
+                </label>
+                <select
+                  value={formData.category}
+                  onChange={e => setFormData({ ...formData, category: e.target.value, subCategory: '' })}
+                  style={{
+                    ...inputStyle(false), appearance: 'none',
+                    cursor: 'pointer', color: formData.category ? T.text : T.muted,
+                  }}
+                >
                   <option value="">Select category…</option>
                   <option value="Gifting">Gifting</option>
                   <option value="Travel">Travel</option>
@@ -778,150 +1539,597 @@ const VendorList = () => {
               </div>
             </div>
 
-            {/* Duplicate Warnings */}
+            {/* ── F1: Preferred Vendor toggle ── */}
+            <div style={{
+              marginBottom: 20,
+              display: 'flex', alignItems: 'center', gap: 14,
+              padding: '14px 16px',
+              background: formData.isPreferred ? 'rgba(184,151,90,0.06)' : T.offwhite,
+              border: `1px solid ${formData.isPreferred ? T.borderG : T.border}`,
+              transition: 'background 0.2s, border-color 0.2s',
+              cursor: 'pointer',
+            }}
+              onClick={() => setFormData(p => ({ ...p, isPreferred: !p.isPreferred }))}
+            >
+              {/* Custom styled checkbox */}
+              <div style={{
+                width: 18, height: 18, flexShrink: 0,
+                border: `1.5px solid ${formData.isPreferred ? T.gold : 'rgba(0,0,0,0.2)'}`,
+                borderRadius: 2,
+                background: formData.isPreferred ? T.gold : 'white',
+                display: 'flex', alignItems: 'center', justifyContent: 'center',
+                transition: 'all 0.18s',
+              }}>
+                {formData.isPreferred && (
+                  <svg width="10" height="8" viewBox="0 0 10 8" fill="none">
+                    <path d="M1 4L3.8 7L9 1" stroke={T.navy} strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+                  </svg>
+                )}
+              </div>
+              <Star
+                size={13}
+                style={{
+                  fill:  formData.isPreferred ? T.gold : 'none',
+                  color: formData.isPreferred ? T.gold : T.muted,
+                  transition: 'all 0.18s', flexShrink: 0,
+                }}
+              />
+              <div>
+                <p style={{
+                  fontFamily: jost, fontSize: 11, fontWeight: 500,
+                  color: formData.isPreferred ? T.gold : T.text, margin: 0,
+                  transition: 'color 0.18s',
+                }}>
+                  Preferred Vendor
+                </p>
+                <p style={{
+                  fontFamily: jost, fontSize: 10, fontWeight: 300,
+                  color: T.muted, margin: '2px 0 0',
+                }}>
+                  Mark this vendor as a go-to choice
+                </p>
+              </div>
+            </div>
+
+            {/* ── Duplicate vendor warning ── */}
             {!isEditing && duplicateMatches.length > 0 && (
-              <div style={{ marginBottom: 20, background: '#fffbeb', border: '1px solid #f59e0b', padding: '12px 14px', display: 'flex', gap: 10, alignItems: 'flex-start' }}>
+              <div style={{
+                marginBottom: 20,
+                background: '#fffbeb',
+                border: '1px solid #f59e0b',
+                padding: '12px 14px',
+                display: 'flex', gap: 10, alignItems: 'flex-start',
+              }}>
+                {/* Warning icon */}
                 <span style={{ fontSize: 16, lineHeight: 1, flexShrink: 0, marginTop: 1 }}>⚠️</span>
                 <div style={{ flex: 1, minWidth: 0 }}>
-                  <p style={{ margin: '0 0 8px', fontFamily: jost, fontSize: 11, fontWeight: 500, color: '#92400e', letterSpacing: '0.02em' }}>{duplicateMatches.length === 1 ? 'A similar vendor may already exist' : `${duplicateMatches.length} similar vendors may already exist`}</p>
+                  <p style={{
+                    margin: '0 0 8px', fontFamily: jost, fontSize: 11, fontWeight: 500,
+                    color: '#92400e', letterSpacing: '0.02em',
+                  }}>
+                    {duplicateMatches.length === 1
+                      ? 'A similar vendor may already exist'
+                      : `${duplicateMatches.length} similar vendors may already exist`}
+                  </p>
                   <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
                     {duplicateMatches.map(v => (
-                      <div key={v._id} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
-                        <span style={{ fontFamily: jost, fontSize: 11, fontWeight: 300, color: '#78350f', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{v.companyName}{v.state ? <span style={{ color: '#a16207', marginLeft: 6 }}>· {v.state}</span> : null}{v.category ? <span style={{ color: '#a16207', marginLeft: 6 }}>· {v.category}</span> : null}</span>
-                        <button type="button" onClick={() => handleJumpToVendor(v)} style={{ flexShrink: 0, background: 'none', border: '1px solid #f59e0b', color: '#92400e', cursor: 'pointer', fontFamily: jost, fontSize: 9, fontWeight: 500, letterSpacing: '0.15em', textTransform: 'uppercase', padding: '3px 10px', whiteSpace: 'nowrap', transition: 'background 0.15s' }} onMouseEnter={e => e.currentTarget.style.background = '#fef3c7'} onMouseLeave={e => e.currentTarget.style.background = 'none'}>View</button>
+                      <div key={v._id} style={{
+                        display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                        gap: 8,
+                      }}>
+                        <span style={{ fontFamily: jost, fontSize: 11, fontWeight: 300, color: '#78350f', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                          {v.companyName}
+                          {v.state ? <span style={{ color: '#a16207', marginLeft: 6 }}>· {v.state}</span> : null}
+                          {v.category ? <span style={{ color: '#a16207', marginLeft: 6 }}>· {v.category}</span> : null}
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => handleJumpToVendor(v)}
+                          style={{
+                            flexShrink: 0,
+                            background: 'none', border: '1px solid #f59e0b',
+                            color: '#92400e', cursor: 'pointer',
+                            fontFamily: jost, fontSize: 9, fontWeight: 500,
+                            letterSpacing: '0.15em', textTransform: 'uppercase',
+                            padding: '3px 10px',
+                            whiteSpace: 'nowrap',
+                            transition: 'background 0.15s',
+                          }}
+                          onMouseEnter={e => e.currentTarget.style.background = '#fef3c7'}
+                          onMouseLeave={e => e.currentTarget.style.background = 'none'}
+                        >
+                          View
+                        </button>
                       </div>
                     ))}
                   </div>
+                  <p style={{ margin: '8px 0 0', fontFamily: jost, fontSize: 10, fontWeight: 300, color: '#a16207' }}>
+                    You can still proceed if this is a different vendor.
+                  </p>
                 </div>
               </div>
             )}
 
-            {/* Location & Products layouts unchanged... */}
+            {/* Sub Category */}
             <div style={{ marginBottom: 20 }}>
-              <label style={{ display: 'block', fontFamily: jost, fontSize: 9, fontWeight: 400, letterSpacing: '0.25em', textTransform: 'uppercase', color: formData.category ? T.muted : 'rgba(0,0,0,0.25)', marginBottom: 8 }}>Sub Category{!formData.category && <span style={{ marginLeft: 8, fontWeight: 300, textTransform: 'none', letterSpacing: 0, fontSize: 9 }}>— select a category first</span>}</label>
+              <label style={{
+                display: 'block', fontFamily: jost, fontSize: 9, fontWeight: 400,
+                letterSpacing: '0.25em', textTransform: 'uppercase',
+                color: formData.category ? T.muted : 'rgba(0,0,0,0.25)', marginBottom: 8,
+              }}>
+                Sub Category
+                {!formData.category && (
+                  <span style={{ marginLeft: 8, fontWeight: 300, textTransform: 'none', letterSpacing: 0, fontSize: 9 }}>
+                    — select a category first
+                  </span>
+                )}
+              </label>
               <div style={{ opacity: formData.category ? 1 : 0.4, pointerEvents: formData.category ? 'auto' : 'none' }}>
-                <SubCategoryInput value={formData.subCategory} onChange={val => setFormData({ ...formData, subCategory: val })} suggestions={availableSubCategories} placeholder={formData.category ? 'Type sub category…' : 'Select category first…'} />
+                <SubCategoryInput
+                  value={formData.subCategory}
+                  onChange={val => setFormData({ ...formData, subCategory: val })}
+                  suggestions={availableSubCategories}
+                  placeholder={formData.category ? 'Type sub category…' : 'Select category first…'}
+                />
               </div>
             </div>
 
+            {/* State */}
             <div style={{ marginBottom: 20 }}>
-              <label style={{ display: 'block', fontFamily: jost, fontSize: 9, fontWeight: 400, letterSpacing: '0.25em', textTransform: 'uppercase', color: T.muted, marginBottom: 8 }}>State / Region</label>
-              <SearchableSelect value={formData.state} onChange={s => setFormData({ ...formData, state: s, city: '' })} options={INDIA_STATES} placeholder="Select state…" />
+              <label style={{
+                display: 'block', fontFamily: jost, fontSize: 9, fontWeight: 400,
+                letterSpacing: '0.25em', textTransform: 'uppercase', color: T.muted, marginBottom: 8,
+              }}>
+                State / Region
+              </label>
+              <SearchableSelect
+                value={formData.state}
+                onChange={s => setFormData({ ...formData, state: s, city: '' })}
+                options={INDIA_STATES}
+                placeholder="Select state…"
+              />
             </div>
 
+            {/* City */}
             <div style={{ marginBottom: 20 }}>
-              <label style={{ display: 'block', fontFamily: jost, fontSize: 9, fontWeight: 400, letterSpacing: '0.25em', textTransform: 'uppercase', color: T.muted, marginBottom: 8 }}>City{!formData.state && <span style={{ marginLeft: 8, fontWeight: 300, textTransform: 'none', letterSpacing: 0, fontSize: 9 }}>— select a state first</span>}</label>
-              <SearchableSelect value={formData.city} onChange={city => setFormData({ ...formData, city })} options={formData.state ? (CITIES_BY_STATE[formData.state] || []) : []} placeholder={formData.state ? 'Select city…' : 'Select state first…'} disabled={!formData.state} />
+              <label style={{
+                display: 'block', fontFamily: jost, fontSize: 9, fontWeight: 400,
+                letterSpacing: '0.25em', textTransform: 'uppercase', color: T.muted, marginBottom: 8,
+              }}>
+                City
+                {!formData.state && (
+                  <span style={{ marginLeft: 8, fontWeight: 300, textTransform: 'none', letterSpacing: 0, fontSize: 9 }}>
+                    — select a state first
+                  </span>
+                )}
+              </label>
+              <SearchableSelect
+                value={formData.city}
+                onChange={city => setFormData({ ...formData, city })}
+                options={formData.state ? (CITIES_BY_STATE[formData.state] || []) : []}
+                placeholder={formData.state ? 'Select city…' : 'Select state first…'}
+                disabled={!formData.state}
+              />
             </div>
 
+            {/* ── F2: Website URL ── */}
             <div style={{ marginBottom: 20 }}>
-              <label style={{ display: 'block', fontFamily: jost, fontSize: 9, fontWeight: 400, letterSpacing: '0.25em', textTransform: 'uppercase', color: T.muted, marginBottom: 8 }}>Products Supplied</label>
-              <FocusTextarea value={formData.suppliedProducts} onChange={e => setFormData({ ...formData, suppliedProducts: e.target.value })} placeholder="List products or services supplied…" />
+              <label style={{
+                display: 'block', fontFamily: jost, fontSize: 9, fontWeight: 400,
+                letterSpacing: '0.25em', textTransform: 'uppercase', color: T.muted, marginBottom: 8,
+              }}>
+                Website URL
+              </label>
+              <div style={{ display: 'flex', gap: 8, alignItems: 'stretch' }}>
+                {/* URL input */}
+                <div style={{ flex: 1 }}>
+                  <FocusInput
+                    value={formData.websiteUrl}
+                    onChange={e => setFormData({ ...formData, websiteUrl: e.target.value })}
+                    placeholder="https://vendor-website.com"
+                    type="url"
+                  />
+                </div>
+
+                {/* Open in new tab */}
+                <button
+                  type="button"
+                  title="Open website in new tab"
+                  onClick={() => {
+                    const u = formData.websiteUrl?.trim();
+                    if (!u) return;
+                    const href = /^https?:\/\//i.test(u) ? u : `https://${u}`;
+                    window.open(href, '_blank', 'noopener,noreferrer');
+                  }}
+                  style={{
+                    display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+                    width: 40, flexShrink: 0,
+                    background: 'white', border: `1px solid ${T.border}`, borderRadius: 3,
+                    color: T.muted, cursor: 'pointer',
+                    transition: 'border-color 0.2s, color 0.2s',
+                  }}
+                  onMouseEnter={e => {
+                    e.currentTarget.style.borderColor = T.gold;
+                    e.currentTarget.style.color = T.gold;
+                  }}
+                  onMouseLeave={e => {
+                    e.currentTarget.style.borderColor = T.border;
+                    e.currentTarget.style.color = T.muted;
+                  }}
+                >
+                  <ArrowUpRight size={14} />
+                </button>
+
+                {/* Extract website data */}
+                <button
+                  type="button"
+                  onClick={handleExtractMenu}
+                  disabled={isExtractingMenu || !formData.websiteUrl?.trim()}
+                  title="Extract service categories from website navigation"
+                  style={{
+                    display: 'inline-flex', alignItems: 'center', gap: 6,
+                    padding: '0 14px', flexShrink: 0,
+                    background: isExtractingMenu ? T.borderG : T.dimBg,
+                    border: `1px solid ${T.borderG}`, borderRadius: 3,
+                    color: isExtractingMenu ? T.muted : T.gold,
+                    fontFamily: jost, fontSize: 9, fontWeight: 500,
+                    letterSpacing: '0.18em', textTransform: 'uppercase',
+                    cursor: (isExtractingMenu || !formData.websiteUrl?.trim()) ? 'not-allowed' : 'pointer',
+                    opacity: !formData.websiteUrl?.trim() ? 0.5 : 1,
+                    transition: 'background 0.2s, color 0.2s',
+                    whiteSpace: 'nowrap',
+                  }}
+                  onMouseEnter={e => {
+                    if (!isExtractingMenu && formData.websiteUrl?.trim()) {
+                      e.currentTarget.style.background = 'rgba(184,151,90,0.1)';
+                    }
+                  }}
+                  onMouseLeave={e => {
+                    e.currentTarget.style.background = isExtractingMenu ? T.borderG : T.dimBg;
+                  }}
+                >
+                  {isExtractingMenu
+                    ? <><Loader2 size={11} style={{ animation: 'spin 0.7s linear infinite' }} /> Extracting…</>
+                    : <><Globe size={11} /> Extract Data</>
+                  }
+                </button>
+              </div>
             </div>
 
-            {/* ── Points of Contact Form Fields ── */}
+            {/* Products */}
+            <div style={{ marginBottom: 20 }}>
+              <label style={{
+                display: 'block', fontFamily: jost, fontSize: 9, fontWeight: 400,
+                letterSpacing: '0.25em', textTransform: 'uppercase', color: T.muted, marginBottom: 8,
+              }}>
+                Products Supplied
+              </label>
+              <FocusTextarea
+                value={formData.suppliedProducts}
+                onChange={e => setFormData({ ...formData, suppliedProducts: e.target.value })}
+                placeholder="List products or services supplied…"
+              />
+            </div>
+
+            {/* ── Contacts ── */}
             <div style={{ borderTop: `1px solid ${T.border}`, paddingTop: 24, marginBottom: 24 }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
-                <p style={{ fontFamily: jost, fontSize: 9, fontWeight: 400, letterSpacing: '0.28em', textTransform: 'uppercase', color: 'rgba(184,151,90,0.65)', margin: 0 }}>Points of Contact</p>
-                <button onClick={handleAddContact} style={{ background: 'none', border: `1px solid ${T.borderG}`, cursor: 'pointer', padding: '5px 14px', fontFamily: jost, fontSize: 9, fontWeight: 400, letterSpacing: '0.2em', textTransform: 'uppercase', color: T.gold, transition: 'background 0.2s' }} onMouseEnter={e => e.currentTarget.style.background = T.dimBg} onMouseLeave={e => e.currentTarget.style.background = 'none'}>+ Add Person</button>
+              <div style={{
+                display: 'flex', justifyContent: 'space-between',
+                alignItems: 'center', marginBottom: 16,
+              }}>
+                <p style={{
+                  fontFamily: jost, fontSize: 9, fontWeight: 400,
+                  letterSpacing: '0.28em', textTransform: 'uppercase',
+                  color: 'rgba(184,151,90,0.65)', margin: 0,
+                }}>
+                  Points of Contact
+                </p>
+                <button
+                  onClick={handleAddContact}
+                  style={{
+                    background: 'none', border: `1px solid ${T.borderG}`,
+                    cursor: 'pointer', padding: '5px 14px',
+                    fontFamily: jost, fontSize: 9, fontWeight: 400,
+                    letterSpacing: '0.2em', textTransform: 'uppercase',
+                    color: T.gold, transition: 'background 0.2s',
+                  }}
+                  onMouseEnter={e => e.currentTarget.style.background = T.dimBg}
+                  onMouseLeave={e => e.currentTarget.style.background = 'none'}
+                >
+                  + Add Person
+                </button>
               </div>
               <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
                 {formData.contacts.map((c, i) => (
-                  <div key={i} style={{ display: 'flex', gap: 10, alignItems: 'center', padding: '14px 16px', background: T.offwhite, border: `1px solid ${T.border}` }}>
+                  <div key={i} style={{
+                    display: 'flex', gap: 10, alignItems: 'center',
+                    padding: '14px 16px', background: T.offwhite, border: `1px solid ${T.border}`,
+                  }}>
                     <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 10, flex: 1 }}>
-                      <FocusInput value={c.name} onChange={e => handleContactChange(i, 'name', e.target.value)} placeholder="Name" style={{ fontSize: 12 }} />
-                      
-                      {/* Integrated instant verification link next to field input box */}
-                      <div style={{ position: 'relative', display: 'flex', alignItems: 'center' }}>
-                        <FocusInput value={c.phone} onChange={e => handleContactChange(i, 'phone', e.target.value)} placeholder="Phone" style={{ fontSize: 12, paddingRight: c.phone ? '30px' : '14px' }} />
-                        {c.phone && (
-                          <button
-                            type="button"
-                            onClick={() => openWhatsApp(c.phone)}
-                            title="Test desktop application link"
-                            style={{ position: 'absolute', right: 10, background: 'none', border: 'none', padding: 0, cursor: 'pointer', display: 'flex', alignItems: 'center', color: 'rgba(0,0,0,0.2)', transition: 'color 0.2s' }}
-                            onMouseEnter={e => e.currentTarget.style.color = T.gold}
-                            onMouseLeave={e => e.currentTarget.style.color = 'rgba(0,0,0,0.2)'}
-                          >
-                            <MessageSquare size={12} />
-                          </button>
-                        )}
-                      </div>
-                      
-                      <FocusInput value={c.email} onChange={e => handleContactChange(i, 'email', e.target.value)} placeholder="Email" style={{ fontSize: 12 }} />
+                      {['name', 'phone', 'email'].map(field => (
+                        <FocusInput
+                          key={field}
+                          value={c[field]}
+                          onChange={e => handleContactChange(i, field, e.target.value)}
+                          placeholder={field.charAt(0).toUpperCase() + field.slice(1)}
+                          style={{ fontSize: 12 }}
+                        />
+                      ))}
                     </div>
-                    <button onClick={() => handleRemoveContact(i)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: T.muted, fontSize: 16, lineHeight: 1, flexShrink: 0, transition: 'color 0.2s' }} onMouseEnter={e => e.currentTarget.style.color = T.dangerHover} onMouseLeave={e => e.currentTarget.style.color = T.muted}>✕</button>
+                    {/* WhatsApp Message Button */}
+                    {c.phone && (
+                      <button
+                        onClick={() => openWhatsApp(c.phone)}
+                        title="Message via WhatsApp"
+                        style={{
+                          background: 'none', border: 'none', cursor: 'pointer',
+                          color: T.muted, display: 'flex', alignItems: 'center', justifyContent: 'center',
+                          padding: '6px 8px', flexShrink: 0, transition: 'color 0.18s',
+                        }}
+                        onMouseEnter={e => e.currentTarget.style.color = T.gold}
+                        onMouseLeave={e => e.currentTarget.style.color = T.muted}
+                      >
+                        <MessageSquare size={16} />
+                      </button>
+                    )}
+                    <button
+                      onClick={() => handleRemoveContact(i)}
+                      style={{
+                        background: 'none', border: 'none', cursor: 'pointer',
+                        color: T.muted, fontSize: 16, lineHeight: 1, flexShrink: 0, transition: 'color 0.2s',
+                      }}
+                      onMouseEnter={e => e.currentTarget.style.color = T.dangerHover}
+                      onMouseLeave={e => e.currentTarget.style.color = T.muted}
+                    >
+                      ✕
+                    </button>
                   </div>
                 ))}
               </div>
             </div>
 
-            {/* Media attachments template unchanged... */}
+            {/* ── Media attachments ── */}
             <div style={{ borderTop: `1px solid ${T.border}`, paddingTop: 24, marginBottom: 24 }}>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14 }}>
-                <p style={{ fontFamily: jost, fontSize: 9, fontWeight: 400, letterSpacing: '0.28em', textTransform: 'uppercase', color: 'rgba(184,151,90,0.65)', margin: 0, display: 'flex', alignItems: 'center', gap: 6 }}><Paperclip size={10} /> Attachments<span style={{ fontWeight: 300, color: T.muted, textTransform: 'none', letterSpacing: 0 }}>· images, documents, video</span></p>
-                <label style={{ display: 'inline-flex', alignItems: 'center', gap: 6, background: T.gold, color: T.navy, border: 'none', padding: '6px 16px', cursor: 'pointer', fontFamily: jost, fontSize: 9, fontWeight: 500, letterSpacing: '0.2em', textTransform: 'uppercase', transition: 'background 0.25s' }} onMouseEnter={e => e.currentTarget.style.background = T.gold2} onMouseLeave={e => e.currentTarget.style.background = T.gold}><Plus size={10} /> Add Files<input type="file" multiple style={{ display: 'none' }} accept="image/*,video/*,application/pdf,.doc,.docx,.xls,.xlsx" onChange={e => setNewMediaFiles(prev => [...prev, ...Array.from(e.target.files)])} /></label>
+                <p style={{
+                  fontFamily: jost, fontSize: 9, fontWeight: 400,
+                  letterSpacing: '0.28em', textTransform: 'uppercase',
+                  color: 'rgba(184,151,90,0.65)', margin: 0,
+                  display: 'flex', alignItems: 'center', gap: 6,
+                }}>
+                  <Paperclip size={10} /> Attachments
+                  <span style={{ fontWeight: 300, color: T.muted, textTransform: 'none', letterSpacing: 0 }}>
+                    · images, documents, video
+                  </span>
+                </p>
+                <label style={{
+                  display: 'inline-flex', alignItems: 'center', gap: 6,
+                  background: T.gold, color: T.navy, border: 'none',
+                  padding: '6px 16px', cursor: 'pointer',
+                  fontFamily: jost, fontSize: 9, fontWeight: 500,
+                  letterSpacing: '0.2em', textTransform: 'uppercase',
+                  transition: 'background 0.25s',
+                }}
+                onMouseEnter={e => e.currentTarget.style.background = T.gold2}
+                onMouseLeave={e => e.currentTarget.style.background = T.gold}
+                >
+                  <Plus size={10} /> Add Files
+                  <input type="file" multiple style={{ display: 'none' }}
+                    accept="image/*,video/*,application/pdf,.doc,.docx,.xls,.xlsx"
+                    onChange={e => setNewMediaFiles(prev => [...prev, ...Array.from(e.target.files)])} />
+                </label>
               </div>
 
+              {/* Existing media (edit mode) */}
               {isEditing && (() => {
                 const editingVendor = vendors.find(v => v._id === currentId);
                 const existingMedia = (editingVendor?.media || []).filter(m => keepMediaIds.includes(m._id));
                 return existingMedia.length > 0 ? (
                   <div style={{ marginBottom: 12 }}>
-                    <p style={{ fontFamily: jost, fontSize: 9, fontWeight: 400, letterSpacing: '0.2em', textTransform: 'uppercase', color: T.muted, marginBottom: 8 }}>Existing Files</p>
+                    <p style={{
+                      fontFamily: jost, fontSize: 9, fontWeight: 400,
+                      letterSpacing: '0.2em', textTransform: 'uppercase',
+                      color: T.muted, marginBottom: 8,
+                    }}>
+                      Existing Files
+                    </p>
                     {existingMedia.map(m => (
-                      <div key={m._id} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', background: 'white', border: `1px solid ${T.border}`, padding: '10px 14px', marginBottom: 6 }}>
+                      <div key={m._id} style={{
+                        display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                        background: 'white', border: `1px solid ${T.border}`,
+                        padding: '10px 14px', marginBottom: 6,
+                      }}>
                         <div style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 0 }}>
                           {mediaIcon(m.mimeType)}
                           <div style={{ minWidth: 0 }}>
-                            <p style={{ fontFamily: jost, fontSize: 11, fontWeight: 500, color: T.text, margin: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{m.name}</p>
-                            <p style={{ fontFamily: jost, fontSize: 9, fontWeight: 300, color: T.muted, margin: 0 }}>{fmtSize(m.size)}</p>
+                            <p style={{
+                              fontFamily: jost, fontSize: 11, fontWeight: 500, color: T.text,
+                              margin: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                            }}>
+                              {m.name}
+                            </p>
+                            <p style={{ fontFamily: jost, fontSize: 9, fontWeight: 300, color: T.muted, margin: 0 }}>
+                              {fmtSize(m.size)}
+                            </p>
                           </div>
                         </div>
-                        <button onClick={e => handleDeleteMedia(currentId, m._id, e)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: T.danger, display: 'flex' }} onMouseEnter={e => e.currentTarget.style.color = T.dangerHover} onMouseLeave={e => e.currentTarget.style.color = T.danger}><X size={13} /></button>
+                        <button
+                          onClick={e => handleDeleteMedia(currentId, m._id, e)}
+                          style={{ background: 'none', border: 'none', cursor: 'pointer', color: T.danger, display: 'flex' }}
+                          onMouseEnter={e => e.currentTarget.style.color = T.dangerHover}
+                          onMouseLeave={e => e.currentTarget.style.color = T.danger}
+                        >
+                          <X size={13} />
+                        </button>
                       </div>
                     ))}
                   </div>
                 ) : null;
               })()}
 
+              {/* Staged new files */}
               {newMediaFiles.length > 0 && (
                 <div>
+                  <p style={{
+                    fontFamily: jost, fontSize: 9, fontWeight: 400,
+                    letterSpacing: '0.2em', textTransform: 'uppercase',
+                    color: T.gold, marginBottom: 8,
+                  }}>
+                    New Files ({newMediaFiles.length})
+                  </p>
                   {newMediaFiles.map((f, i) => (
-                    <div key={i} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', background: T.dimBg, border: `1px solid ${T.borderG}`, padding: '10px 14px', marginBottom: 6 }}>
+                    <div key={i} style={{
+                      display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                      background: T.dimBg, border: `1px solid ${T.borderG}`,
+                      padding: '10px 14px', marginBottom: 6,
+                    }}>
                       <div style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 0 }}>
                         {mediaIcon(f.type)}
                         <div style={{ minWidth: 0 }}>
-                          <p style={{ fontFamily: jost, fontSize: 11, fontWeight: 500, color: T.gold, margin: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{f.name}</p>
-                          <p style={{ fontFamily: jost, fontSize: 9, fontWeight: 300, color: T.muted, margin: 0 }}>{fmtSize(f.size)}</p>
+                          <p style={{
+                            fontFamily: jost, fontSize: 11, fontWeight: 500, color: T.gold,
+                            margin: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                          }}>
+                            {f.name}
+                          </p>
+                          <p style={{ fontFamily: jost, fontSize: 9, fontWeight: 300, color: T.muted, margin: 0 }}>
+                            {fmtSize(f.size)}
+                          </p>
                         </div>
                       </div>
-                      <button onClick={() => setNewMediaFiles(prev => prev.filter((_, j) => j !== i))} style={{ background: 'none', border: 'none', cursor: 'pointer', color: T.danger, display: 'flex' }} onMouseEnter={e => e.currentTarget.style.color = T.dangerHover} onMouseLeave={e => e.currentTarget.style.color = T.danger}><X size={13} /></button>
+                      <button
+                        onClick={() => setNewMediaFiles(prev => prev.filter((_, j) => j !== i))}
+                        style={{ background: 'none', border: 'none', cursor: 'pointer', color: T.danger, display: 'flex' }}
+                        onMouseEnter={e => e.currentTarget.style.color = T.dangerHover}
+                        onMouseLeave={e => e.currentTarget.style.color = T.danger}
+                      >
+                        <X size={13} />
+                      </button>
                     </div>
                   ))}
                 </div>
               )}
+
+              {newMediaFiles.length === 0 && !(isEditing && vendors.find(v => v._id === currentId)?.media?.length) && (
+                <p style={{
+                  fontFamily: jost, fontSize: 11, fontWeight: 300,
+                  color: 'rgba(0,0,0,0.2)', textAlign: 'center', padding: '12px 0',
+                }}>
+                  No files attached yet
+                </p>
+              )}
             </div>
 
-            {/* Modal Footer Controls */}
-            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 14, borderTop: `1px solid ${T.border}`, padding: '20px 0 28px', position: 'sticky', bottom: 0, background: 'white' }}>
-              <button onClick={() => setShowModal(false)} style={{ background: 'none', border: 'none', cursor: 'pointer', fontFamily: jost, fontSize: 10, fontWeight: 400, letterSpacing: '0.2em', textTransform: 'uppercase', color: T.muted, padding: '10px 20px', transition: 'color 0.2s' }} onMouseEnter={e => e.currentTarget.style.color = T.text} onMouseLeave={e => e.currentTarget.style.color = T.muted}>Cancel</button>
-              <button onClick={handleSave} disabled={isSaving} style={{ display: 'inline-flex', alignItems: 'center', gap: 10, background: isSaving ? T.borderG : T.gold, color: T.navy, border: 'none', padding: '12px 36px', fontFamily: jost, fontSize: 10, fontWeight: 500, letterSpacing: '0.22em', textTransform: 'uppercase', cursor: isSaving ? 'not-allowed' : 'pointer', transition: 'background 0.25s' }} onMouseEnter={e => { if (!isSaving) e.currentTarget.style.background = T.gold2; }} onMouseLeave={e => { if (!isSaving) e.currentTarget.style.background = T.gold; }}>{isSaving && <Spinner />}{isSaving ? 'Saving…' : 'Confirm'}</button>
+            {/* Modal footer */}
+            <div style={{
+              display: 'flex', justifyContent: 'flex-end', gap: 14,
+              borderTop: `1px solid ${T.border}`,
+              padding: '20px 0 28px',
+              position: 'sticky', bottom: 0,
+              background: 'white',
+            }}>
+              <button
+                onClick={() => setShowModal(false)}
+                style={{
+                  background: 'none', border: 'none', cursor: 'pointer',
+                  fontFamily: jost, fontSize: 10, fontWeight: 400,
+                  letterSpacing: '0.2em', textTransform: 'uppercase',
+                  color: T.muted, padding: '10px 20px', transition: 'color 0.2s',
+                }}
+                onMouseEnter={e => e.currentTarget.style.color = T.text}
+                onMouseLeave={e => e.currentTarget.style.color = T.muted}
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleSave}
+                disabled={isSaving}
+                style={{
+                  display: 'inline-flex', alignItems: 'center', gap: 10,
+                  background: isSaving ? T.borderG : T.gold,
+                  color: T.navy, border: 'none', padding: '12px 36px',
+                  fontFamily: jost, fontSize: 10, fontWeight: 500,
+                  letterSpacing: '0.22em', textTransform: 'uppercase',
+                  cursor: isSaving ? 'not-allowed' : 'pointer', transition: 'background 0.25s',
+                }}
+                onMouseEnter={e => { if (!isSaving) e.currentTarget.style.background = T.gold2; }}
+                onMouseLeave={e => { if (!isSaving) e.currentTarget.style.background = T.gold; }}
+              >
+                {isSaving && <Spinner />}
+                {isSaving ? 'Saving…' : 'Confirm'}
+              </button>
             </div>
           </div>
         </div>
       )}
 
-      {/* Lightbox markup left unchanged... */}
+      {/* ── Media Lightbox ──────────────────────────────────────────────── */}
       {lightboxMedia && (
-        <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.92)', zIndex: 200, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 16 }} onClick={() => setLightboxMedia(null)}>
-          <button style={{ position: 'absolute', top: 24, right: 24, background: 'none', border: 'none', cursor: 'pointer', color: 'rgba(255,255,255,0.5)', transition: 'color 0.2s' }} onMouseEnter={e => e.currentTarget.style.color = 'white'} onMouseLeave={e => e.currentTarget.style.color = 'rgba(255,255,255,0.5)'}><X size={28} /></button>
-          <div style={{ maxWidth: 900, width: '100%', maxHeight: '90vh', display: 'flex', flexDirection: 'column', alignItems: 'center' }} onClick={e => e.stopPropagation()}>
-            {lightboxMedia.mimeType?.startsWith('image/') ? <img src={lightboxMedia.url} alt={lightboxMedia.name} style={{ maxHeight: '80vh', maxWidth: '100%', objectFit: 'contain', borderRadius: 2 }} /> : lightboxMedia.mimeType?.startsWith('video/') ? <video src={lightboxMedia.url} controls autoPlay style={{ maxHeight: '80vh', maxWidth: '100%', borderRadius: 2 }} /> : <iframe src={lightboxMedia.url} title={lightboxMedia.name} style={{ width: '100%', height: '80vh', borderRadius: 2, background: 'white', border: 'none' }} />}
+        <div
+          style={{
+            position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.92)',
+            zIndex: 200, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 16,
+          }}
+          onClick={() => setLightboxMedia(null)}
+        >
+          <button
+            style={{
+              position: 'absolute', top: 24, right: 24,
+              background: 'none', border: 'none', cursor: 'pointer',
+              color: 'rgba(255,255,255,0.5)', transition: 'color 0.2s',
+            }}
+            onMouseEnter={e => e.currentTarget.style.color = 'white'}
+            onMouseLeave={e => e.currentTarget.style.color = 'rgba(255,255,255,0.5)'}
+          >
+            <X size={28} />
+          </button>
+          <div
+            style={{ maxWidth: 900, width: '100%', maxHeight: '90vh', display: 'flex', flexDirection: 'column', alignItems: 'center' }}
+            onClick={e => e.stopPropagation()}
+          >
+            <AuthMediaLightbox
+              proxyUrl={lightboxMedia.url}
+              mimeType={lightboxMedia.mimeType}
+              name={lightboxMedia.name}
+            />
             <div style={{ marginTop: 16, display: 'flex', alignItems: 'center', gap: 20 }}>
-              <span style={{ fontFamily: jost, fontSize: 12, fontWeight: 300, color: 'rgba(255,255,255,0.6)' }}>{lightboxMedia.name}</span>
-              <a href={lightboxMedia.url} download={lightboxMedia.name} onClick={e => e.stopPropagation()} style={{ display: 'inline-flex', alignItems: 'center', gap: 6, padding: '8px 20px', background: 'rgba(255,255,255,0.1)', color: 'white', textDecoration: 'none', fontFamily: jost, fontSize: 10, fontWeight: 400, letterSpacing: '0.2em', textTransform: 'uppercase', transition: 'background 0.2s' }} onMouseEnter={e => e.currentTarget.style.background = 'rgba(255,255,255,0.2)'} onMouseLeave={e => e.currentTarget.style.background = 'rgba(255,255,255,0.1)'}><Download size={13} /> Download
-              </a>
+              <span style={{ fontFamily: jost, fontSize: 12, fontWeight: 300, color: 'rgba(255,255,255,0.6)' }}>
+                {lightboxMedia.name}
+              </span>
+              <button
+                onClick={async (e) => {
+                  e.stopPropagation();
+                  try {
+                    const dlUrl = lightboxMedia.downloadUrl || lightboxMedia.url;
+                    const apiBase = api.defaults.baseURL?.replace(/\/$/, '') || '';
+                    const fullUrl = dlUrl.startsWith('http') ? dlUrl : `${apiBase}${dlUrl}`;
+                    const res = await fetch(fullUrl);
+                    const blob = await res.blob();
+                    const blobUrl = URL.createObjectURL(blob);
+                    const a = document.createElement('a');
+                    a.href = blobUrl;
+                    a.download = lightboxMedia.name;
+                    document.body.appendChild(a);
+                    a.click();
+                    document.body.removeChild(a);
+                    setTimeout(() => URL.revokeObjectURL(blobUrl), 10000);
+                  } catch {
+                    alert('Download failed.');
+                  }
+                }}
+                style={{
+                  display: 'inline-flex', alignItems: 'center', gap: 6,
+                  padding: '8px 20px', background: 'rgba(255,255,255,0.1)',
+                  color: 'white', border: 'none', cursor: 'pointer',
+                  fontFamily: jost, fontSize: 10, fontWeight: 400,
+                  letterSpacing: '0.2em', textTransform: 'uppercase',
+                  transition: 'background 0.2s',
+                }}
+                onMouseEnter={e => e.currentTarget.style.background = 'rgba(255,255,255,0.2)'}
+                onMouseLeave={e => e.currentTarget.style.background = 'rgba(255,255,255,0.1)'}
+              >
+                <Download size={13} /> Download
+              </button>
             </div>
           </div>
         </div>
