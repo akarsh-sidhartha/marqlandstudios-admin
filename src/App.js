@@ -47,6 +47,7 @@ import {
   TrendingUp,
   Truck,
   Target,
+  Briefcase,
 } from 'lucide-react';
 
 import { AuthProvider, useAuth } from './context/AuthContext';
@@ -77,6 +78,7 @@ const ActivityLogView     = lazy(() => import('./pages/ActivityLogView'));
 const TrendingProducts    = lazy(() => import('./pages/TrendingProducts'));
 const CourierTracking     = lazy(() => import('./pages/CourierTracking'));
 const LeadScout           = lazy(() => import('./pages/LeadScout'));
+const JobWorkAdmin        = lazy(() => import('./pages/JobWorkAdmin'));
 
 const log = createLogger('App');
 
@@ -139,6 +141,7 @@ export const PATH_TO_ROUTE_KEY = {
   '/trending-products':  'Trending Products',
   '/courier-tracking':   'Courier Tracking',
   '/admin/lead-scout':   'Lead Scout',
+  '/jobwork':            'Job Work',
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -149,7 +152,12 @@ const ROLE_DEFAULTS = {
   accounts:  ['Order Tracker', 'Payment Tracker', 'Vendors', 'Clients', 'Invoice Tracking'],
   sales:     ['Order Tracker', 'Sourcing Hub', 'Products', 'Saved Catalogues', 'Clients', 'Property List', 'Saved Offsites'],
   inventory: ['Products', 'Samples Provided', 'Saved Catalogues', 'Sourcing Hub', 'Property List', 'Saved Offsites'],
-  courier:   ['Courier Tracking'],
+  // CHANGED — couriers are now redirected out of the admin app entirely on
+  // login (see the AppShell check below) and self-serve their own shipments
+  // on the client site instead, same treatment as jobWork. This entry is
+  // effectively unreachable now, but kept correct/empty for consistency
+  // with UserManagement.js's ROLE_DEFAULTS.
+  courier:   [],
   viewer:    ['Order Tracker'],
 };
 
@@ -400,6 +408,7 @@ const Sidebar = () => {
                 <NavLink to="/"                 icon={Gift}    label="Order Tracker"    />
                 <NavLink to="/sourcinghub"      icon={Compass} label="Sourcing Hub"     />
                 <NavLink to="/courier-tracking" icon={Truck}   label="Courier Tracking" />
+                <NavLink to="/jobwork"          icon={Briefcase} label="Job Work" />
               </div>
             )}
           </nav>
@@ -610,6 +619,16 @@ const AppShell = () => {
     return <LoginPage />;
   }
 
+  // CHANGED — 'courier' added alongside 'jobWork'. Couriers now self-serve
+  // their own shipments on the client site (same shared /job-work entry
+  // point that branches by role — see marqlandstudios-client's
+  // JobWorkPage.js) instead of ever seeing the admin dashboard.
+  if (user?.role === 'jobWork' || user?.role === 'courier') {
+    const clientUrl = process.env.REACT_APP_CLIENT_URL || 'https://www.marqlandstudios.com';
+    window.location.href = `${clientUrl.replace(/\/$/, '')}/job-work`;
+    return <PageLoader message="Redirecting…" />;
+  }
+
   // Public routes — no auth required
   const PUBLIC_PREFIXES = ['/p/', '/respond/'];
   if (PUBLIC_PREFIXES.some((p) => window.location.pathname.startsWith(p))) {
@@ -643,6 +662,7 @@ const AppShell = () => {
             <Route path="/"                 element={<ProtectedRoute routeKey="Order Tracker"><OrderTracker /></ProtectedRoute>} />
             <Route path="/courier-tracking" element={<ProtectedRoute routeKey="Courier Tracking"><CourierTracking /></ProtectedRoute>} />
             <Route path="/sourcinghub"      element={<ProtectedRoute routeKey="Sourcing Hub"><SourcingHub /></ProtectedRoute>} />
+            <Route path="/jobwork"          element={<ProtectedRoute routeKey="Job Work"><JobWorkAdmin /></ProtectedRoute>} />
 
             {/* ── Gifting ── */}
             <Route path="/products"          element={<ProtectedRoute routeKey="Products"><ProductList /></ProtectedRoute>} />

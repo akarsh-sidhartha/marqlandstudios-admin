@@ -405,14 +405,20 @@ function Badge({ status }) {
 }
 
 function ProgressBar({ paid, total, height = 6 }) {
-  const pct   = total > 0 ? Math.min(100, (paid / total) * 100) : 0;
-  const color = pct === 100 ? '#10b981' : pct > 0 ? '#3b82f6' : '#e5e7eb';
+  const pct = total > 0 ? Math.min(100, (paid / total) * 100) : 0;
+  // Round before comparing — floating-point drift from repeated `amountPaid +=`
+  // additions on the backend can leave pct at e.g. 99.9999998, which would
+  // never satisfy a strict `=== 100` check and wrongly render as "in progress"
+  // (blue) on rows that are actually fully paid. The rounded value is also
+  // what's displayed as the percentage label, so the bar and label always agree.
+  const pctRounded = Math.round(pct);
+  const color = pctRounded >= 100 ? '#10b981' : pctRounded > 0 ? '#3b82f6' : '#e5e7eb';
   return (
     <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
       <div style={{ flex: 1, height, borderRadius: 99, background: '#e5e7eb', overflow: 'hidden' }}>
         <div style={{ width: `${pct}%`, height: '100%', background: color, borderRadius: 99, transition: 'width 0.5s ease' }} />
       </div>
-      <span style={{ fontSize: 11, color: '#6b7280', minWidth: 34 }}>{Math.round(pct)}%</span>
+      <span style={{ fontSize: 11, color: '#6b7280', minWidth: 34 }}>{pctRounded}%</span>
     </div>
   );
 }
@@ -1100,7 +1106,7 @@ function UploadInvoiceModal({ vendors, proformaInvoices, linkedPiId, onSave, onC
         <Field label="Total Amount" required><input type="number" style={IShi(af.total_amount)} value={form.total_amount} onChange={(e) => set('total_amount', e.target.value)} placeholder="0" /></Field>
         <Field label="CGST" hint={isInter ? 'N/A – inter-state' : ''}>
           <div style={isInter ? dim : {}}>
-            <input type="number" style={IShi(af.cgst)} value={isInter ? '0' : form.cgst} onChange={(e) => { if (!isInter) { set('cgst', e.target.value); set('sgst', e.target.value); } }} placeholder="0" disabled={isInter} />
+            <input type="number" style={IShi(af.cgst)} value={isInter ? '0' : form.cgst} onChange={(e) => { if (!isInter) set('cgst', e.target.value); }} placeholder="0" disabled={isInter} />
           </div>
         </Field>
         <Field label="SGST" hint={isInter ? 'N/A – inter-state' : ''}>
@@ -1816,7 +1822,7 @@ function PIFlowModal({ pi: piProp, payments, invoices, onMapPayment, onUploadInv
           <div style={{ display: 'grid', gridTemplateColumns: '120px 1fr 100px', alignItems: 'center', gap: 12, marginTop: 8, paddingTop: 8, borderTop: '1px solid #e2e8f0' }}>
             <div style={{ fontSize: 11, fontWeight: 700, color: '#475569' }}>TOTAL</div>
             <div style={{ height: 10, borderRadius: 99, background: '#e2e8f0', overflow: 'hidden' }}>
-              <div style={{ width: `${pi.totalAmount > 0 ? (pi.amountPaid / pi.totalAmount) * 100 : 0}%`, height: '100%', background: pi.amountDue === 0 ? '#10b981' : '#6366f1', borderRadius: 99 }} />
+              <div style={{ width: `${pi.totalAmount > 0 ? (pi.amountPaid / pi.totalAmount) * 100 : 0}%`, height: '100%', background: pi.amountDue < 1 ? '#10b981' : '#6366f1', borderRadius: 99 }} />
             </div>
             <div style={{ fontSize: 12, fontWeight: 800, color: '#6366f1', textAlign: 'right' }}>{fmt(pi.amountPaid)} / {fmt(pi.totalAmount)}</div>
           </div>
@@ -3105,7 +3111,7 @@ function MobileInvoicePage({ vendors, proformaInvoices, onSaved }) {
           <div>
             <Lbl>CGST</Lbl>
             <input type="number" style={ISh2(af.cgst)} value={form.cgst}
-              onChange={(e) => { set('cgst', e.target.value); set('sgst', e.target.value); }}
+              onChange={(e) => set('cgst', e.target.value)}
               placeholder="0" inputMode="decimal" />
           </div>
           <div>

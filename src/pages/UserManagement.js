@@ -2,15 +2,15 @@ import React, { useState, useEffect } from 'react';
 import { useAuth } from '../context/AuthContext';
 import {
   Shield, Clock, CheckCircle2, XCircle,
-  RefreshCw, Trash2, Mail, Send, X, Link2
+  RefreshCw, Trash2, Mail, Send, X, Link2, Handshake, Briefcase
 } from 'lucide-react';
 
-const ROLES = ['admin', 'accounts', 'sales', 'inventory', 'courier', 'viewer', 'supplier'];
+const ROLES = ['admin', 'accounts', 'sales', 'inventory', 'courier', 'viewer', 'supplier', 'jobWork'];
 
 // The stored role value stays 'supplier' (matches the backend enum and every
 // permission check in authMiddleware.js/supplierRoutes.js) — this is purely
 // a display label, since the Partner Portal is what everyone calls it.
-const ROLE_LABELS = { supplier: 'Partner' };
+const ROLE_LABELS = { supplier: 'Partner', jobWork: 'Job Work Vendor', courier: 'Courier Partner' };
 const roleLabel = (role) => ROLE_LABELS[role] || role;
 
 // ── All routes in the app — key = route name, path = used in ProtectedRoute ──
@@ -23,6 +23,7 @@ const ALL_ROUTES = [
   { key: 'Order Tracker',       path: '/'                   },
   { key: 'Courier Tracking',    path: '/courier-tracking'   },
   { key: 'Sourcing Hub',        path: '/sourcinghub'        },
+  { key: 'Job Work',            path: '/jobwork'            },
   // Gifting
   { key: 'Products',            path: '/products'           },
   { key: 'Samples Provided',    path: '/samplesprovided'    },
@@ -47,9 +48,15 @@ const ROLE_DEFAULTS = {
   accounts:  ['Order Tracker','Payment Tracker','Vendors','Clients'],
   sales:     ['Order Tracker','Sourcing Hub','Products','Saved Catalogues','Clients','Property List','Saved Offsites'],
   inventory: ['Products','Samples Provided','Saved Catalogues','Sourcing Hub','Property List','Saved Offsites'],
-  courier:   ['Courier Tracking'],
+  // CHANGED — couriers now self-serve their own shipments on the client site
+  // (www.marqlandstudios.com/job-work) and are redirected out of the admin
+  // app entirely on login, same as supplier/jobWork below. "Courier
+  // Tracking" stays available for staff roles that need the full oversight
+  // view (admin gets it via the ALL_ROUTES spread above).
+  courier:   [],
   viewer:    ['Order Tracker'],
   supplier:  [], // Partners never get internal app routes — they only ever hit /api/suppliers/*
+  jobWork:   [], // Job Work vendors never get internal app routes — they're redirected to /job-work on the client site
 };
 
 // Resolve the effective route list for a user
@@ -160,6 +167,7 @@ const ROLE_COLORS = {
   courier: { bg: '#1a2e1a', text: '#86efac', border: '#16a34a' },
   viewer:    { bg: '#1e293b', text: '#94a3b8', border: '#475569' },
   supplier:  { bg: '#2e2410', text: '#e6c180', border: '#b8975a' }, // Partner — gold, matches PartnerPage branding
+  jobWork: {bg: '#2e2410', text: '#cdf008', border: '#eb780c'},
 };
 
 const STATUS_CONFIG = {
@@ -180,13 +188,25 @@ const RoleBadge = ({ role }) => {
 };
 
 // ─── Invite Panel ─────────────────────────────────────────────────────────────
+
+// Drives the header icon/title/subtitle and the segmented control below —
+// one place to add a fourth invite type later if needed.
+const INVITE_TYPES = [
+  { value: 'employee', label: 'Employee', icon: Mail,      color: '#6366f1', bg: '#eef2ff', title: 'Invite Employee',   subtitle: 'Send an internal registration link by email' },
+  { value: 'supplier', label: 'Partner',  icon: Handshake, color: '#b8975a', bg: '#fbf3e6', title: 'Invite Partner',    subtitle: 'Invite a supplier to the Partner Portal' },
+  { value: 'jobWork',  label: 'Job Work', icon: Briefcase, color: '#16a34a', bg: '#ecfdf3', title: 'Invite Job Work Vendor', subtitle: 'Invite a vendor to the Job Work Portal' },
+];
+
 const InvitePanel = ({ onClose, onInviteSent }) => {
   const { authFetch } = useAuth();
   const [inviteEmail, setInviteEmail] = useState('');
+  const [inviteType, setInviteType] = useState('employee'); // 'employee' | 'supplier' | 'jobWork'
   const [sending, setSending] = useState(false);
   const [result, setResult] = useState(null); // { type: 'success'|'error', message }
   const [pendingInvites, setPendingInvites] = useState([]);
   const [loadingInvites, setLoadingInvites] = useState(true);
+
+  const activeType = INVITE_TYPES.find(t => t.value === inviteType) || INVITE_TYPES[0];
 
   useEffect(() => {
     fetchInvites();
@@ -210,12 +230,12 @@ const InvitePanel = ({ onClose, onInviteSent }) => {
     setSending(true);
     setResult(null);
     try {
-      const res = await authFetch('/api/auth/invite', {
-        method: 'POST',
-        body: JSON.stringify({ email: inviteEmail.trim() }),
-      });
+      const endpoint = inviteType === 'jobWork' ? '/api/admin/job-work/invite' : '/api/auth/invite';
+      const body = inviteType === 'jobWork'
+        ? { email: inviteEmail.trim() }
+        : { email: inviteEmail.trim(), inviteType };
+      const res = await authFetch(endpoint, { method: 'POST', body: JSON.stringify(body) });
       const data = await res.json();
-      
       if (!res.ok) throw new Error(data.message);
       setResult({ type: 'success', message: data.message });
       setInviteEmail('');
@@ -252,47 +272,96 @@ const InvitePanel = ({ onClose, onInviteSent }) => {
 
   return (
     <div style={{
-      position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)',
+      position: 'fixed', inset: 0, background: 'rgba(15,23,42,0.55)', backdropFilter: 'blur(2px)',
       display: 'flex', alignItems: 'center', justifyContent: 'center',
       zIndex: 50, padding: '20px',
     }}>
       <div style={{
-        background: '#fff', borderRadius: '16px', width: '100%', maxWidth: '500px',
-        boxShadow: '0 25px 60px rgba(0,0,0,0.2)', overflow: 'hidden',
+        background: '#fff', borderRadius: '18px', width: '100%', maxWidth: '520px',
+        boxShadow: '0 25px 60px rgba(0,0,0,0.25)', overflow: 'hidden',
       }}>
-        {/* Header */}
+        {/* Header — icon/title/subtitle react to the selected invite type */}
         <div style={{
-          padding: '20px 24px', borderBottom: '1px solid #f1f5f9',
+          padding: '22px 24px', borderBottom: '1px solid #f1f5f9',
           display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+          transition: 'background 0.2s',
         }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
             <div style={{
-              width: '36px', height: '36px', background: '#eef2ff', borderRadius: '10px',
-              display: 'flex', alignItems: 'center', justifyContent: 'center',
+              width: '40px', height: '40px', background: activeType.bg, borderRadius: '11px',
+              display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0,
+              transition: 'background 0.2s',
             }}>
-              <Mail size={18} color="#6366f1" />
+              <activeType.icon size={19} color={activeType.color} />
             </div>
             <div>
-              <div style={{ fontWeight: 800, color: '#1e293b', fontSize: '15px' }}>Invite Employee</div>
-              <div style={{ fontSize: '12px', color: '#94a3b8' }}>Send a registration link by email</div>
+              <div style={{ fontWeight: 800, color: '#1e293b', fontSize: '15px' }}>{activeType.title}</div>
+              <div style={{ fontSize: '12px', color: '#94a3b8', marginTop: 1 }}>{activeType.subtitle}</div>
             </div>
           </div>
           <button onClick={onClose} style={{
-            background: 'none', border: 'none', cursor: 'pointer',
-            color: '#94a3b8', padding: '4px',
+            background: '#f8fafc', border: 'none', cursor: 'pointer', borderRadius: '8px',
+            color: '#94a3b8', padding: '6px', display: 'flex',
           }}>
-            <X size={20} />
+            <X size={18} />
           </button>
         </div>
 
         {/* Invite form */}
         <div style={{ padding: '24px' }}>
+          {/* Invite type — segmented control */}
+          <div style={{ marginBottom: '18px' }}>
+            <label style={{
+              fontSize: '11px', fontWeight: 700, color: '#94a3b8',
+              textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: '8px', display: 'block',
+            }}>
+              Invite Type
+            </label>
+            <div style={{ display: 'flex', gap: '8px' }}>
+              {INVITE_TYPES.map(t => {
+                const active = t.value === inviteType;
+                return (
+                  <button
+                    key={t.value}
+                    type="button"
+                    onClick={() => setInviteType(t.value)}
+                    style={{
+                      flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '6px',
+                      padding: '12px 8px', borderRadius: '12px', cursor: 'pointer',
+                      border: active ? `1.5px solid ${t.color}` : '1.5px solid #e2e8f0',
+                      background: active ? t.bg : '#fff',
+                      transition: 'all 0.15s',
+                    }}
+                  >
+                    <t.icon size={17} color={active ? t.color : '#94a3b8'} />
+                    <span style={{
+                      fontSize: '11.5px', fontWeight: 700,
+                      color: active ? t.color : '#64748b',
+                    }}>
+                      {t.label}
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+
+          <label style={{
+            fontSize: '11px', fontWeight: 700, color: '#94a3b8',
+            textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: '8px', display: 'block',
+          }}>
+            Email Address
+          </label>
           <form onSubmit={sendInvite} style={{ display: 'flex', gap: '10px', marginBottom: '20px' }}>
             <input
               type="email"
               value={inviteEmail}
               onChange={e => setInviteEmail(e.target.value)}
-              placeholder="employee@marqland.com"
+              placeholder={
+                inviteType === 'employee' ? 'employee@marqland.com' :
+                inviteType === 'supplier' ? 'partner@example.com' :
+                'vendor@example.com'
+              }
               required
               style={{
                 flex: 1, padding: '11px 14px',
@@ -300,15 +369,15 @@ const InvitePanel = ({ onClose, onInviteSent }) => {
                 fontSize: '14px', outline: 'none', fontFamily: 'inherit',
                 color: '#1e293b',
               }}
-              onFocus={e => e.target.style.borderColor = '#6366f1'}
+              onFocus={e => e.target.style.borderColor = activeType.color}
               onBlur={e => e.target.style.borderColor = '#e2e8f0'}
             />
             <button type="submit" disabled={sending} style={{
-              padding: '11px 20px', background: '#6366f1', color: '#fff',
+              padding: '11px 20px', background: activeType.color, color: '#fff',
               border: 'none', borderRadius: '10px', fontSize: '13px', fontWeight: 700,
               cursor: sending ? 'not-allowed' : 'pointer', display: 'flex',
               alignItems: 'center', gap: '6px', opacity: sending ? 0.7 : 1,
-              fontFamily: 'inherit', whiteSpace: 'nowrap',
+              fontFamily: 'inherit', whiteSpace: 'nowrap', transition: 'background 0.15s',
             }}>
               <Send size={14} />
               {sending ? 'Sending...' : 'Send Invite'}
@@ -419,9 +488,11 @@ const UserManagement = () => {
     try {
       const res = await authFetch('/api/auth/users');
       const data = await res.json();
-      setUsers(data);
+      if (!res.ok) throw new Error(data.message || 'Failed to load users.');
+      setUsers(Array.isArray(data) ? data : []);
     } catch (e) {
       alert('Failed to load users: ' + e.message);
+      setUsers([]); // keep state as an array so .filter never crashes again
     } finally {
       setLoading(false);
     }
@@ -545,7 +616,7 @@ const UserManagement = () => {
         </div>
         <button style={S.inviteBtn} onClick={() => setShowInvite(true)}>
           <Mail size={15} />
-          Invite Employee
+          Invite
         </button>
       </div>
 
