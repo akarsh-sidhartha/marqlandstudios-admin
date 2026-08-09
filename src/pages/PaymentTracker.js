@@ -2714,11 +2714,9 @@ function MobileInvoicePage({ vendors, proformaInvoices, onSaved }) {
   const [fileMime, setFileMime] = useState(null);
   const [dupInfo, setDupInfo] = useState(null);
   const [done, setDone] = useState(null);
-  const [camActive, setCamActive] = useState(false);
 
-  const videoRef = useRef();
-  const canvasRef = useRef();
   const fileRef = useRef();
+  const cameraRef = useRef();
 
   const [form, setForm] = useState({
     vendor_name: '', vendor_gst: '', invoice_number: '',
@@ -2786,37 +2784,6 @@ function MobileInvoicePage({ vendors, proformaInvoices, onSaved }) {
       setScanMsg('Scan failed: ' + e.message);
     }
     setScanning(false);
-  };
-
-  const startCamera = async () => {
-    setStep('camera');
-    setCamActive(true);
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: 'environment', width: { ideal: 1920 } },
-      });
-      if (videoRef.current) videoRef.current.srcObject = stream;
-    } catch {
-      log.warn('Camera access denied');
-      setErr('Camera access denied');
-      setStep('home');
-    }
-  };
-
-  const stopCamera = () => {
-    videoRef.current?.srcObject?.getTracks().forEach((t) => t.stop());
-    setCamActive(false);
-  };
-
-  const capturePhoto = async () => {
-    const v = videoRef.current;
-    const c = canvasRef.current;
-    c.width = v.videoWidth;
-    c.height = v.videoHeight;
-    c.getContext('2d').drawImage(v, 0, 0);
-    stopCamera();
-    const blob = await new Promise((res) => c.toBlob(res, 'image/jpeg', 0.9));
-    await processFile(new File([blob], 'capture.jpg', { type: 'image/jpeg' }));
   };
 
   const saveGstToVendor = async () => {
@@ -2958,28 +2925,6 @@ function MobileInvoicePage({ vendors, proformaInvoices, onSaved }) {
     );
   }
 
-  // ── Camera view ─────────────────────────────────────────────────────────────
-  if (step === 'camera') {
-    return (
-      <div style={{ position: 'fixed', inset: 0, background: '#000', display: 'flex', flexDirection: 'column', zIndex: 9999 }}>
-        <canvas ref={canvasRef} style={{ display: 'none' }} />
-        <div style={{ padding: '16px 20px', display: 'flex', alignItems: 'center', gap: 12 }}>
-          <button onClick={() => { stopCamera(); setStep('home'); }} style={{ background: 'rgba(255,255,255,0.15)', border: 'none', color: '#fff', borderRadius: 10, padding: '8px 14px', fontSize: 14, fontWeight: 700, cursor: 'pointer' }}>
-            ← Back
-          </button>
-          <span style={{ color: '#fff', fontWeight: 700, fontSize: 15, flex: 1, textAlign: 'center' }}>Scan Invoice</span>
-        </div>
-        <video ref={videoRef} autoPlay playsInline style={{ flex: 1, objectFit: 'cover', width: '100%' }} />
-        <div style={{ padding: 24, display: 'flex', justifyContent: 'center', background: 'rgba(0,0,0,0.5)' }}>
-          <button
-            onClick={capturePhoto}
-            style={{ width: 72, height: 72, borderRadius: '50%', background: '#fff', border: '4px solid rgba(255,255,255,0.4)', cursor: 'pointer', boxShadow: '0 0 0 8px rgba(255,255,255,0.15)' }}
-          />
-        </div>
-      </div>
-    );
-  }
-
   // ── Home screen ─────────────────────────────────────────────────────────────
   if (step === 'home') {
     return (
@@ -2992,10 +2937,26 @@ function MobileInvoicePage({ vendors, proformaInvoices, onSaved }) {
           <p style={{ margin: '6px 0 0', fontSize: 13, opacity: 0.85 }}>Capture, upload or type invoice details</p>
         </div>
         <div style={{ padding: '28px 20px' }}>
-          <MBtn onClick={startCamera} color="#0f172a"><span style={{ fontSize: 22 }}>📷</span> Take a Photo</MBtn>
+          <MBtn onClick={() => cameraRef.current?.click()} color="#0f172a"><span style={{ fontSize: 22 }}>📷</span> Take a Photo</MBtn>
           <MBtn onClick={() => fileRef.current?.click()} color="#6366f1"><FileUp size={20} /> Upload PDF / Image</MBtn>
           <MBtn onClick={() => setStep('upload')} color="#0891b2" outline><Plus size={20} /> Enter Manually</MBtn>
-          <input ref={fileRef} type="file" accept=".pdf,image/*" style={{ display: 'none' }} onChange={(e) => e.target.files[0] && processFile(e.target.files[0])} />
+          {/* capture="environment" hands off straight to the native camera app */}
+          <input
+            ref={cameraRef}
+            type="file"
+            accept="image/*"
+            capture="environment"
+            style={{ display: 'none' }}
+            onChange={(e) => e.target.files[0] && processFile(e.target.files[0])}
+          />
+          {/* no capture attribute here — this opens the photo library / file picker */}
+          <input
+            ref={fileRef}
+            type="file"
+            accept=".pdf,image/*"
+            style={{ display: 'none' }}
+            onChange={(e) => e.target.files[0] && processFile(e.target.files[0])}
+          />
         </div>
         {err && (
           <div style={{ margin: '0 20px', padding: '12px 16px', background: '#fef2f2', border: '1px solid #fecaca', borderRadius: 10, color: '#dc2626', fontSize: 13, fontWeight: 600 }}>
