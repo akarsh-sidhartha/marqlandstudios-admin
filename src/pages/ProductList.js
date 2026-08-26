@@ -17,6 +17,7 @@ import {
   Plus, Check, FolderPlus, X, ChevronDown, Search, Trash2, Pencil,
   RotateCcw, Info, CheckSquare, Square, Sparkles, FileText, Download,
   ImageIcon, AlertCircle, CheckCircle2, Loader2, Star, Images,
+  ChevronLeft, ChevronRight, Play,
 } from 'lucide-react';
 import usePortalItems from '../hooks/usePortalItems';
 import ProductImageGallery from './ProductImageGallery';
@@ -49,6 +50,23 @@ const T = {
 
 const jost  = '"Jost", sans-serif';
 const serif = '"Cormorant Garamond", Georgia, serif';
+
+// ─── Video URL helpers (mirrors ProductImageGallery.js) ──────────────────────
+const getYouTubeId = (url) => {
+  if (!url) return null;
+  const patterns = [
+    /youtu\.be\/([^?&]+)/,
+    /youtube\.com\/watch\?v=([^&]+)/,
+    /youtube\.com\/embed\/([^?&]+)/,
+    /youtube\.com\/shorts\/([^?&]+)/,
+  ];
+  for (const re of patterns) {
+    const m = url.match(re);
+    if (m) return m[1];
+  }
+  return null;
+};
+const isYouTube = (url) => Boolean(getYouTubeId(url));
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Skeleton row — reusable loading placeholder (mirrors SkeletonList)
@@ -88,11 +106,55 @@ const SkeletonCard = () => (
 // Product card image with shimmer skeleton until loaded
 // ─────────────────────────────────────────────────────────────────────────────
 const ProductImage = ({ p, getAssetUrl, onPreview }) => {
-  const [loaded, setLoaded] = useState(false);
+  const [loaded, setLoaded]             = useState(false);
+  const [index, setIndex]               = useState(0);
+  const [hovered, setHovered]           = useState(false);
+  const [playingVideo, setPlayingVideo] = useState(false);
+
+  // Primary image + any additional angles saved via the Image Gallery
+  const images      = [p.imageUrl, ...(p.additionalImages || [])].filter(Boolean);
+  const hasMultiple = images.length > 1;
+  const hasVideo    = Boolean(p.videoUrl);
+  const currentUrl  = images[index] || null;
+
+  const goPrev = (e) => {
+    e.stopPropagation();
+    setPlayingVideo(false);
+    setLoaded(images.length <= 1 ? loaded : false);
+    setIndex(i => (i - 1 + images.length) % images.length);
+  };
+  const goNext = (e) => {
+    e.stopPropagation();
+    setPlayingVideo(false);
+    setLoaded(images.length <= 1 ? loaded : false);
+    setIndex(i => (i + 1) % images.length);
+  };
+  const openVideo  = (e) => { e.stopPropagation(); setPlayingVideo(true); };
+  const closeVideo = (e) => { e.stopPropagation(); setPlayingVideo(false); };
+
+  const navBtnStyle = (side) => ({
+    position: 'absolute',
+    top: '50%',
+    [side]: 5,
+    transform: 'translateY(-50%)',
+    width: 22, height: 22,
+    borderRadius: '50%',
+    border: 'none',
+    background: 'rgba(255,255,255,0.6)',
+    color: T.navy,
+    display: 'flex', alignItems: 'center', justifyContent: 'center',
+    cursor: 'pointer',
+    opacity: hovered ? 0.95 : 0.4,
+    transition: 'opacity 0.2s, background 0.2s',
+    zIndex: 15, padding: 0,
+    boxShadow: '0 1px 3px rgba(0,0,0,0.15)',
+  });
 
   return (
     <div
-      onClick={onPreview}
+      onClick={playingVideo ? undefined : onPreview}
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
       style={{
         height: 128,
         background: T.offwhite,
@@ -101,55 +163,299 @@ const ProductImage = ({ p, getAssetUrl, onPreview }) => {
         justifyContent: 'center',
         position: 'relative',
         overflow: 'hidden',
-        cursor: 'zoom-in',
+        cursor: playingVideo ? 'default' : 'zoom-in',
       }}
     >
-      {/* Shimmer buffer shown until image resolves */}
-      {!loaded && (
-        <div style={{
-          position: 'absolute', inset: 0,
-          background: 'linear-gradient(90deg, #f0f0f0 25%, #e8e8e8 50%, #f0f0f0 75%)',
-          backgroundSize: '200% 100%',
-          animation: 'shimmer 1.4s infinite',
-        }} />
-      )}
-
-      {p.imageUrl ? (
-        <img
-          src={getAssetUrl(p.imageUrl)}
-          alt={p.name}
-          onLoad={() => setLoaded(true)}
-          style={{
-            width: '100%', height: '100%',
-            objectFit: 'cover',
-            transition: 'transform 0.3s ease, opacity 0.3s ease',
-            opacity: loaded ? 1 : 0,
-          }}
-          onMouseEnter={e => { e.currentTarget.style.transform = 'scale(1.07)'; }}
-          onMouseLeave={e => { e.currentTarget.style.transform = 'scale(1)'; }}
-        />
+      {playingVideo && hasVideo ? (
+        // ── Inline video playback ──
+        isYouTube(p.videoUrl) ? (
+          <iframe
+            src={`https://www.youtube.com/embed/${getYouTubeId(p.videoUrl)}?autoplay=1&rel=0`}
+            title={p.name}
+            allow="autoplay; encrypted-media; picture-in-picture"
+            allowFullScreen
+            style={{ width: '100%', height: '100%', border: 'none' }}
+          />
+        ) : (
+          <video
+            src={p.videoUrl}
+            controls
+            autoPlay
+            style={{ width: '100%', height: '100%', objectFit: 'cover', background: '#000' }}
+          />
+        )
       ) : (
-        <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 4, color: T.border }}>
-          <ImageIcon size={24} />
-          <span style={{ fontFamily: jost, fontSize: 9, fontWeight: 700, letterSpacing: '0.2em', textTransform: 'uppercase', color: T.muted }}>
-            No Image
-          </span>
-        </div>
+        <>
+          {/* Shimmer buffer shown until image resolves */}
+          {!loaded && currentUrl && (
+            <div style={{
+              position: 'absolute', inset: 0,
+              background: 'linear-gradient(90deg, #f0f0f0 25%, #e8e8e8 50%, #f0f0f0 75%)',
+              backgroundSize: '200% 100%',
+              animation: 'shimmer 1.4s infinite',
+            }} />
+          )}
+
+          {currentUrl ? (
+            <img
+              key={currentUrl}
+              src={getAssetUrl(currentUrl)}
+              alt={p.name}
+              onLoad={() => setLoaded(true)}
+              style={{
+                width: '100%', height: '100%',
+                objectFit: 'cover',
+                transition: 'transform 0.3s ease, opacity 0.3s ease',
+                opacity: loaded ? 1 : 0,
+              }}
+              onMouseEnter={e => { e.currentTarget.style.transform = 'scale(1.07)'; }}
+              onMouseLeave={e => { e.currentTarget.style.transform = 'scale(1)'; }}
+            />
+          ) : (
+            <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 4, color: T.border }}>
+              <ImageIcon size={24} />
+              <span style={{ fontFamily: jost, fontSize: 9, fontWeight: 700, letterSpacing: '0.2em', textTransform: 'uppercase', color: T.muted }}>
+                No Image
+              </span>
+            </div>
+          )}
+
+          {/* Hover overlay */}
+          <div style={{
+            position: 'absolute', inset: 0,
+            background: 'rgba(0,0,0,0)',
+            transition: 'background 0.2s',
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+          }}
+            onMouseEnter={e => { e.currentTarget.style.background = 'rgba(0,0,0,0.10)'; }}
+            onMouseLeave={e => { e.currentTarget.style.background = 'rgba(0,0,0,0)'; }}
+          >
+            <Info size={20} style={{ color: 'white', opacity: 0 }} />
+          </div>
+
+          {/* Left / right carousel arrows — subtle, only when >1 image */}
+          {hasMultiple && (
+            <>
+              <button
+                onClick={goPrev}
+                title="Previous image"
+                aria-label="Previous image"
+                style={navBtnStyle('left')}
+                onMouseEnter={e => { e.currentTarget.style.background = 'rgba(255,255,255,0.92)'; }}
+                onMouseLeave={e => { e.currentTarget.style.background = 'rgba(255,255,255,0.6)'; }}
+              >
+                <ChevronLeft size={13} />
+              </button>
+              <button
+                onClick={goNext}
+                title="Next image"
+                aria-label="Next image"
+                style={navBtnStyle('right')}
+                onMouseEnter={e => { e.currentTarget.style.background = 'rgba(255,255,255,0.92)'; }}
+                onMouseLeave={e => { e.currentTarget.style.background = 'rgba(255,255,255,0.6)'; }}
+              >
+                <ChevronRight size={13} />
+              </button>
+
+              {/* Subtle position counter */}
+              <span style={{
+                position: 'absolute', left: 6, bottom: 6, zIndex: 15,
+                fontFamily: jost, fontSize: 8, fontWeight: 500,
+                color: 'white', background: 'rgba(0,0,0,0.45)',
+                padding: '1px 5px', borderRadius: 8,
+                opacity: hovered ? 0.9 : 0.55,
+                transition: 'opacity 0.2s',
+              }}>
+                {index + 1}/{images.length}
+              </span>
+            </>
+          )}
+
+          {/* Video play button — subtle, only when a video is attached */}
+          {hasVideo && (
+            <button
+              onClick={openVideo}
+              title="Play video"
+              aria-label="Play video"
+              style={{
+                position: 'absolute', top: '50%', left: '50%', zIndex: 15,
+                transform: 'translate(-50%, -50%)',
+                width: 34, height: 34, borderRadius: '50%',
+                border: 'none', background: 'rgba(14,21,32,0.55)',
+                display: 'flex', alignItems: 'center', justifyContent: 'center',
+                cursor: 'pointer',
+                opacity: hovered ? 0.95 : 0.55,
+                transition: 'opacity 0.2s, background 0.2s',
+                padding: 0,
+              }}
+              onMouseEnter={e => { e.currentTarget.style.background = 'rgba(14,21,32,0.8)'; }}
+              onMouseLeave={e => { e.currentTarget.style.background = 'rgba(14,21,32,0.55)'; }}
+            >
+              <Play size={14} fill="white" style={{ color: 'white', marginLeft: 1 }} />
+            </button>
+          )}
+        </>
       )}
 
-      {/* Hover overlay */}
-      <div style={{
-        position: 'absolute', inset: 0,
-        background: 'rgba(0,0,0,0)',
-        transition: 'background 0.2s',
-        display: 'flex', alignItems: 'center', justifyContent: 'center',
-      }}
-        onMouseEnter={e => { e.currentTarget.style.background = 'rgba(0,0,0,0.10)'; }}
-        onMouseLeave={e => { e.currentTarget.style.background = 'rgba(0,0,0,0)'; }}
-      >
-        <Info size={20} style={{ color: 'white', opacity: 0 }} />
-      </div>
+      {/* Close control while video is playing */}
+      {playingVideo && (
+        <button
+          onClick={closeVideo}
+          title="Close video"
+          aria-label="Close video"
+          style={{
+            position: 'absolute', top: 6, left: 6, zIndex: 20,
+            width: 20, height: 20, borderRadius: '50%',
+            border: 'none', background: 'rgba(0,0,0,0.55)',
+            color: 'white', display: 'flex', alignItems: 'center', justifyContent: 'center',
+            cursor: 'pointer', padding: 0,
+          }}
+        >
+          <X size={11} />
+        </button>
+      )}
     </div>
+  );
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Preview modal media — same carousel + video-play behaviour as ProductImage,
+// scaled up for the large fullscreen preview.
+// ─────────────────────────────────────────────────────────────────────────────
+const ProductPreviewMedia = ({ p, getAssetUrl }) => {
+  const [index, setIndex]               = useState(0);
+  const [playingVideo, setPlayingVideo] = useState(false);
+
+  const images      = [p.imageUrl, ...(p.additionalImages || [])].filter(Boolean);
+  const hasMultiple = images.length > 1;
+  const hasVideo    = Boolean(p.videoUrl);
+  const currentUrl  = images[index] || null;
+
+  const goPrev = (e) => { e.stopPropagation(); setPlayingVideo(false); setIndex(i => (i - 1 + images.length) % images.length); };
+  const goNext = (e) => { e.stopPropagation(); setPlayingVideo(false); setIndex(i => (i + 1) % images.length); };
+  const openVideo  = (e) => { e.stopPropagation(); setPlayingVideo(true); };
+  const closeVideo = (e) => { e.stopPropagation(); setPlayingVideo(false); };
+
+  const navBtnStyle = (side) => ({
+    position: 'absolute', top: '50%', [side]: 14, transform: 'translateY(-50%)',
+    width: 36, height: 36, borderRadius: '50%', border: 'none',
+    background: 'rgba(255,255,255,0.7)', color: T.navy,
+    display: 'flex', alignItems: 'center', justifyContent: 'center',
+    cursor: 'pointer', zIndex: 15, padding: 0,
+    boxShadow: '0 2px 6px rgba(0,0,0,0.2)',
+    opacity: 0.65, transition: 'opacity 0.2s, background 0.2s',
+  });
+
+  return (
+    <>
+      {playingVideo && hasVideo ? (
+        isYouTube(p.videoUrl) ? (
+          <iframe
+            src={`https://www.youtube.com/embed/${getYouTubeId(p.videoUrl)}?autoplay=1&rel=0`}
+            title={p.name}
+            allow="autoplay; encrypted-media; picture-in-picture"
+            allowFullScreen
+            style={{ width: '100%', height: '100%', border: 'none' }}
+          />
+        ) : (
+          <video
+            src={p.videoUrl}
+            controls
+            autoPlay
+            style={{ width: '100%', height: '100%', objectFit: 'contain', background: '#000' }}
+          />
+        )
+      ) : (
+        <>
+          {currentUrl
+            ? <img
+                key={currentUrl}
+                src={getAssetUrl(currentUrl)}
+                alt={p.name}
+                style={{ width: '100%', height: '100%', objectFit: 'contain', maxHeight: '62vh' }}
+                onError={e => { e.target.onerror = null; e.target.src = 'https://via.placeholder.com/600x600?text=No+Image'; }}
+              />
+            : <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', color: T.border }}><ImageIcon size={64} /></div>
+          }
+
+          {/* Left / right carousel arrows — subtle, only when >1 image */}
+          {hasMultiple && (
+            <>
+              <button
+                onClick={goPrev}
+                title="Previous image"
+                aria-label="Previous image"
+                style={navBtnStyle('left')}
+                onMouseEnter={e => { e.currentTarget.style.opacity = 1; e.currentTarget.style.background = 'rgba(255,255,255,0.95)'; }}
+                onMouseLeave={e => { e.currentTarget.style.opacity = 0.65; e.currentTarget.style.background = 'rgba(255,255,255,0.7)'; }}
+              >
+                <ChevronLeft size={18} />
+              </button>
+              <button
+                onClick={goNext}
+                title="Next image"
+                aria-label="Next image"
+                style={navBtnStyle('right')}
+                onMouseEnter={e => { e.currentTarget.style.opacity = 1; e.currentTarget.style.background = 'rgba(255,255,255,0.95)'; }}
+                onMouseLeave={e => { e.currentTarget.style.opacity = 0.65; e.currentTarget.style.background = 'rgba(255,255,255,0.7)'; }}
+              >
+                <ChevronRight size={18} />
+              </button>
+
+              {/* Subtle position counter */}
+              <span style={{
+                position: 'absolute', left: 14, bottom: 14, zIndex: 15,
+                fontFamily: jost, fontSize: 10, fontWeight: 500, color: 'white',
+                background: 'rgba(0,0,0,0.5)', padding: '3px 9px', borderRadius: 10,
+              }}>
+                {index + 1} / {images.length}
+              </span>
+            </>
+          )}
+
+          {/* Video play button — subtle, only when a video is attached */}
+          {hasVideo && (
+            <button
+              onClick={openVideo}
+              title="Play video"
+              aria-label="Play video"
+              style={{
+                position: 'absolute', top: '50%', left: '50%', zIndex: 15,
+                transform: 'translate(-50%, -50%)',
+                width: 56, height: 56, borderRadius: '50%',
+                border: 'none', background: 'rgba(14,21,32,0.6)',
+                display: 'flex', alignItems: 'center', justifyContent: 'center',
+                cursor: 'pointer', opacity: 0.8, transition: 'opacity 0.2s, background 0.2s',
+                padding: 0,
+              }}
+              onMouseEnter={e => { e.currentTarget.style.opacity = 1; e.currentTarget.style.background = 'rgba(14,21,32,0.85)'; }}
+              onMouseLeave={e => { e.currentTarget.style.opacity = 0.8; e.currentTarget.style.background = 'rgba(14,21,32,0.6)'; }}
+            >
+              <Play size={22} fill="white" style={{ color: 'white', marginLeft: 2 }} />
+            </button>
+          )}
+        </>
+      )}
+
+      {/* Close control while video is playing — top-left, so it never collides
+          with the modal's own close (X) button at top-right */}
+      {playingVideo && (
+        <button
+          onClick={closeVideo}
+          title="Close video"
+          aria-label="Close video"
+          style={{
+            position: 'absolute', top: 12, left: 12, zIndex: 20,
+            width: 28, height: 28, borderRadius: '50%',
+            border: 'none', background: 'rgba(0,0,0,0.55)', color: 'white',
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            cursor: 'pointer', padding: 0,
+          }}
+        >
+          <X size={14} />
+        </button>
+      )}
+    </>
   );
 };
 
@@ -1672,13 +1978,7 @@ const ProductList = () => {
           >
             {/* Image */}
             <div style={{ position: 'relative', background: T.offwhite, minHeight: '55vh', maxHeight: '62vh', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-              {previewProduct.imageUrl
-                ? <img src={getAssetUrl(previewProduct.imageUrl)} alt={previewProduct.name}
-                    style={{ width: '100%', height: '100%', objectFit: 'contain', maxHeight: '62vh' }}
-                    onError={e => { e.target.onerror = null; e.target.src = 'https://via.placeholder.com/600x600?text=No+Image'; }}
-                  />
-                : <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', color: T.border }}><ImageIcon size={64} /></div>
-              }
+              <ProductPreviewMedia key={previewProduct._id} p={previewProduct} getAssetUrl={getAssetUrl} />
               <button
                 onClick={() => setPreviewProduct(null)}
                 style={{
@@ -1686,6 +1986,7 @@ const ProductList = () => {
                   background: 'white', border: `1px solid ${T.border}`,
                   padding: '6px 8px', borderRadius: 2, cursor: 'pointer',
                   color: T.muted, display: 'flex', transition: 'color 0.2s',
+                  zIndex: 20,
                 }}
                 onMouseEnter={e => { e.currentTarget.style.color = T.text; }}
                 onMouseLeave={e => { e.currentTarget.style.color = T.muted; }}
