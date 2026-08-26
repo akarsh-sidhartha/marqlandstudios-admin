@@ -1322,7 +1322,7 @@ const ProductList = () => {
             const isCollapsed = collapsedCategories[category];
             const catProducts = applyCatFiltersAndSort(category, groupedProducts[category]);
             const allCatProducts = groupedProducts[category];
-            const allSelected = allCatProducts.every(p => selectedProducts.some(sp => sp._id === p._id));
+            const allSelected = catProducts.length > 0 && catProducts.every(p => selectedProducts.some(sp => sp._id === p._id));
             const catPriceF = categoryPriceFilter[category] || {};
             const catSortVal = categorySort[category] || '';
             const hasCatFilters = catSortVal || catPriceF.min || catPriceF.max;
@@ -1353,7 +1353,7 @@ const ProductList = () => {
                     </div>
 
                     <button
-                      onClick={() => selectAllInCategory(allCatProducts)}
+                      onClick={() => selectAllInCategory(catProducts)}
                       style={{
                         display: 'inline-flex', alignItems: 'center', gap: 5,
                         background: allSelected ? T.gold : 'transparent',
