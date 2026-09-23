@@ -9,6 +9,12 @@
  *  - Each existing item can be deleted (removed from portal immediately)
  *  - "Add N" button on each row appends the pending selection to that portal
  *
+ * DATA LOADING (lightweight):
+ *  - Opening the modal loads order ROWS only (GET /portal/picker) — no item content
+ *  - Expanding a row loads that portal's items (GET /portal/:slug/items)
+ *  - Add / remove happen on the server (POST /portal/:slug/items/add,
+ *    DELETE /portal/:slug/items/:itemId); the full list is never sent back
+ *
  * addToPortal(items) — call with the array of selected products OR properties.
  * PortalModal        — render this somewhere in the page JSX (fixed overlay).
  */
@@ -130,6 +136,9 @@ const usePortalItems = (type) => {
   // Expanded rows  { [portalId]: bool }
   const [expanded, setExpanded] = useState({});
 
+  // Items of expanded rows, loaded on demand  { [portalId]: item[] | 'loading' | 'error' }
+  const [portalItems, setPortalItems] = useState({});
+
   // Per-portal "adding" spinner  { [portalId]: bool }
   const [adding, setAdding] = useState({});
 
@@ -195,9 +204,8 @@ const usePortalItems = (type) => {
         order:       0,
       };
 
-      const existing = customTarget.productItems || [];
-      const updated  = { productItems: [...existing, newItem] };
-      await api.put(`/portal/${customTarget.slug}/items`, updated);
+      await api.post(`/portal/${customTarget.slug}/items/add`, { items: [newItem] });
+      setPortalItems(p => { const n = { ...p }; delete n[customTarget._id]; return n; });
 
       // Flash "Added!" and refresh portals list
       setAddedFlash(p => ({ ...p, [customTarget._id]: true }));
@@ -211,9 +219,6 @@ const usePortalItems = (type) => {
     }
   };
 
-  // ── key helpers ───────────────────────────────────────────────────────────
-  const itemsKey = () => type === 'offsite' ? 'offsiteItems' : 'productItems';
-  const itemId   = (item) => type === 'offsite' ? item.propertyId : item.productId;
 
   // ── open modal ────────────────────────────────────────────────────────────
   const addToPortal = useCallback(async (items) => {
@@ -221,6 +226,7 @@ const usePortalItems = (type) => {
     setPendingItems(items);
     setSearch('');
     setExpanded({});
+    setPortalItems({});
     setAdding({});
     setAddedFlash({});
     setDeletingItem({});
@@ -233,11 +239,9 @@ const usePortalItems = (type) => {
     setLoadingList(true);
     setFetchError(null);
     try {
-      const res  = await api.get(`/portal?type=${type}&status=active`);
-      const list = (res.data || []).filter(
-        p => !p.orderStatus || ['inquiry', 'ongoing', 'unknown'].includes(p.orderStatus)
-      );
-      setPortals(list);
+      // Order rows only (open orders), with item counts/ids — no item content.
+      const res = await api.get('/portal/picker', { params: { type } });
+      setPortals(res.data || []);
     } catch (err) {
       setFetchError(err.response?.data?.message || err.message || 'Failed to load portals');
       setPortals([]);
@@ -266,33 +270,51 @@ const usePortalItems = (type) => {
   });
 
   // ── toggle expand ─────────────────────────────────────────────────────────
-  const toggleExpand = (portalId) =>
-    setExpanded(prev => ({ ...prev, [portalId]: !prev[portalId] }));
+  const loadItems = async (portal) => {
+    setPortalItems(prev => ({ ...prev, [portal._id]: 'loading' }));
+    try {
+      const res = await api.get(`/portal/${portal.slug}/items`);
+      setPortalItems(prev => ({ ...prev, [portal._id]: res.data || [] }));
+    } catch {
+      setPortalItems(prev => ({ ...prev, [portal._id]: 'error' }));
+    }
+  };
+
+  const toggleExpand = (portalId) => {
+    const willOpen = !expanded[portalId];
+    setExpanded(prev => ({ ...prev, [portalId]: willOpen }));
+    const portal = portals.find(p => p._id === portalId);
+    const loaded = portalItems[portalId];
+    if (willOpen && portal && (loaded === undefined || loaded === 'error')) loadItems(portal);
+  };
+
+  // Replace a row with the updated summary the server returns after add/remove.
+  const applyRow = (row) => {
+    if (!row) return;
+    setPortals(prev => prev.map(p => (p._id === row._id ? { ...p, ...row, orderStatus: p.orderStatus } : p)));
+  };
 
   // ── add pending items to a portal ─────────────────────────────────────────
   const handleAdd = async (portal) => {
     if (adding[portal._id]) return;
     setAdding(prev => ({ ...prev, [portal._id]: true }));
     try {
-      const key         = itemsKey();
-      const existing    = portal[key] || [];
-      const existingIds = new Set(existing.map(itemId));
+      const existingIds = new Set(portal.itemIds || []);
       const newItems    = pendingItems
         .filter(p => !existingIds.has(p._id?.toString()))
         .map(type === 'offsite' ? mapPropertyToOffsiteItem : mapProductToItem);
 
-      const merged  = [...existing, ...newItems];
-      const payload = { [key]: merged };
-      await api.put(`/portal/${portal.slug}/items`, payload);
+      // Server appends (and skips anything already there) — the full list is never sent.
+      const res = await api.post(`/portal/${portal.slug}/items/add`, { items: newItems });
+      applyRow(res.data?.row);
 
       if (type === 'product') {
-        try { await api.post(`/portal/${portal.slug}/sync-products`); } catch {}
+        // Refresh product details in the background — don't make the user wait.
+        api.post(`/portal/${portal.slug}/sync-products`).catch(() => {});
       }
 
-      // Optimistically update local portal state
-      setPortals(prev => prev.map(p =>
-        p._id === portal._id ? { ...p, [key]: merged } : p
-      ));
+      // Show the new items when the row auto-expands below
+      loadItems(portal);
 
       // Flash success + auto-expand so user sees the new items
       setAddedFlash(prev => ({ ...prev, [portal._id]: true }));
@@ -309,17 +331,16 @@ const usePortalItems = (type) => {
 
   // ── delete a single existing item from a portal ───────────────────────────
   const handleDeleteItem = async (portal, item) => {
-    const chipKey = `${portal._id}__${itemId(item)}`;
+    const chipKey = `${portal._id}__${item._id}`;
     if (deletingItem[chipKey]) return;
     setDeletingItem(prev => ({ ...prev, [chipKey]: true }));
     try {
-      const key     = itemsKey();
-      const updated = (portal[key] || []).filter(i => itemId(i) !== itemId(item));
-      await api.put(`/portal/${portal.slug}/items`, { [key]: updated });
-
-      setPortals(prev => prev.map(p =>
-        p._id === portal._id ? { ...p, [key]: updated } : p
-      ));
+      const res = await api.delete(`/portal/${portal.slug}/items/${item._id}`);
+      applyRow(res.data?.row);
+      setPortalItems(prev => ({
+        ...prev,
+        [portal._id]: (Array.isArray(prev[portal._id]) ? prev[portal._id] : []).filter(i => i._id !== item._id),
+      }));
     } catch (err) {
       alert('Failed to remove item: ' + (err.response?.data?.message || err.message));
     } finally {
@@ -421,14 +442,14 @@ const usePortalItems = (type) => {
 
             {/* Portal rows */}
             {!loadingList && !fetchError && filteredPortals.map(portal => {
-              const key        = itemsKey();
-              const items      = portal[key] || [];
+              const itemCount  = portal.itemCount || 0;
+              const items      = portalItems[portal._id];
               const isExpanded = !!expanded[portal._id];
               const isAdding   = !!adding[portal._id];
               const didAdd     = !!addedFlash[portal._id];
 
               // Count how many pending items aren't already in this portal
-              const existingIds = new Set(items.map(itemId));
+              const existingIds = new Set(portal.itemIds || []);
               const newCount    = pendingItems.filter(
                 p => !existingIds.has(p._id?.toString())
               ).length;
@@ -476,7 +497,7 @@ const usePortalItems = (type) => {
                           </>
                         )}
                         <span className="text-gray-200">·</span>
-                        <span>{items.length} item{items.length !== 1 ? 's' : ''}</span>
+                        <span>{itemCount} item{itemCount !== 1 ? 's' : ''}</span>
                       </div>
                     </div>
 
@@ -510,17 +531,29 @@ const usePortalItems = (type) => {
                   {/* ── Expanded: items already in this portal ── */}
                   {isExpanded && (
                     <div className="px-4 pb-3 pt-2 border-t border-gray-50 bg-gray-50/50">
-                      {items.length === 0 ? (
+                      {(items === undefined || items === 'loading') ? (
+                        <div className="flex items-center justify-center gap-2 py-3 text-gray-300">
+                          <Loader2 size={12} className="animate-spin" />
+                          <span className="text-[10px] font-bold">Loading items…</span>
+                        </div>
+                      ) : items === 'error' ? (
+                        <button
+                          onClick={() => loadItems(portal)}
+                          className="w-full text-[10px] text-red-400 font-bold text-center py-3 hover:text-red-500"
+                        >
+                          Couldn’t load items — tap to retry
+                        </button>
+                      ) : items.length === 0 ? (
                         <p className="text-[10px] text-gray-300 italic text-center py-3">
                           No items in this portal yet.
                         </p>
                       ) : (
                         <div className="flex flex-wrap gap-1.5">
                           {items.map((item, idx) => {
-                            const chipKey = `${portal._id}__${itemId(item)}`;
+                            const chipKey = `${portal._id}__${item._id}`;
                             return (
                               <PortalItemChip
-                                key={itemId(item) || idx}
+                                key={item._id || idx}
                                 item={item}
                                 onDelete={() => handleDeleteItem(portal, item)}
                                 deleting={!!deletingItem[chipKey]}
