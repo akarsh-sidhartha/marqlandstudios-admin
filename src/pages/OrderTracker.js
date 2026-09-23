@@ -1445,19 +1445,28 @@ export default function OrderTracker() {
     });
   };
 
+  // Description is TEXT ONLY. Pasted screenshots used to be embedded as
+  // multi-MB base64 <img> tags, which made the orders list too big to load.
+  // Paste inserts plain text; images must be added as attachments instead.
   const handlePaste = (e) => {
-    const items = (e.clipboardData || e.originalEvent.clipboardData).items;
-    for (const item of Object.values(items)) {
-      if (item.kind === 'file' && item.type.startsWith('image/')) {
-        e.preventDefault();
-        const blob   = item.getAsFile();
-        const reader = new FileReader();
-        reader.onload = (ev) => {
-          const img = `<img src="${ev.target.result}" style="max-width:100%;border-radius:4px;margin:10px 0;" />`;
-          document.execCommand('insertHTML', false, img);
-        };
-        reader.readAsDataURL(blob);
-      }
+    e.preventDefault();
+    const clipboard = e.clipboardData || window.clipboardData;
+    const text      = clipboard?.getData('text/plain') || '';
+    const hasImage  = Array.from(clipboard?.items || []).some(
+      item => item.kind === 'file' && item.type.startsWith('image/')
+    );
+    if (hasImage && !text) {
+      showToast('warning', 'Images can’t be pasted into the description — add them as attachments.');
+      return;
+    }
+    if (text) document.execCommand('insertText', false, text);
+  };
+
+  // Block drag-and-dropped images/files into the description box.
+  const handleDrop = (e) => {
+    if (e.dataTransfer?.files?.length) {
+      e.preventDefault();
+      showToast('warning', 'Drop files into the attachments area, not the description.');
     }
   };
 
@@ -1997,6 +2006,7 @@ export default function OrderTracker() {
                     ref={editEditorRef}
                     contentEditable
                     onPaste={handlePaste}
+                    onDrop={handleDrop}
                     dangerouslySetInnerHTML={{ __html: editOrder.description || '' }}
                     style={{
                       width: '100%', minHeight: 400,
@@ -2322,6 +2332,7 @@ export default function OrderTracker() {
                     ref={createEditorRef}
                     contentEditable
                     onPaste={handlePaste}
+                    onDrop={handleDrop}
                     onInput={e => setFormData({ ...formData, description: e.currentTarget.innerHTML })}
                     style={{
                       width: '100%', minHeight: 220, padding: '14px 16px',
