@@ -1,176 +1,325 @@
+/**
+ * src/pages/SavedCatalogues.js
+ * ─────────────────────────────────────────────────────────────────────────────
+ * Saved product catalogues — search, edit in the Catalogue Builder, download
+ * the PDF straight from the list, delete.
+ *
+ * Design language mirrors ProductList.js (navy / gold / off-white, Jost +
+ * Cormorant Garamond).
+ * ─────────────────────────────────────────────────────────────────────────────
+ */
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
+import { useNavigate } from 'react-router-dom';
 import api from '../api';
-import { Search, X, RefreshCw, Trash2, Edit3 } from 'lucide-react';
+import { createLogger } from '../utils/logger';
+import { Search, RefreshCw, Trash2, Download, Plus, Pencil, Loader2, BookOpen } from 'lucide-react';
+import { usePopup } from '../components/AppPopups';
+import { downloadCataloguePdf, preloadPdfLibs } from '../components/CatalogueBuilder';
+
+const log = createLogger('SavedCatalogues');
+
+// ─── Design tokens (mirrors ProductList) ─────────────────────────────────────
+const T = {
+  navy:    '#0e1520',
+  gold:    '#b8975a',
+  gold2:   '#d4b06a',
+  offwhite:'#faf8f5',
+  text:    '#1a1a1a',
+  muted:   '#888',
+  border:  'rgba(0,0,0,0.07)',
+  borderG: 'rgba(184,151,90,0.18)',
+  dimBg:   'rgba(184,151,90,0.04)',
+  red:     '#dc2626',
+  green:   '#16a34a',
+  amber:   '#d97706',
+};
+
+const jost  = '"Jost", sans-serif';
+const serif = '"Cormorant Garamond", Georgia, serif';
+
+/** Small uppercase label (eyebrow) style. */
+const eyebrow = (color = T.muted) => ({
+  fontFamily: jost, fontSize: 9, fontWeight: 400,
+  letterSpacing: '0.28em', textTransform: 'uppercase', color,
+});
+
+/** Gold primary button (matches "Add Product" / "Build New"). */
+const goldButton = (disabled = false) => ({
+  display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: 7,
+  background: disabled ? '#e5e0d6' : T.gold, color: disabled ? T.muted : T.navy,
+  border: 'none', padding: '10px 20px', borderRadius: 2,
+  fontFamily: jost, fontSize: 9, fontWeight: 500,
+  letterSpacing: '0.2em', textTransform: 'uppercase',
+  cursor: disabled ? 'not-allowed' : 'pointer', transition: 'background 0.2s',
+});
+
+/** Outlined secondary button. */
+const outlineButton = (disabled = false) => ({
+  display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: 7,
+  background: 'white', color: T.navy,
+  border: `1px solid ${T.border}`, padding: '9px 18px', borderRadius: 2,
+  fontFamily: jost, fontSize: 9, fontWeight: 400,
+  letterSpacing: '0.2em', textTransform: 'uppercase',
+  cursor: disabled ? 'not-allowed' : 'pointer', opacity: disabled ? 0.5 : 1,
+  transition: 'border-color 0.2s, color 0.2s',
+});
+
+const inputStyle = (extra = {}) => ({
+  width: '100%', padding: '9px 12px',
+  background: 'white', border: `1px solid ${T.border}`, borderRadius: 3,
+  fontFamily: jost, fontSize: 12, fontWeight: 300, color: T.text,
+  outline: 'none', boxSizing: 'border-box', transition: 'border-color 0.2s',
+  ...extra,
+});
+
+const formatDate = (d) => (d ? new Date(d).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' }) : '');
+
+const SkeletonCard = () => (
+  <div style={{ background: 'white', border: `1px solid ${T.border}`, borderRadius: 2, padding: '22px 22px 18px' }}>
+    {[60, 40, 30].map(w => (
+      <div key={w} style={{
+        height: w === 60 ? 14 : 8, width: `${w}%`, marginBottom: 12, borderRadius: 4,
+        background: 'linear-gradient(90deg, #f0f0f0 25%, #e8e8e8 50%, #f0f0f0 75%)',
+        backgroundSize: '200% 100%', animation: 'shimmer 1.4s infinite',
+      }} />
+    ))}
+    <div style={{ height: 34, marginTop: 18, background: '#f5f3ef' }} />
+  </div>
+);
 
 const SavedCatalogues = () => {
   const [catalogues, setCatalogues] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [searchTerm, setSearchTerm] = useState('');
+  const [downloadingId, setDownloadingId] = useState(null);
+  const navigate = useNavigate();
+  const { showToast, confirm, Toast, ConfirmDialog } = usePopup();
 
-  const fetchCatalogues = useCallback(async (retries = 3, delay = 1000) => {
+  useEffect(() => { preloadPdfLibs(); }, []);
+
+  const fetchCatalogues = useCallback(async () => {
+    setLoading(true);
+    setError(null);
     try {
-      setLoading(true);
-      setError(null);
-      const res = await api.get('/catalogues');
-      setCatalogues(res.data || []);
+      // Light list (no item content) — the builder / PDF load items per catalogue.
+      const res = await api.get('/catalogues/summary');
+      setCatalogues(Array.isArray(res.data) ? res.data : []);
     } catch (err) {
-      if (retries > 0) {
-        setTimeout(() => fetchCatalogues(retries - 1, delay * 2), delay);
-      } else {
-        setError('Connection Failed: Server not reachable. Please check your connection.');
-      }
+      log.error('Failed to load catalogues', err.message);
+      setError('Could not reach the server. Please check your connection.');
     } finally {
       setLoading(false);
     }
   }, []);
 
-  useEffect(() => {
-    fetchCatalogues();
-  }, [fetchCatalogues]);
+  useEffect(() => { fetchCatalogues(); }, [fetchCatalogues]);
 
-  const handleOpen = (cat) => {
+  const handleOpen = (cat) => navigate(`/builder?id=${cat._id}`);
+
+  // Download the saved version straight from the list (no need to open the builder).
+  const handleDownload = async (cat) => {
+    if (downloadingId) return;
+    setDownloadingId(cat._id);
     try {
-      localStorage.setItem('current_catalogue_items', JSON.stringify(cat.items));
-      localStorage.setItem('current_catalogue_id', cat._id);
-      localStorage.setItem('current_catalogue_name', cat.name);
-      localStorage.setItem('current_catalogue_subtitle', cat.subtitle || '');
-      localStorage.removeItem('catalogue_selection');
-      window.open('/builder', '_blank');
-    } catch (e) {
-      alert("Error: Please allow pop-ups for this site.");
-    }
-  };
-
-  const handleDelete = async (id) => {
-    if (window.confirm("Are you sure you want to delete this saved state?")) {
-      try {
-        await api.delete(`/catalogues/${id}`);
-        fetchCatalogues();
-      } catch (err) {
-        alert("Delete failed. Check server connection.");
+      const { data } = await api.get(`/catalogues/${cat._id}`);
+      if (!data.items?.length) {
+        showToast('warning', 'This catalogue has no products yet.');
+        return;
       }
+      await downloadCataloguePdf(data);
+    } catch (err) {
+      log.error('Catalogue PDF failed', err.message);
+      showToast('error', 'Could not generate the PDF. Please try again.');
+    } finally {
+      setDownloadingId(null);
     }
   };
 
-  const filteredCatalogues = useMemo(() => {
-    if (!searchTerm.trim()) return catalogues;
-    const term = searchTerm.toLowerCase();
-    return catalogues.filter(cat => 
-      cat.name?.toLowerCase().includes(term) || 
-      cat.subtitle?.toLowerCase().includes(term)
-    );
+  const handleDelete = async (cat) => {
+    const ok = await confirm({
+      title:        'Delete Catalogue',
+      message:      `"${cat.name}" will be permanently removed. This cannot be undone.`,
+      confirmLabel: 'Delete',
+      cancelLabel:  'Cancel',
+      variant:      'danger',
+    });
+    if (!ok) return;
+    try {
+      await api.delete(`/catalogues/${cat._id}`);
+      setCatalogues(prev => prev.filter(c => c._id !== cat._id));
+      showToast('success', `"${cat.name}" deleted`);
+    } catch (err) {
+      log.error('Delete failed', err.message);
+      showToast('error', 'Delete failed. Check server connection.');
+    }
+  };
+
+  const filtered = useMemo(() => {
+    const term = searchTerm.trim().toLowerCase();
+    if (!term) return catalogues;
+    return catalogues.filter(c =>
+      c.name?.toLowerCase().includes(term) || c.subtitle?.toLowerCase().includes(term));
   }, [catalogues, searchTerm]);
 
-  if (loading && catalogues.length === 0) {
-    return (
-      <div className="flex flex-col items-center justify-center min-h-[400px]">
-        <div className="w-10 h-10 border-4 border-indigo-200 border-t-indigo-600 rounded-full animate-spin"></div>
-        <p className="mt-4 text-gray-400 font-bold uppercase text-[10px] tracking-widest">Accessing Database...</p>
-      </div>
-    );
-  }
-
-  if (error) {
-    return (
-      <div className="max-w-4xl mx-auto p-10 text-center">
-        <div className="bg-red-50 border border-red-100 rounded-3xl p-8">
-          <h2 className="text-xl font-black text-gray-800 uppercase mb-2">Server Not Found</h2>
-          <p className="text-gray-500 text-sm mb-6">{error}</p>
-          <button onClick={() => fetchCatalogues()} className="bg-indigo-600 text-white px-10 py-3 rounded-2xl font-black uppercase text-xs tracking-widest shadow-xl shadow-indigo-100">Retry Connection</button>
-        </div>
-      </div>
-    );
-  }
-
   return (
-    <div className="max-w-7xl mx-auto p-6">
-      {/* CONSOLIDATED HEADER CONTROL */}
-      <div className="bg-white p-2.5 rounded-[1.5rem] shadow-sm border border-gray-100 mb-10 flex flex-col md:flex-row items-stretch md:items-center gap-3">
-        {/* Title Section */}
-        <div className="px-4 py-1 border-b md:border-b-0 md:border-r border-gray-100 flex-shrink-0">
-          <h1 className="text-lg font-black text-gray-900 uppercase tracking-tighter leading-none py-1">Saved Catalogues</h1>
-        </div>
-        
-        {/* Search Bar with Internal Reset */}
-        <div className="relative flex-grow group">
-          <input 
-            type="text" 
-            placeholder="Search catalogues..."
-            className="w-full pl-10 pr-10 py-3 rounded-xl border border-transparent bg-gray-50 group-hover:bg-gray-100 focus:bg-white focus:border-indigo-100 outline-none text-sm font-medium transition-all"
-            value={searchTerm}
-            onChange={(e) => setSearchTerm(e.target.value)}
-          />
-          <Search size={16} className="absolute left-3.5 top-3.5 text-gray-400 group-focus-within:text-indigo-500 transition-colors" />
-          
-          {searchTerm && (
-            <button 
-              onClick={() => setSearchTerm('')}
-              className="absolute right-2 top-2 p-1.5 text-gray-400 hover:text-red-500 hover:bg-red-50 rounded-lg transition-all"
-              aria-label="Clear search"
-            >
-              <X size={16} strokeWidth={3} />
-            </button>
-          )}
-        </div>
+    <div style={{ minHeight: '100vh', background: T.offwhite, fontFamily: jost, padding: '56px 48px' }}>
+      <Toast />
+      <ConfirmDialog />
+      <style>{`
+        @keyframes shimmer {
+          0%   { background-position: -200% 0; }
+          100% { background-position:  200% 0; }
+        }
+      `}</style>
 
-        {/* Refresh Button */}
-        <button 
-          onClick={() => fetchCatalogues()} 
-          className="p-3 bg-white border border-gray-100 text-gray-400 hover:text-indigo-600 hover:border-indigo-100 rounded-xl transition-all shadow-sm flex-shrink-0 flex items-center justify-center group"
-          title="Refresh List"
-        >
-          <RefreshCw size={18} className={`${loading ? 'animate-spin text-indigo-500' : 'group-active:rotate-180 transition-transform duration-500'}`} />
-        </button>
+      {/* ── Page header ──────────────────────────────────────────────────────── */}
+      <div style={{ marginBottom: 40 }}>
+        <div style={{ width: 32, height: 1, background: T.gold, marginBottom: 20 }} />
+        <p style={{ ...eyebrow(), letterSpacing: '0.3em', marginBottom: 10 }}>Gifting</p>
+        <h1 style={{ fontFamily: serif, fontSize: 40, fontWeight: 300, color: T.navy, lineHeight: 1.05, margin: '0 0 28px' }}>
+          Saved <em style={{ color: T.gold }}>Catalogues.</em>
+        </h1>
+
+        {/* Controls row */}
+        <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', alignItems: 'center' }}>
+          <div style={{ position: 'relative', flex: '1 1 260px', maxWidth: 380 }}>
+            <Search size={13} style={{ position: 'absolute', left: 12, top: '50%', transform: 'translateY(-50%)', color: T.muted, pointerEvents: 'none' }} />
+            <input
+              type="text"
+              placeholder="Search by client or subtitle…"
+              value={searchTerm}
+              onChange={e => setSearchTerm(e.target.value)}
+              style={inputStyle({ fontSize: 13, paddingLeft: 34, paddingRight: searchTerm ? 30 : 12 })}
+              onFocus={e => { e.currentTarget.style.borderColor = T.gold; }}
+              onBlur={e => { e.currentTarget.style.borderColor = T.border; }}
+            />
+            {searchTerm && (
+              <button
+                onClick={() => setSearchTerm('')}
+                style={{ position: 'absolute', right: 10, top: '50%', transform: 'translateY(-50%)', background: 'none', border: 'none', cursor: 'pointer', color: T.muted, display: 'flex', padding: 0 }}
+              >✕</button>
+            )}
+          </div>
+
+          <button
+            onClick={fetchCatalogues}
+            title="Refresh"
+            style={{ background: 'none', border: `1px solid ${T.border}`, borderRadius: 3, padding: '9px 10px', cursor: 'pointer', color: T.muted, display: 'flex', alignItems: 'center', transition: 'color 0.2s' }}
+            onMouseEnter={e => { e.currentTarget.style.color = T.gold; e.currentTarget.style.borderColor = T.borderG; }}
+            onMouseLeave={e => { e.currentTarget.style.color = T.muted; e.currentTarget.style.borderColor = T.border; }}
+          >
+            <RefreshCw size={13} className={loading ? 'animate-spin' : ''} />
+          </button>
+
+          <span style={{ fontFamily: jost, fontSize: 10, fontWeight: 300, color: T.muted }}>
+            {!loading && `${filtered.length} of ${catalogues.length}`}
+          </span>
+
+          <div style={{ marginLeft: 'auto' }}>
+            <button
+              onClick={() => navigate('/builder')}
+              title="Start a catalogue with custom products (or select products on the Products page and use Build New)"
+              style={{ ...goldButton(), fontSize: 10, letterSpacing: '0.22em', padding: '10px 22px' }}
+              onMouseEnter={e => { e.currentTarget.style.background = T.gold2; }}
+              onMouseLeave={e => { e.currentTarget.style.background = T.gold; }}
+            >
+              <Plus size={13} /> New Catalogue
+            </button>
+          </div>
+        </div>
       </div>
 
-      {filteredCatalogues.length === 0 ? (
-        <div className="bg-gray-50 border-2 border-dashed border-gray-200 rounded-[2.5rem] p-20 text-center">
-          <h3 className="text-lg font-black text-gray-400 uppercase tracking-tight">
-            {searchTerm ? "No matches found" : "Archive is Empty"}
+      {/* ── Content ─────────────────────────────────────────────────────────── */}
+      {error ? (
+        <div style={{ background: 'white', border: `1px solid ${T.border}`, padding: '48px 24px', textAlign: 'center' }}>
+          <h3 style={{ fontFamily: serif, fontSize: 26, fontWeight: 300, color: T.navy, margin: '0 0 8px' }}>Server not reachable</h3>
+          <p style={{ fontFamily: jost, fontSize: 12, fontWeight: 300, color: T.muted, margin: '0 0 20px' }}>{error}</p>
+          <button onClick={fetchCatalogues} style={goldButton()}>Retry</button>
+        </div>
+      ) : loading && !catalogues.length ? (
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))', gap: 20 }}>
+          {[1, 2, 3].map(i => <SkeletonCard key={i} />)}
+        </div>
+      ) : !filtered.length ? (
+        <div style={{ background: 'white', border: `1px dashed ${T.borderG}`, padding: '64px 24px', textAlign: 'center' }}>
+          <BookOpen size={26} style={{ color: T.gold, marginBottom: 12 }} />
+          <h3 style={{ fontFamily: serif, fontSize: 26, fontWeight: 300, color: T.navy, margin: '0 0 8px' }}>
+            {searchTerm ? 'No matches found' : 'No catalogues yet'}
           </h3>
-          {searchTerm && (
-            <button 
-              onClick={() => setSearchTerm('')}
-              className="mt-4 text-indigo-600 font-bold uppercase text-[10px] tracking-widest flex items-center gap-2 mx-auto hover:bg-indigo-50 px-4 py-2 rounded-lg transition-all"
-            >
-              <X size={12} strokeWidth={3} />
-              Reset Search Filter
-            </button>
-          )}
+          <p style={{ fontFamily: jost, fontSize: 12, fontWeight: 300, color: T.muted, margin: 0 }}>
+            {searchTerm
+              ? <button onClick={() => setSearchTerm('')} style={{ background: 'none', border: 'none', cursor: 'pointer', color: T.gold, fontFamily: jost, fontSize: 12 }}>Clear search</button>
+              : <>Select products on the Products page and use <b style={{ fontWeight: 500 }}>Build New</b>.</>}
+          </p>
         </div>
       ) : (
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-6">
-          {filteredCatalogues.map(cat => (
-            <div key={cat._id} className="group bg-white border border-gray-100 rounded-[2rem] p-6 shadow-sm hover:shadow-2xl hover:border-indigo-200 transition-all duration-500">
-              <div className="flex justify-between items-start mb-6">
-                <div className="flex-1">
-                  <h3 className="font-black text-gray-900 uppercase text-xl leading-tight group-hover:text-indigo-600 transition-colors truncate pr-2">
-                    {cat.name}
-                  </h3>
-                  {cat.subtitle && <p className="text-[10px] text-gray-400 italic mt-1 line-clamp-1">{cat.subtitle}</p>}
-                  <div className="flex items-center gap-3 mt-2">
-                    <span className="bg-indigo-50 text-indigo-600 text-[10px] px-3 py-1 rounded-full font-black uppercase tracking-tighter">
-                      {cat.items?.length || 0} Products
-                    </span>
-                    <span className="text-[10px] text-gray-400 font-bold uppercase">
-                      {new Date(cat.createdAt).toLocaleDateString()}
-                    </span>
-                  </div>
-                </div>
-                <button onClick={() => handleDelete(cat._id)} className="bg-gray-50 text-gray-300 hover:bg-red-50 hover:text-red-500 p-3 rounded-2xl transition-all">
-                  <Trash2 size={16} />
-                </button>
-              </div>
-              <button 
-                onClick={() => handleOpen(cat)} 
-                className="w-full bg-indigo-600 hover:bg-black text-white py-4 rounded-2xl font-black uppercase text-xs tracking-widest transition-all shadow-lg shadow-indigo-100 active:scale-95 flex items-center justify-center gap-2"
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))', gap: 20 }}>
+          {filtered.map(cat => {
+            const busy = downloadingId === cat._id;
+            return (
+              <div
+                key={cat._id}
+                style={{
+                  background: 'white', border: `1px solid ${T.border}`, borderRadius: 2,
+                  padding: '22px 22px 18px', display: 'flex', flexDirection: 'column',
+                  transition: 'border-color 0.2s, box-shadow 0.2s',
+                }}
+                onMouseEnter={e => { e.currentTarget.style.borderColor = T.borderG; e.currentTarget.style.boxShadow = '0 8px 30px rgba(14,21,32,0.06)'; }}
+                onMouseLeave={e => { e.currentTarget.style.borderColor = T.border; e.currentTarget.style.boxShadow = 'none'; }}
               >
-                <Edit3 size={14} />
-                Edit Catalogue
-              </button>
-            </div>
-          ))}
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 12 }}>
+                  <div style={{ minWidth: 0 }}>
+                    <h3 style={{ fontFamily: serif, fontSize: 24, fontWeight: 400, color: T.navy, margin: 0, lineHeight: 1.15, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                      {cat.name}
+                    </h3>
+                    <p style={{ fontFamily: serif, fontStyle: 'italic', fontSize: 14, color: T.muted, margin: '2px 0 0', minHeight: 18, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                      {cat.subtitle || ' '}
+                    </p>
+                  </div>
+                  <button
+                    onClick={() => handleDelete(cat)}
+                    title="Delete catalogue"
+                    style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#c8c8c8', padding: 4, display: 'flex', transition: 'color 0.2s' }}
+                    onMouseEnter={e => { e.currentTarget.style.color = T.red; }}
+                    onMouseLeave={e => { e.currentTarget.style.color = '#c8c8c8'; }}
+                  >
+                    <Trash2 size={15} />
+                  </button>
+                </div>
+
+                <div style={{ display: 'flex', alignItems: 'center', gap: 10, margin: '14px 0 18px' }}>
+                  <span style={{ ...eyebrow(T.gold), fontSize: 8, padding: '4px 8px', border: `1px solid ${T.borderG}`, background: T.dimBg }}>
+                    {cat.itemCount || 0} Products
+                  </span>
+                  <span style={{ fontFamily: jost, fontSize: 10, fontWeight: 300, color: T.muted }}>
+                    Updated {formatDate(cat.updatedAt || cat.createdAt)}
+                  </span>
+                </div>
+
+                <div style={{ display: 'flex', gap: 8, marginTop: 'auto' }}>
+                  <button
+                    onClick={() => handleOpen(cat)}
+                    style={{ ...outlineButton(), flex: 1 }}
+                    onMouseEnter={e => { e.currentTarget.style.borderColor = T.gold; e.currentTarget.style.color = T.gold; }}
+                    onMouseLeave={e => { e.currentTarget.style.borderColor = T.border; e.currentTarget.style.color = T.navy; }}
+                  >
+                    <Pencil size={12} /> Edit
+                  </button>
+                  <button
+                    onClick={() => handleDownload(cat)}
+                    disabled={Boolean(downloadingId)}
+                    style={{ ...goldButton(Boolean(downloadingId) && !busy), flex: 1 }}
+                    onMouseEnter={e => { if (!downloadingId) e.currentTarget.style.background = T.gold2; }}
+                    onMouseLeave={e => { if (!downloadingId) e.currentTarget.style.background = T.gold; }}
+                  >
+                    {busy ? <Loader2 size={12} className="animate-spin" /> : <Download size={12} />}
+                    {busy ? 'Preparing…' : 'Download PDF'}
+                  </button>
+                </div>
+              </div>
+            );
+          })}
         </div>
       )}
     </div>

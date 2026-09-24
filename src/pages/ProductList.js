@@ -10,14 +10,14 @@
  * ─────────────────────────────────────────────────────────────────────────────
  */
 
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import api from '../api';
 import { createLogger } from '../utils/logger';
 import {
   Plus, Check, FolderPlus, X, ChevronDown, Search, Trash2, Pencil,
   RotateCcw, Info, CheckSquare, Square, Sparkles, FileText, Download,
   ImageIcon, AlertCircle, CheckCircle2, Loader2, Star, Images,
-  ChevronLeft, ChevronRight, Play,
+  ChevronLeft, ChevronRight, Play, ExternalLink,
 } from 'lucide-react';
 import usePortalItems from '../hooks/usePortalItems';
 import ProductImageGallery from './ProductImageGallery';
@@ -678,6 +678,254 @@ const inputStyle = (focused = false, extra = {}) => ({
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Add to Existing Catalogue (selection bar → "Add to Existing")
+// Pick a saved catalogue and append the selected products. Uses the light
+// /catalogues/summary list and the server-side /catalogues/:id/items/add
+// route, so it never downloads or re-sends every catalogue's items. Products
+// already in a catalogue are skipped.
+// ─────────────────────────────────────────────────────────────────────────────
+/** Small uppercase label (eyebrow) style. */
+const catEyebrow = (color = T.muted) => ({
+  fontFamily: jost, fontSize: 9, fontWeight: 400,
+  letterSpacing: '0.28em', textTransform: 'uppercase', color,
+});
+
+/** Gold primary button (matches "Add Product" / "Build New"). */
+const catGoldButton = (disabled = false) => ({
+  display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: 7,
+  background: disabled ? '#e5e0d6' : T.gold, color: disabled ? T.muted : T.navy,
+  border: 'none', padding: '10px 20px', borderRadius: 2,
+  fontFamily: jost, fontSize: 9, fontWeight: 500,
+  letterSpacing: '0.2em', textTransform: 'uppercase',
+  cursor: disabled ? 'not-allowed' : 'pointer', transition: 'background 0.2s',
+});
+
+/** Outlined secondary button. */
+const catOutlineButton = (disabled = false) => ({
+  display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: 7,
+  background: 'white', color: T.navy,
+  border: `1px solid ${T.border}`, padding: '9px 18px', borderRadius: 2,
+  fontFamily: jost, fontSize: 9, fontWeight: 400,
+  letterSpacing: '0.2em', textTransform: 'uppercase',
+  cursor: disabled ? 'not-allowed' : 'pointer', opacity: disabled ? 0.5 : 1,
+  transition: 'border-color 0.2s, color 0.2s',
+});
+
+const AddToCatalogueModal = ({ items, onClose, onAdded }) => {
+  const [catalogues, setCatalogues] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
+  const [search, setSearch] = useState('');
+  const [addingId, setAddingId] = useState(null);
+  const [result, setResult] = useState(null);   // { catalogue, added, skipped }
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const res = await api.get('/catalogues/summary');
+      setCatalogues(Array.isArray(res.data) ? res.data : []);
+    } catch {
+      setError('Could not load saved catalogues.');
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => { load(); }, [load]);
+
+  const filtered = useMemo(() => {
+    const term = search.trim().toLowerCase();
+    if (!term) return catalogues;
+    return catalogues.filter(c =>
+      c.name?.toLowerCase().includes(term) || c.subtitle?.toLowerCase().includes(term));
+  }, [catalogues, search]);
+
+  const selectedIds = useMemo(() => items.map(p => String(p._id)), [items]);
+
+  const addTo = async (cat) => {
+    if (addingId) return;
+    setAddingId(cat._id);
+    setError(null);
+    try {
+      const payload = items.map(p => ({
+        _id: p._id, name: p.name, description: p.description || '',
+        price: p.price ?? 0, imageUrl: p.imageUrl || '',
+      }));
+      const { data } = await api.post(`/catalogues/${cat._id}/items/add`, { items: payload });
+      setResult({ catalogue: cat, added: data.added, skipped: data.skipped });
+      if (data.added > 0) onAdded?.();
+    } catch (err) {
+      setError(err.response?.data?.message || 'Could not add products. Please try again.');
+    } finally {
+      setAddingId(null);
+    }
+  };
+
+  const openBuilder = (id) => window.open(`/builder?id=${id}`, '_blank');
+
+  return (
+    <div
+      onClick={onClose}
+      style={{
+        position: 'fixed', inset: 0,
+        background: 'rgba(14,21,32,0.75)', backdropFilter: 'blur(4px)',
+        display: 'flex', alignItems: 'center', justifyContent: 'center',
+        padding: 24, zIndex: 200,
+      }}
+    >
+      <div
+        className="animate-modal-up"
+        onClick={e => e.stopPropagation()}
+        style={{ background: 'white', border: `1px solid ${T.border}`, width: '100%', maxWidth: 460 }}
+      >
+        {/* Header */}
+        <div style={{
+          padding: '24px 28px', borderBottom: `1px solid ${T.border}`,
+          display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+        }}>
+          <div>
+            <p style={{ ...catEyebrow(), margin: '0 0 4px' }}>
+              {items.length} selected {items.length === 1 ? 'product' : 'products'}
+            </p>
+            <h2 style={{ fontFamily: serif, fontSize: 26, fontWeight: 300, color: T.navy, margin: 0 }}>
+              Add to <em style={{ color: T.gold }}>Catalogue.</em>
+            </h2>
+          </div>
+          <button onClick={onClose} style={{ background: 'none', border: 'none', cursor: 'pointer', color: T.muted, fontSize: 18, padding: 4 }}>✕</button>
+        </div>
+
+        {result ? (
+          /* ── Success ─────────────────────────────────────────────────────── */
+          <div style={{ padding: '36px 28px 28px', textAlign: 'center' }}>
+            <div style={{
+              width: 48, height: 48, borderRadius: '50%', margin: '0 auto 16px',
+              border: `1px solid ${T.borderG}`, background: T.dimBg, color: T.gold,
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+            }}>
+              <Check size={22} />
+            </div>
+            <h3 style={{ fontFamily: serif, fontSize: 24, fontWeight: 400, color: T.navy, margin: 0 }}>
+              {result.catalogue.name}
+            </h3>
+            <p style={{ fontFamily: jost, fontSize: 12, fontWeight: 300, color: T.muted, margin: '8px 0 0' }}>
+              {result.added > 0 ? `${result.added} added` : 'Nothing new added'}
+              {result.skipped > 0 && ` · ${result.skipped} already in this catalogue`}
+            </p>
+            <div style={{ display: 'flex', gap: 10, marginTop: 28 }}>
+              <button onClick={onClose} style={{ ...catOutlineButton(), flex: 1 }}>Done</button>
+              <button
+                onClick={() => { openBuilder(result.catalogue._id); onClose(); }}
+                style={{ ...catGoldButton(), flex: 1 }}
+                onMouseEnter={e => { e.currentTarget.style.background = T.gold2; }}
+                onMouseLeave={e => { e.currentTarget.style.background = T.gold; }}
+              >
+                Open &amp; Download <ExternalLink size={12} />
+              </button>
+            </div>
+          </div>
+        ) : (
+          <>
+            {/* Search */}
+            <div style={{ padding: '16px 24px 8px' }}>
+              <div style={{ position: 'relative' }}>
+                <Search size={13} style={{ position: 'absolute', left: 12, top: '50%', transform: 'translateY(-50%)', color: T.muted, pointerEvents: 'none' }} />
+                <input
+                  autoFocus
+                  value={search}
+                  onChange={e => setSearch(e.target.value)}
+                  placeholder="Search catalogues…"
+                  style={inputStyle(false, { fontSize: 12, paddingLeft: 34 })}
+                  onFocus={e => { e.currentTarget.style.borderColor = T.gold; }}
+                  onBlur={e => { e.currentTarget.style.borderColor = T.border; }}
+                />
+              </div>
+              {error && (
+                <p style={{ display: 'flex', alignItems: 'center', gap: 6, margin: '10px 0 0', fontFamily: jost, fontSize: 11, color: T.red }}>
+                  <AlertCircle size={12} /> {error}
+                  {!catalogues.length && (
+                    <button onClick={load} style={{ background: 'none', border: 'none', color: T.red, textDecoration: 'underline', cursor: 'pointer', fontFamily: jost, fontSize: 11 }}>Retry</button>
+                  )}
+                </p>
+              )}
+            </div>
+
+            {/* List */}
+            <div style={{ maxHeight: 360, overflowY: 'auto', padding: '4px 0 8px' }}>
+              {loading ? (
+                <div style={{ padding: '40px 0', display: 'flex', justifyContent: 'center' }}>
+                  <Loader2 size={22} className="animate-spin" style={{ color: T.gold }} />
+                </div>
+              ) : !filtered.length ? (
+                <div style={{ padding: '40px 24px', textAlign: 'center' }}>
+                  <p style={{ fontFamily: jost, fontSize: 12, fontWeight: 300, color: T.muted, margin: 0 }}>
+                    {search ? 'No matching catalogues.' : 'No saved catalogues yet — use Build New to create one.'}
+                  </p>
+                </div>
+              ) : filtered.map(cat => {
+                const inCat = new Set((cat.itemIds || []).map(String));
+                const already = selectedIds.filter(id => inCat.has(id)).length;
+                const toAdd = items.length - already;
+                const busy = addingId === cat._id;
+                const disabled = Boolean(addingId) || toAdd === 0;
+                return (
+                  <div
+                    key={cat._id}
+                    style={{
+                      padding: '14px 24px', borderBottom: `1px solid ${T.border}`,
+                      display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12,
+                      transition: 'background 0.15s',
+                    }}
+                    onMouseEnter={e => { e.currentTarget.style.background = T.dimBg; }}
+                    onMouseLeave={e => { e.currentTarget.style.background = 'none'; }}
+                  >
+                    <div style={{ minWidth: 0 }}>
+                      <span style={{ display: 'block', fontFamily: jost, fontSize: 13, fontWeight: 500, color: T.text, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                        {cat.name}
+                      </span>
+                      {cat.subtitle && (
+                        <span style={{ display: 'block', fontFamily: serif, fontStyle: 'italic', fontSize: 13, color: T.muted, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                          {cat.subtitle}
+                        </span>
+                      )}
+                      <span style={{ display: 'block', fontFamily: jost, fontSize: 10, fontWeight: 300, color: T.muted, marginTop: 2 }}>
+                        {cat.itemCount || 0} items
+                        {already > 0 && <span style={{ color: T.amber }}> · {already} already added</span>}
+                      </span>
+                    </div>
+                    <button
+                      disabled={disabled}
+                      onClick={() => addTo(cat)}
+                      style={{ ...catGoldButton(disabled && !busy), flexShrink: 0, padding: '8px 14px' }}
+                    >
+                      {busy ? <Loader2 size={12} className="animate-spin" /> : toAdd === 0 ? <Check size={12} /> : <Plus size={12} />}
+                      {toAdd === 0 ? 'All added' : `Add ${toAdd}`}
+                    </button>
+                  </div>
+                );
+              })}
+            </div>
+
+            <div style={{ padding: '16px 24px', borderTop: `1px solid ${T.border}`, textAlign: 'right' }}>
+              <button
+                onClick={onClose}
+                style={{
+                  background: 'none', border: 'none', cursor: 'pointer',
+                  fontFamily: jost, fontSize: 10, fontWeight: 400,
+                  letterSpacing: '0.2em', textTransform: 'uppercase', color: T.muted,
+                }}
+              >
+                Cancel
+              </button>
+            </div>
+          </>
+        )}
+      </div>
+    </div>
+  );
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
 // MAIN COMPONENT
 // ─────────────────────────────────────────────────────────────────────────────
 const ProductList = () => {
@@ -736,9 +984,7 @@ const ProductList = () => {
   const [promptSaving, setPromptSaving]         = useState(false);
 
   // ── Catalogue modal ──────────────────────────────────────────────────────────
-  const [showCatalogueModal, setShowCatalogueModal]   = useState(false);
-  const [savedCatalogues, setSavedCatalogues]         = useState([]);
-  const [isUpdatingCatalogue, setIsUpdatingCatalogue] = useState(false);
+  const [catalogueModalItems, setCatalogueModalItems] = useState(null); // "Add to Existing" snapshot
 
   // ── PDF Import modal ─────────────────────────────────────────────────────────
   const [showPdfModal, setShowPdfModal]       = useState(false);
@@ -1069,50 +1315,30 @@ const ProductList = () => {
   };
 
   // ─── Catalogue helpers ───────────────────────────────────────────────────────
+  // "Build New": hand the selection to the Catalogue Builder in a new tab
+  // (it reads and removes 'catalogue_selection' on load).
   const handleOpenBuilder = () => {
     log.debug('Opening catalogue builder', { itemCount: selectedProducts.length });
     const data = selectedProducts.map(p => ({
       _id: p._id, name: p.name, imageUrl: p.imageUrl,
       description: p.description, price: p.price,
     }));
-    localStorage.setItem('catalogue_selection', JSON.stringify(data));
-    window.open('/builder', '_blank');
-  };
-
-  const openAddToExistingModal = async () => {
-    setShowCatalogueModal(true);
     try {
-      const res = await api.get('/catalogues');
-      setSavedCatalogues(Array.isArray(res.data) ? res.data : []);
+      localStorage.setItem('catalogue_selection', JSON.stringify(data));
     } catch (err) {
-      log.warn('Failed to load catalogues', err.message);
-      setSavedCatalogues([]);
+      log.warn('Could not store catalogue selection', err.message);
+      return showToast('error', 'Could not pass the selection to the builder. Try fewer products.');
+    }
+    const tab = window.open('/builder', '_blank');
+    if (!tab) {
+      localStorage.removeItem('catalogue_selection');
+      showToast('error', 'Please allow pop-ups for this site to open the builder.');
     }
   };
 
-  const appendToCatalogue = async (targetCat) => {
-    if (!targetCat || isUpdatingCatalogue) return;
-    log.info('Appending to catalogue', { catalogueId: targetCat._id, items: selectedProducts.length });
-    setIsUpdatingCatalogue(true);
-    try {
-      const newItems = selectedProducts.map(p => ({
-        name: p.name || 'Unnamed', description: p.description || '',
-        price: p.price || 0, imageUrl: p.imageUrl || '',
-      }));
-      await api.post('/catalogues', {
-        id:       targetCat._id,
-        name:     targetCat.name,
-        subtitle: targetCat.subtitle,
-        items:    [...(targetCat.items || []), ...newItems],
-      });
-      setSelectedProducts([]);
-      setShowCatalogueModal(false);
-    } catch (err) {
-      log.error('Failed to update catalogue', err.message);
-    } finally {
-      setIsUpdatingCatalogue(false);
-    }
-  };
+  // "Add to Existing": AddToCatalogueModal appends on the server and skips
+  // products already in the chosen catalogue.
+  const openAddToExistingModal = () => setCatalogueModalItems(selectedProducts);
 
   // ─── Prompt management ───────────────────────────────────────────────────────
   const savePrompt = async () => {
@@ -2050,79 +2276,12 @@ const ProductList = () => {
       {/* ════════════════════════════════════════════════════════════════════════
           CATALOGUE MODAL
       ════════════════════════════════════════════════════════════════════════ */}
-      {showCatalogueModal && (
-        <div style={{
-          position: 'fixed', inset: 0,
-          background: 'rgba(14,21,32,0.75)', backdropFilter: 'blur(4px)',
-          display: 'flex', alignItems: 'center', justifyContent: 'center',
-          padding: 24, zIndex: 200,
-        }}>
-          <div className="animate-modal-up" style={{
-            background: 'white', border: `1px solid ${T.border}`,
-            width: '100%', maxWidth: 460,
-          }}>
-            <div style={{
-              padding: '24px 28px', borderBottom: `1px solid ${T.border}`,
-              display: 'flex', justifyContent: 'space-between', alignItems: 'center',
-            }}>
-              <div>
-                <p style={{ fontFamily: jost, fontSize: 9, fontWeight: 400, letterSpacing: '0.28em', textTransform: 'uppercase', color: T.muted, margin: '0 0 4px' }}>
-                  Appending {selectedProducts.length} items
-                </p>
-                <h2 style={{ fontFamily: serif, fontSize: 26, fontWeight: 300, color: T.navy, margin: 0 }}>
-                  Select Catalogue
-                </h2>
-              </div>
-              <button onClick={() => setShowCatalogueModal(false)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: T.muted, fontSize: 18, padding: 4 }}>✕</button>
-            </div>
-
-            <div style={{ maxHeight: 360, overflowY: 'auto', padding: '8px 0' }}>
-              {savedCatalogues.length === 0 ? (
-                <div style={{ padding: '40px 0', textAlign: 'center' }}>
-                  <p style={{ fontFamily: jost, fontSize: 12, fontWeight: 300, color: T.muted }}>No saved catalogues found.</p>
-                </div>
-              ) : savedCatalogues.map(cat => (
-                <button
-                  key={cat._id}
-                  disabled={isUpdatingCatalogue}
-                  onClick={() => appendToCatalogue(cat)}
-                  style={{
-                    width: '100%', textAlign: 'left',
-                    padding: '16px 24px', background: 'none', border: 'none',
-                    borderBottom: `1px solid ${T.border}`,
-                    display: 'flex', justifyContent: 'space-between', alignItems: 'center',
-                    cursor: isUpdatingCatalogue ? 'not-allowed' : 'pointer',
-                    opacity: isUpdatingCatalogue ? 0.5 : 1,
-                    transition: 'background 0.15s',
-                  }}
-                  onMouseEnter={e => { if (!isUpdatingCatalogue) e.currentTarget.style.background = T.dimBg; }}
-                  onMouseLeave={e => { e.currentTarget.style.background = 'none'; }}
-                >
-                  <div>
-                    <span style={{ display: 'block', fontFamily: jost, fontSize: 13, fontWeight: 500, color: T.text }}>{cat.name}</span>
-                    <span style={{ display: 'block', fontFamily: jost, fontSize: 10, fontWeight: 300, color: T.muted, marginTop: 2 }}>
-                      {(cat.items || []).length} current items
-                    </span>
-                  </div>
-                  <Plus size={16} style={{ color: T.gold, flexShrink: 0 }} />
-                </button>
-              ))}
-            </div>
-
-            <div style={{ padding: '16px 24px', borderTop: `1px solid ${T.border}`, textAlign: 'right' }}>
-              <button
-                onClick={() => setShowCatalogueModal(false)}
-                style={{
-                  background: 'none', border: 'none', cursor: 'pointer',
-                  fontFamily: jost, fontSize: 10, fontWeight: 400,
-                  letterSpacing: '0.2em', textTransform: 'uppercase', color: T.muted,
-                }}
-              >
-                Cancel
-              </button>
-            </div>
-          </div>
-        </div>
+      {catalogueModalItems && (
+        <AddToCatalogueModal
+          items={catalogueModalItems}
+          onClose={() => setCatalogueModalItems(null)}
+          onAdded={() => setSelectedProducts([])}
+        />
       )}
 
       {/* ════════════════════════════════════════════════════════════════════════
