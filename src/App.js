@@ -53,6 +53,7 @@ import {
 import { AuthProvider, useAuth } from './context/AuthContext';
 import { AppPopupStyles }        from './components/AppPopups';
 import { PageLoader }            from './components/PageLoader';
+import TaskTray from './components/TaskTray';
 import { createLogger }          from './utils/logger';
 
 import LoginPage from './pages/LoginPage';
@@ -655,6 +656,8 @@ const AppShell = () => {
       fontFamily: '"Jost", sans-serif',
     }}>
       <Sidebar />
+      {/* Background tasks (video uploads, OneDrive processing, imports) */}
+      <TaskTray />
       <main style={{ flex: 1, overflowY: 'auto', height: '100vh' }}>
         <Suspense fallback={<PageLoader />}>
           <Routes>

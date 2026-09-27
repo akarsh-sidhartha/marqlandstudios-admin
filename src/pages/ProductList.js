@@ -10,17 +10,22 @@
  * ─────────────────────────────────────────────────────────────────────────────
  */
 
-import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import api from '../api';
 import { createLogger } from '../utils/logger';
 import {
-  Plus, Check, FolderPlus, X, ChevronDown, Search, Trash2, Pencil,
+  Plus, Check, FolderPlus, X, Search, Trash2, Pencil,
   RotateCcw, Info, CheckSquare, Square, Sparkles, FileText, Download,
-  ImageIcon, AlertCircle, CheckCircle2, Loader2, Star, Images,
+  ImageIcon, AlertCircle, CheckCircle2, Loader2, Star,
   ChevronLeft, ChevronRight, Play, ExternalLink,
 } from 'lucide-react';
 import usePortalItems from '../hooks/usePortalItems';
-import ProductImageGallery from './ProductImageGallery';
+import ProductFormModal from './products/ProductFormModal';
+import useCatalogue from './products/useCatalogue';
+import {
+  T, jost, serif, inputStyle, FieldLabel, PromptSelector, ProductVideo, hasProductVideo, SearchableSelect,
+} from './products/productUi';
+import v2 from '../lib/apiV2';
 import { usePopup } from '../components/AppPopups';
 import { API_ROOT } from '../api';
 import PendingSupplierApprovals, { PendingApprovalsButton } from './PendingSupplierApprovals'; // NEW — Supplier Portal
@@ -28,49 +33,15 @@ import PendingSupplierApprovals, { PendingApprovalsButton } from './PendingSuppl
 // ─── Logger ──────────────────────────────────────────────────────────────────
 const log = createLogger('ProductList');
 
-// ─── Design tokens (mirrors ClientList) ──────────────────────────────────────
-const T = {
-  navy:    '#0e1520',
-  gold:    '#b8975a',
-  gold2:   '#d4b06a',
-  offwhite:'#faf8f5',
-  text:    '#1a1a1a',
-  muted:   '#888',
-  border:  'rgba(0,0,0,0.07)',
-  borderG: 'rgba(184,151,90,0.18)',
-  dimBg:   'rgba(184,151,90,0.04)',
-  indigo:  '#4f46e5',
-  indigoBg:'rgba(79,70,229,0.06)',
-  purple:  '#7c3aed',
-  purpleBg:'rgba(124,58,237,0.06)',
-  red:     '#dc2626',
-  green:   '#16a34a',
-  amber:   '#d97706',
-};
-
-const jost  = '"Jost", sans-serif';
-const serif = '"Cormorant Garamond", Georgia, serif';
-
-// ─── Video URL helpers (mirrors ProductImageGallery.js) ──────────────────────
-const getYouTubeId = (url) => {
-  if (!url) return null;
-  const patterns = [
-    /youtu\.be\/([^?&]+)/,
-    /youtube\.com\/watch\?v=([^&]+)/,
-    /youtube\.com\/embed\/([^?&]+)/,
-    /youtube\.com\/shorts\/([^?&]+)/,
-  ];
-  for (const re of patterns) {
-    const m = url.match(re);
-    if (m) return m[1];
-  }
-  return null;
-};
-const isYouTube = (url) => Boolean(getYouTubeId(url));
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Skeleton row — reusable loading placeholder (mirrors SkeletonList)
 // ─────────────────────────────────────────────────────────────────────────────
+const loadMoreBtn = {
+  background: 'white', border: `1px solid ${T.borderG}`, color: T.gold, padding: '7px 18px', borderRadius: 2,
+  fontFamily: jost, fontSize: 9, letterSpacing: '0.2em', textTransform: 'uppercase', cursor: 'pointer',
+};
+
 const SkeletonCard = () => (
   <div style={{
     background: 'white',
@@ -114,7 +85,7 @@ const ProductImage = ({ p, getAssetUrl, onPreview }) => {
   // Primary image + any additional angles saved via the Image Gallery
   const images      = [p.imageUrl, ...(p.additionalImages || [])].filter(Boolean);
   const hasMultiple = images.length > 1;
-  const hasVideo    = Boolean(p.videoUrl);
+  const hasVideo    = hasProductVideo(p);
   const currentUrl  = images[index] || null;
 
   const goPrev = (e) => {
@@ -168,22 +139,7 @@ const ProductImage = ({ p, getAssetUrl, onPreview }) => {
     >
       {playingVideo && hasVideo ? (
         // ── Inline video playback ──
-        isYouTube(p.videoUrl) ? (
-          <iframe
-            src={`https://www.youtube.com/embed/${getYouTubeId(p.videoUrl)}?autoplay=1&rel=0`}
-            title={p.name}
-            allow="autoplay; encrypted-media; picture-in-picture"
-            allowFullScreen
-            style={{ width: '100%', height: '100%', border: 'none' }}
-          />
-        ) : (
-          <video
-            src={p.videoUrl}
-            controls
-            autoPlay
-            style={{ width: '100%', height: '100%', objectFit: 'cover', background: '#000' }}
-          />
-        )
+        <ProductVideo p={p} fit="cover" />
       ) : (
         <>
           {/* Shimmer buffer shown until image resolves */}
@@ -328,7 +284,7 @@ const ProductPreviewMedia = ({ p, getAssetUrl }) => {
 
   const images      = [p.imageUrl, ...(p.additionalImages || [])].filter(Boolean);
   const hasMultiple = images.length > 1;
-  const hasVideo    = Boolean(p.videoUrl);
+  const hasVideo    = hasProductVideo(p);
   const currentUrl  = images[index] || null;
 
   const goPrev = (e) => { e.stopPropagation(); setPlayingVideo(false); setIndex(i => (i - 1 + images.length) % images.length); };
@@ -349,22 +305,7 @@ const ProductPreviewMedia = ({ p, getAssetUrl }) => {
   return (
     <>
       {playingVideo && hasVideo ? (
-        isYouTube(p.videoUrl) ? (
-          <iframe
-            src={`https://www.youtube.com/embed/${getYouTubeId(p.videoUrl)}?autoplay=1&rel=0`}
-            title={p.name}
-            allow="autoplay; encrypted-media; picture-in-picture"
-            allowFullScreen
-            style={{ width: '100%', height: '100%', border: 'none' }}
-          />
-        ) : (
-          <video
-            src={p.videoUrl}
-            controls
-            autoPlay
-            style={{ width: '100%', height: '100%', objectFit: 'contain', background: '#000' }}
-          />
-        )
+        <ProductVideo p={p} fit="contain" />
       ) : (
         <>
           {currentUrl
@@ -458,224 +399,6 @@ const ProductPreviewMedia = ({ p, getAssetUrl }) => {
     </>
   );
 };
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Custom Creatable Select
-// ─────────────────────────────────────────────────────────────────────────────
-const CustomCreatableSelect = ({ options, value, onChange, placeholder, isDisabled, label }) => {
-  const [isOpen, setIsOpen]       = useState(false);
-  const [inputValue, setInputValue] = useState('');
-  const wrapperRef = useRef(null);
-
-  useEffect(() => {
-    const handleClickOutside = (e) => {
-      if (wrapperRef.current && !wrapperRef.current.contains(e.target)) setIsOpen(false);
-    };
-    document.addEventListener('mousedown', handleClickOutside);
-    return () => document.removeEventListener('mousedown', handleClickOutside);
-  }, []);
-
-  const handleSelect = (val) => {
-    onChange({ value: val, label: val });
-    setIsOpen(false);
-    setInputValue('');
-  };
-
-  const handleCreate = () => {
-    if (inputValue.trim()) {
-      onChange({ value: inputValue, label: inputValue });
-      setIsOpen(false);
-      setInputValue('');
-    }
-  };
-
-  return (
-    <div ref={wrapperRef} style={{ position: 'relative', width: '100%' }}>
-      <label style={{
-        display: 'block', fontFamily: jost, fontSize: 9, fontWeight: 400,
-        letterSpacing: '0.25em', textTransform: 'uppercase', color: T.muted, marginBottom: 6,
-      }}>
-        {label}
-      </label>
-      <div
-        onClick={() => !isDisabled && setIsOpen(!isOpen)}
-        style={{
-          width: '100%', padding: '9px 12px',
-          background: isDisabled ? T.offwhite : 'white',
-          border: `1px solid ${T.border}`,
-          borderRadius: 3,
-          display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-          cursor: isDisabled ? 'not-allowed' : 'pointer',
-          opacity: isDisabled ? 0.55 : 1,
-          fontFamily: jost, fontSize: 13, fontWeight: 300, color: T.text,
-          boxSizing: 'border-box',
-          transition: 'border-color 0.2s',
-        }}
-      >
-        <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-          {value ? value.label : (placeholder || 'Select…')}
-        </span>
-        <ChevronDown size={13} style={{
-          color: T.muted, flexShrink: 0, marginLeft: 6,
-          transform: isOpen ? 'rotate(180deg)' : 'rotate(0deg)', transition: 'transform 0.2s',
-        }} />
-      </div>
-
-      {isOpen && (
-        <div style={{
-          position: 'absolute', zIndex: 150, width: '100%', marginTop: 4,
-          background: 'white', border: `1px solid ${T.border}`,
-          boxShadow: '0 8px 32px rgba(0,0,0,0.10)',
-          maxHeight: 240, overflowY: 'auto',
-        }}>
-          <div style={{ padding: 8, borderBottom: `1px solid ${T.border}`, position: 'sticky', top: 0, background: 'white' }}>
-            <input
-              autoFocus
-              value={inputValue}
-              onChange={e => setInputValue(e.target.value)}
-              onKeyDown={e => { if (e.key === 'Enter') handleCreate(); }}
-              placeholder="Search or type new…"
-              style={{
-                width: '100%', padding: '7px 10px',
-                border: `1px solid ${T.border}`, borderRadius: 2,
-                fontFamily: jost, fontSize: 12, fontWeight: 300,
-                color: T.text, outline: 'none', boxSizing: 'border-box',
-              }}
-            />
-          </div>
-          {options
-            .filter(o => o.label.toLowerCase().includes(inputValue.toLowerCase()))
-            .map((opt, idx) => (
-              <div
-                key={idx}
-                onClick={() => handleSelect(opt.value)}
-                style={{ padding: '9px 12px', fontFamily: jost, fontSize: 12, fontWeight: 300, color: T.text, cursor: 'pointer' }}
-                onMouseEnter={e => { e.currentTarget.style.background = T.dimBg; }}
-                onMouseLeave={e => { e.currentTarget.style.background = 'transparent'; }}
-              >
-                {opt.label}
-              </div>
-            ))}
-          {inputValue && !options.some(o => o.label.toLowerCase() === inputValue.toLowerCase()) && (
-            <div
-              onClick={handleCreate}
-              style={{
-                padding: '9px 12px', borderTop: `1px solid ${T.border}`,
-                fontFamily: jost, fontSize: 12, fontWeight: 500, color: T.gold, cursor: 'pointer',
-              }}
-              onMouseEnter={e => { e.currentTarget.style.background = T.dimBg; }}
-              onMouseLeave={e => { e.currentTarget.style.background = 'transparent'; }}
-            >
-              Create "{inputValue}"
-            </div>
-          )}
-        </div>
-      )}
-    </div>
-  );
-};
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Prompt Selector (within Add Product modal)
-// ─────────────────────────────────────────────────────────────────────────────
-const PromptSelector = ({ prompts, category, selectedId, onSelect, customText, onCustom, onOpenManager }) => {
-  const filtered = prompts.filter(p => !category || p.category === category || p.category === 'All');
-
-  return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-      {filtered.length > 0 && (
-        <div>
-          <label style={{
-            display: 'block', fontFamily: jost, fontSize: 9, fontWeight: 400,
-            letterSpacing: '0.25em', textTransform: 'uppercase', color: T.purple, marginBottom: 6,
-          }}>
-            Studio Prompt
-          </label>
-          <select
-            value={selectedId}
-            onChange={e => { onSelect(e.target.value); onCustom(''); }}
-            style={{
-              width: '100%', padding: '8px 10px',
-              border: `1px solid ${T.borderG}`, borderRadius: 3,
-              fontFamily: jost, fontSize: 12, fontWeight: 300,
-              color: T.text, background: 'white', outline: 'none',
-            }}
-          >
-            <option value="">— use category default —</option>
-            {filtered.map(p => (
-              <option key={p._id} value={p._id}>{p.name}{p.isDefault ? ' ★' : ''}</option>
-            ))}
-          </select>
-        </div>
-      )}
-
-      <div>
-        <label style={{
-          display: 'block', fontFamily: jost, fontSize: 9, fontWeight: 400,
-          letterSpacing: '0.25em', textTransform: 'uppercase', color: T.purple, marginBottom: 6,
-        }}>
-          Custom Prompt Override
-        </label>
-        <textarea
-          rows={2}
-          value={customText}
-          onChange={e => { onCustom(e.target.value); onSelect(''); }}
-          placeholder="Optional — leave blank to use saved prompt above…"
-          style={{
-            width: '100%', padding: '8px 10px',
-            border: `1px solid ${T.borderG}`, borderRadius: 3,
-            fontFamily: jost, fontSize: 12, fontWeight: 300,
-            color: T.text, background: 'white',
-            resize: 'none', outline: 'none', boxSizing: 'border-box',
-          }}
-        />
-      </div>
-
-      {onOpenManager && (
-        <button
-          type="button"
-          onClick={onOpenManager}
-          style={{
-            background: 'none', border: 'none', cursor: 'pointer',
-            display: 'inline-flex', alignItems: 'center', gap: 5,
-            fontFamily: jost, fontSize: 9, fontWeight: 400,
-            letterSpacing: '0.25em', textTransform: 'uppercase',
-            color: T.purple, padding: 0,
-          }}
-        >
-          <Sparkles size={9} /> Manage Studio Prompts
-        </button>
-      )}
-    </div>
-  );
-};
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Shared field label
-// ─────────────────────────────────────────────────────────────────────────────
-const FieldLabel = ({ children }) => (
-  <label style={{
-    display: 'block', fontFamily: jost, fontSize: 9, fontWeight: 400,
-    letterSpacing: '0.25em', textTransform: 'uppercase', color: T.muted, marginBottom: 6,
-  }}>
-    {children}
-  </label>
-);
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Shared input style helper
-// ─────────────────────────────────────────────────────────────────────────────
-const inputStyle = (focused = false, extra = {}) => ({
-  width: '100%', padding: '9px 12px',
-  background: 'white',
-  border: `1px solid ${focused ? T.gold : T.border}`,
-  borderRadius: 3,
-  fontFamily: jost, fontSize: 13, fontWeight: 300,
-  color: T.text, outline: 'none',
-  boxSizing: 'border-box',
-  transition: 'border-color 0.2s',
-  ...extra,
-});
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Add to Existing Catalogue (selection bar → "Add to Existing")
@@ -930,16 +653,11 @@ const AddToCatalogueModal = ({ items, onClose, onAdded }) => {
 // ─────────────────────────────────────────────────────────────────────────────
 const ProductList = () => {
 
-  // ── Data ────────────────────────────────────────────────────────────────────
-  const [products, setProducts]       = useState([]);
-  const [isLoading, setIsLoading]     = useState(true);
-  const [meta, setMeta]               = useState({ brands: [], categories: [], subCategories: {} });
-  const [availableSubCats, setAvailableSubCats] = useState([]);
-  // All categories start collapsed on load
-  const [collapsedCategories, setCollapsedCategories] = useState(() => {
-    // Will be overwritten once groupedProducts is known; start as "all collapsed" sentinel
-    return { __allCollapsed: true };
-  });
+  // ── Data (loaded per category — see products/useCatalogue.js) ──────────────
+  // All categories start collapsed; a category's products are fetched the
+  // first time it is expanded.
+  const [collapsedCategories, setCollapsedCategories] = useState({});
+  const isCollapsed = (cat) => collapsedCategories[cat] !== false;
 
   // Per-category sort: { [cat]: 'asc' | 'desc' | 'price-asc' | 'price-desc' | '' }
   const [categorySort, setCategorySort] = useState({});
@@ -950,32 +668,19 @@ const ProductList = () => {
 
   // ── Filters ─────────────────────────────────────────────────────────────────
   const [filters, setFilters] = useState({
-    brand: '', category: '', subCategory: '', minPrice: '', maxPrice: '', searchTerm: '',
+    brand: '', category: '', subCategory: '', minPrice: '', maxPrice: '', searchTerm: '', source: '',
   });
 
-  // ── Add / Edit Product modal ─────────────────────────────────────────────────
-  const [showModal, setShowModal]           = useState(false);
-  const [isEditing, setIsEditing]           = useState(false);
-  const [currentId, setCurrentId]           = useState(null);
-  const [isSaving, setIsSaving]             = useState(false);
-  const [formData, setFormData] = useState({
-    brand: '', category: '', subCategory: '', name: '',
-    description: '', purchasePrice: '', sellingPrice: '', markupPercent: 30,
-  });
+  const {
+    summary, summaryLoading, summaryError, meta, buckets, loadCategory, filterMode,
+    search, loadMoreSearch, refresh, patchProduct, removeProduct, reloadSummary,
+  } = useCatalogue({ filters, categorySort, categoryPriceFilter });
+  const isLoading = summaryLoading;
 
-  // ── Image & AI processing ────────────────────────────────────────────────────
-  const [imageFile, setImageFile]               = useState(null);
-  const imageFileRef                            = useRef(null);   // module-level stable ref — survives all re-renders
-  const [imagePreviewUrl, setImagePreviewUrl]   = useState(null);
-  const [processImage, setProcessImage]         = useState(true);
-  const [selectedPromptId, setPromptId]         = useState('');
-  const [customPromptText, setCustomPrompt]     = useState('');
-  const [savedPrompts, setSavedPrompts]         = useState([]);
-  const [aiProcessing, setAiProcessing]         = useState(false);
-  const [aiError, setAiError]                   = useState(null);
-  const [generatedImageUrl, setGeneratedImageUrl] = useState(null);
-  const [useGeneratedImage, setUseGeneratedImage] = useState(false);
-  const [showCompareModal, setShowCompareModal] = useState(false);
+  // ── Add / Edit Product modal (images + video live inside it) ────────────────
+  // null = closed · { id: null } = add · { id } = edit
+  const [productModal, setProductModal] = useState(null);
+  const [savedPrompts, setSavedPrompts] = useState([]);
 
   // ── Studio Prompts Manager ───────────────────────────────────────────────────
   const [showPromptManager, setShowPromptManager] = useState(false);
@@ -1002,13 +707,10 @@ const ProductList = () => {
   const [extractFile, setExtractFile]           = useState(null);
   const [extractLoading, setExtractLoading]     = useState(false);
 
-  // ── Image Gallery & Video modal ──────────────────────────────────────────────
-  const [galleryProduct, setGalleryProduct] = useState(null);
-
   // ── Pending Supplier Approvals panel (NEW) ───────────────────────────────────
   const [showPendingApprovals, setShowPendingApprovals] = useState(false);
 
-  // ── Client visit mode (hides cost/markup from view) ──────────────────────────
+  // ── Client visit mode (hides cost, markup and partner names from view) ───────
   // Persisted in localStorage so the setting survives navigation away and back.
   const [clientMode, setClientMode] = useState(
     () => localStorage.getItem('productList_clientMode') === 'true'
@@ -1026,7 +728,6 @@ const ProductList = () => {
   // ── Portal ───────────────────────────────────────────────────────────────────
   const { addToPortal, PortalModal } = usePortalItems('product');
 
-  //const getAssetUrl = (p) => p;
   const getAssetUrl = (p) => {
     if (!p) return '';
     if (p.startsWith('http')) return p;   // R2 / OneDrive — already absolute
@@ -1034,38 +735,6 @@ const ProductList = () => {
   };
 
   // ─── Data fetching ──────────────────────────────────────────────────────────
-  const fetchData = useCallback(async () => {
-    log.debug('Fetching products and meta…');
-    setIsLoading(true);
-    try {
-      const [pRes, mRes] = await Promise.all([
-        api.get('/products'),
-        api.get('/products/meta'),
-      ]);
-      const metaData = mRes.data || { brands: [], categories: [], subCategories: {} };
-      // Normalise legacy subCategoryMap field
-      if (metaData.subCategoryMap && !metaData.subCategories) {
-        metaData.subCategories = metaData.subCategoryMap;
-      }
-      const fetchedProducts = pRes.data || [];
-      setProducts(fetchedProducts);
-      setMeta(metaData);
-      // Collapse all categories by default on initial load
-      const cats = [...new Set(fetchedProducts.map(p => p.category || 'Uncategorized'))];
-      setCollapsedCategories(prev => {
-        if (prev.__allCollapsed) {
-          return cats.reduce((acc, c) => ({ ...acc, [c]: true }), {});
-        }
-        return prev;
-      });
-      log.info('Products loaded', { count: fetchedProducts.length });
-    } catch (err) {
-      log.error('Failed to fetch products', err.message);
-    } finally {
-      setIsLoading(false);
-    }
-  }, []);
-
   const fetchPrompts = useCallback(async () => {
     log.debug('Fetching studio prompts…');
     try {
@@ -1077,136 +746,37 @@ const ProductList = () => {
     }
   }, []);
 
+  useEffect(() => { fetchPrompts(); }, [fetchPrompts]);
+
+  // Selecting a category in the filter bar opens it straight away.
   useEffect(() => {
-    fetchData();
-    fetchPrompts();
-  }, [fetchData, fetchPrompts]);
+    if (!filters.category) return;
+    setCollapsedCategories(prev => ({ ...prev, [filters.category]: false }));
+    if (!buckets[filters.category]?.page) loadCategory(filters.category);
+  }, [filters.category]);
 
   // ─── Reset helpers ──────────────────────────────────────────────────────────
   const resetFilters = () =>
-    setFilters({ brand: '', category: '', subCategory: '', minPrice: '', maxPrice: '', searchTerm: '' });
-
-  const resetForm = () => {
-    imageFileRef.current = null;          // clear ref in sync with state
-    setFormData({ brand: '', category: '', subCategory: '', name: '', description: '', purchasePrice: '', sellingPrice: '', markupPercent: 30 });
-    setImageFile(null);
-    setImagePreviewUrl(null);
-    setIsEditing(false);
-    setCurrentId(null);
-    setAvailableSubCats([]);
-    setProcessImage(true);
-    setPromptId('');
-    setCustomPrompt('');
-    setGeneratedImageUrl(null);
-    setUseGeneratedImage(false);
-    setAiProcessing(false);
-    setAiError(null);
-  };
+    setFilters({ brand: '', category: '', subCategory: '', minPrice: '', maxPrice: '', searchTerm: '', source: '' });
 
   const resetPromptManager = () => {
     setEditingPromptId(null);
     setPromptForm({ name: '', category: '', prompt: '', isDefault: false });
   };
 
-  // ─── Image file selection ────────────────────────────────────────────────────
-  const handleImageFileChange = (file) => {
-    // Store in ref immediately — survives re-renders caused by other formData changes
-    imageFileRef.current = file instanceof File ? file : null;
-    setImageFile(file instanceof File ? file : null);
-    setGeneratedImageUrl(null);
-    setUseGeneratedImage(false);
-    setAiError(null);
-    setImagePreviewUrl(file && file instanceof File ? URL.createObjectURL(file) : null);
-    log.debug('handleImageFileChange', { name: file?.name ?? 'none', isFile: file instanceof File });
+  // ─── Product modal callbacks ──────────────────────────────────────────────────
+  const handleProductSaved = (saved, { previous } = {}) => {
+    refresh([saved.category, previous?.category]);
+    setSelectedProducts(prev => prev.map(sp => (sp._id === saved._id ? productToSelection(saved) : sp)));
   };
 
-  // ─── AI: generate studio image ───────────────────────────────────────────────
-  const handleGenerateStudio = async () => {
-    if (!imageFile) return;
-    log.info('Generating studio image…', { category: formData.category });
-    setAiProcessing(true);
-    setAiError(null);
-    setGeneratedImageUrl(null);
-    setUseGeneratedImage(false);
+  // A background job (video → OneDrive, Studio AI) finished — refresh that card.
+  const handleMediaProcessed = async (id) => {
     try {
-      const fd = new FormData();
-      fd.append('image', imageFile);
-      if (selectedPromptId)  fd.append('promptId',   selectedPromptId);
-      if (customPromptText)  fd.append('promptText',  customPromptText);
-      if (formData.category) fd.append('category',    formData.category);
-      const res = await api.post('/image-processing/preview', fd);
-      setGeneratedImageUrl(res.data.imageDataUrl);
-      setUseGeneratedImage(true);
-      log.info('Studio image generated successfully');
+      const { data } = await v2.get(`/v2/products/${id}`);
+      patchProduct(data);
     } catch (err) {
-      const msg = err.response?.data?.message || err.message || 'AI processing failed';
-      log.error('Studio generation failed', msg);
-      setAiError(msg);
-    } finally {
-      setAiProcessing(false);
-    }
-  };
-
-  // ─── Save product ────────────────────────────────────────────────────────────
-  const handleSave = async () => {
-    log.info(isEditing ? 'Updating product' : 'Creating product', { name: formData.name });
-    setIsSaving(true);
-    try {
-      const data = new FormData();
-      data.append('brand',         formData.brand);
-      data.append('category',      formData.category);
-      data.append('subCategory',   formData.subCategory || '');
-      data.append('name',          formData.name);
-      data.append('description',   formData.description);
-      data.append('purchasePrice', formData.purchasePrice);
-      data.append('sellingPrice',  calculateSellingPrice(formData.purchasePrice, formData.markupPercent));
-      data.append('markupPercent', formData.markupPercent);
-
-      // Read from ref — written synchronously in handleImageFileChange, survives re-renders
-      const currentFile = imageFileRef.current;
-      log.debug('handleSave — file check', {
-        file: currentFile ? `${currentFile.name} (${currentFile.size}b)` : 'none',
-        isFile: currentFile instanceof File,
-      });
-
-      if (currentFile instanceof File) {
-        if (useGeneratedImage && generatedImageUrl) {
-          // Convert base64 data URL → Blob → File; skip back-end re-processing
-          const res     = await fetch(generatedImageUrl);
-          const blob    = await res.blob();
-          const genFile = new File([blob], 'studio-processed.webp', { type: 'image/webp' });
-          data.append('image', genFile);
-          data.append('processImage', 'false');
-        } else {
-          data.append('image', currentFile);
-          data.append('processImage', (processImage && !generatedImageUrl) ? 'true' : 'false');
-          if (selectedPromptId) data.append('promptId',   selectedPromptId);
-          if (customPromptText) data.append('promptText', customPromptText);
-        }
-      } else if (currentFile !== null) {
-        // Warn if something other than null ended up in the ref (e.g. stale object)
-        log.warn('handleSave — imageFileRef is not a File, skipping image append', { type: typeof currentFile });
-      }
-
-      if (isEditing) {
-        await api.put(`/products/${currentId}`, data);
-        showToast('success', `"${formData.name}" updated successfully`);
-        log.info('Product updated', { id: currentId });
-      } else {
-        await api.post('/products', data);
-        showToast('success', `"${formData.name}" added to catalogue`);
-        log.info('Product created', { name: formData.name });
-      }
-
-      setShowModal(false);
-      resetForm();
-      fetchData();
-    } catch (err) {
-      const msg = err.response?.data?.message || 'Failed to save product';
-      log.error('Save product failed', msg);
-      showToast('error', msg);
-    } finally {
-      setIsSaving(false);
+      log.warn('Could not refresh product after background job', err.message);
     }
   };
 
@@ -1217,9 +787,38 @@ const ProductList = () => {
   const [deleteReason, setDeleteReason] = useState('');
   const [deletingInProgress, setDeletingInProgress] = useState(false);
 
-  const handleDelete = (id, productName) => {
-    setDeletingProduct({ id, name: productName });
-    setDeleteReason('');
+  // Partner products need a reason (it's shown to the partner in their
+  // portal). Marqland's own products just get a simple confirmation.
+  const handleDelete = async (p) => {
+    if (p.fromPartner) {
+      setDeletingProduct({ id: p._id, name: p.name });
+      setDeleteReason('');
+      return;
+    }
+    const ok = await confirm({
+      title: `Delete "${p.name}"?`,
+      message: 'This permanently removes the product from the catalogue.',
+      confirmLabel: 'Delete',
+      variant: 'danger',
+    });
+    if (ok) deleteProductById(p._id, p.name);
+  };
+
+  const deleteProductById = async (id, productName, reason = '') => {
+    setDeletingInProgress(true);
+    log.info('Deleting product', { id, name: productName, reason });
+    try {
+      await v2.delete(`/v2/products/${id}`, { data: reason ? { reason } : {} });
+      setSelectedProducts(prev => prev.filter(p => p._id !== id));
+      removeProduct(id);
+      showToast('success', `"${productName}" deleted`);
+      setDeletingProduct(null);
+    } catch (err) {
+      log.error('Delete product failed', err.message);
+      showToast('error', err.message || 'Failed to delete product');
+    } finally {
+      setDeletingInProgress(false);
+    }
   };
 
   const confirmDeleteWithReason = async () => {
@@ -1227,50 +826,7 @@ const ProductList = () => {
       showToast('warning', 'Please enter a reason for deleting this product.');
       return;
     }
-    const { id, name: productName } = deletingProduct;
-    setDeletingInProgress(true);
-    log.info('Deleting product', { id, name: productName, reason: deleteReason });
-    try {
-      await api.delete(`/products/${id}`, { data: { reason: deleteReason.trim() } });
-      setSelectedProducts(prev => prev.filter(p => p._id !== id));
-      showToast('success', `"${productName}" deleted`);
-      setDeletingProduct(null);
-      fetchData();
-    } catch (err) {
-      const msg = err.response?.data?.message || 'Failed to delete product';
-      log.error('Delete product failed', msg);
-      showToast('error', msg);
-    } finally {
-      setDeletingInProgress(false);
-    }
-  };
-
-  // ─── Edit product ────────────────────────────────────────────────────────────
-  const handleEditClick = (p) => {
-    log.debug('Opening edit modal', { id: p._id, name: p.name });
-    setIsEditing(true);
-    setCurrentId(p._id);
-    setFormData({
-      brand:         p.brand         || '',
-      category:      p.category      || '',
-      subCategory:   p.subCategory   || '',
-      name:          p.name          || '',
-      description:   p.description   || '',
-      purchasePrice: p.purchasePrice || '',
-      sellingPrice:  p.sellingPrice  || '',
-      markupPercent: p.markupPercent || 30,
-    });
-    const subCats = (meta.subCategories && p.category && meta.subCategories[p.category]) || [];
-    setAvailableSubCats(subCats.map(s => ({ label: s, value: s })));
-    setShowModal(true);
-  };
-
-  // ─── Category change ─────────────────────────────────────────────────────────
-  const handleCategoryChange = (v) => {
-    const selectedCat = v?.value || '';
-    setFormData(prev => ({ ...prev, category: selectedCat, subCategory: '' }));
-    const subCats = (meta.subCategories && meta.subCategories[selectedCat]) || [];
-    setAvailableSubCats(subCats.map(s => ({ label: s, value: s })));
+    await deleteProductById(deletingProduct.id, deletingProduct.name, deleteReason.trim());
   };
 
   // ─── Pricing helper ──────────────────────────────────────────────────────────
@@ -1405,7 +961,7 @@ const ProductList = () => {
       const count = res.data.productIds?.length || 0;
       setPdfResult({ count });
       log.info('PDF import complete', { count });
-      fetchData();
+      refresh([pdfCategory]);
     } catch (err) {
       const msg = err.response?.data?.message || err.message;
       log.error('PDF import failed', msg);
@@ -1458,52 +1014,27 @@ const ProductList = () => {
     }
   };
 
-  // ─── Duplicate product detection ────────────────────────────────────────────
-  // Checks name similarity against products with the same brand+category+subCategory.
-  // Runs purely against the already-fetched `products` array — no extra API call.
-  const duplicateMatches = React.useMemo(() => {
-    if (isEditing) return [];                         // skip check when editing
-    const name = formData.name.trim().toLowerCase();
-    if (name.length < 2) return [];                   // don\'t fire on 1 char
+  // ─── Grouping ────────────────────────────────────────────────────────────────
+  // Filter mode: one server-side search, grouped by category for display.
+  // Browse mode: categories come from the summary; each one's products are
+  // fetched (and sorted/price-filtered by the server) when it's expanded.
+  const searchGroups = React.useMemo(() => {
+    if (!filterMode) return {};
+    return search.items.reduce((acc, p) => {
+      const cat = p.category || 'Uncategorized';
+      (acc[cat] = acc[cat] || []).push(p);
+      return acc;
+    }, {});
+  }, [filterMode, search.items]);
 
-    const brand    = formData.brand.trim().toLowerCase();
-    const category = formData.category.trim().toLowerCase();
-    const subCat   = formData.subCategory.trim().toLowerCase();
+  const categoryRows = filterMode
+    ? Object.keys(searchGroups).sort().map(category => ({ category, count: searchGroups[category].length }))
+    : summary.categories
+        .filter(c => !filters.category || c.category === filters.category)
+        .map(c => ({ category: c.category, count: c.count }));
 
-    return products.filter(p => {
-      // Must share brand + category (subCategory optional — match if either is blank)
-      const sameBrand  = !brand    || (p.brand    || '').toLowerCase() === brand;
-      const sameCat    = !category || (p.category || '').toLowerCase() === category;
-      const sameSubCat = !subCat   || !(p.subCategory) || (p.subCategory || '').toLowerCase() === subCat;
-      if (!sameBrand || !sameCat || !sameSubCat) return false;
-
-      const existing = (p.name || '').toLowerCase();
-      // Flag if the existing name contains the typed name or vice-versa
-      return existing.includes(name) || name.includes(existing);
-    });
-  }, [formData.name, formData.brand, formData.category, formData.subCategory, products, isEditing]);
-
-    // ─── Filtering & grouping ────────────────────────────────────────────────────
-  const filteredProducts = products.filter(p => {
-    const sPrice = parseFloat(calculateSellingPrice(p.purchasePrice, p.markupPercent));
-    const min    = filters.minPrice === '' ? 0        : parseFloat(filters.minPrice);
-    const max    = filters.maxPrice === '' ? Infinity : parseFloat(filters.maxPrice);
-    const s      = filters.searchTerm.toLowerCase();
-    return (
-      (p.name?.toLowerCase().includes(s) || p.brand?.toLowerCase().includes(s) || p.category?.toLowerCase().includes(s)) &&
-      (filters.brand       === '' || p.brand       === filters.brand) &&
-      (filters.category    === '' || p.category    === filters.category) &&
-      (filters.subCategory === '' || p.subCategory === filters.subCategory) &&
-      sPrice >= min && sPrice <= max
-    );
-  });
-
-  const groupedProducts = filteredProducts.reduce((acc, p) => {
-    const cat = p.category || 'Uncategorized';
-    if (!acc[cat]) acc[cat] = [];
-    acc[cat].push(p);
-    return acc;
-  }, {});
+  const productsFor = (category) => (filterMode ? searchGroups[category] || [] : buckets[category]?.items || []);
+  const loadedCount = filterMode ? search.items.length : Object.values(buckets).reduce((n, b) => n + b.items.length, 0);
 
   const setCatSort = (cat, val) => setCategorySort(prev => ({ ...prev, [cat]: val }));
   const setCatPrice = (cat, key, val) =>
@@ -1513,24 +1044,15 @@ const ProductList = () => {
     setCategoryPriceFilter(prev => ({ ...prev, [cat]: { min: '', max: '' } }));
   };
 
-  const applyCatFiltersAndSort = (cat, prods) => {
-    const priceF = categoryPriceFilter[cat] || {};
-    const min = priceF.min === '' || priceF.min === undefined ? 0 : parseFloat(priceF.min);
-    const max = priceF.max === '' || priceF.max === undefined ? Infinity : parseFloat(priceF.max);
-    let result = prods.filter(p => {
-      const sp = parseFloat(calculateSellingPrice(p.purchasePrice, p.markupPercent));
-      return sp >= min && sp <= max;
-    });
-    const sort = categorySort[cat] || '';
-    if (sort === 'asc')        result = [...result].sort((a, b) => (a.name || '').localeCompare(b.name || ''));
-    if (sort === 'desc')       result = [...result].sort((a, b) => (b.name || '').localeCompare(a.name || ''));
-    if (sort === 'price-asc')  result = [...result].sort((a, b) => parseFloat(calculateSellingPrice(a.purchasePrice, a.markupPercent)) - parseFloat(calculateSellingPrice(b.purchasePrice, b.markupPercent)));
-    if (sort === 'price-desc') result = [...result].sort((a, b) => parseFloat(calculateSellingPrice(b.purchasePrice, b.markupPercent)) - parseFloat(calculateSellingPrice(a.purchasePrice, a.markupPercent)));
-    return result;
+  const toggleCategory = (cat) => {
+    if (filterMode) {
+      setCollapsedCategories(prev => ({ ...prev, [cat]: prev[cat] !== true }));
+      return;
+    }
+    const opening = isCollapsed(cat);
+    setCollapsedCategories(prev => ({ ...prev, [cat]: !opening }));
+    if (opening && !filterMode && !buckets[cat]?.page) loadCategory(cat);
   };
-
-  const toggleCategory = (cat) =>
-    setCollapsedCategories(prev => ({ ...prev, [cat]: !prev[cat] }));
 
   // ─────────────────────────────────────────────────────────────────────────────
   // RENDER
@@ -1547,6 +1069,7 @@ const ProductList = () => {
           0%   { background-position: -200% 0; }
           100% { background-position:  200% 0; }
         }
+        @keyframes spin { to { transform: rotate(360deg); } }
         @keyframes modal-up {
           0%   { transform: translateY(16px); opacity: 0; }
           100% { transform: translateY(0);    opacity: 1; }
@@ -1604,49 +1127,43 @@ const ProductList = () => {
             )}
           </div>
 
-          {/* Filter selects */}
-          {[
-            { key: 'brand',       opts: meta.brands,              placeholder: 'All Brands' },
-            { key: 'category',    opts: meta.categories,          placeholder: 'All Categories' },
-          ].map(({ key, opts, placeholder }) => (
-            <select
-              key={key}
-              value={filters[key]}
-              onChange={e => {
-                const val = e.target.value;
-                setFilters(f => key === 'category'
-                  ? { ...f, category: val, subCategory: '' }
-                  : { ...f, [key]: val }
-                );
-              }}
-              style={{
-                padding: '9px 12px', border: `1px solid ${T.border}`, borderRadius: 3,
-                fontFamily: jost, fontSize: 11, fontWeight: 300, color: T.text,
-                background: 'white', outline: 'none', cursor: 'pointer', minWidth: 120,
-              }}
-            >
-              <option value="">{placeholder}</option>
-              {opts.map(o => <option key={o} value={o}>{o}</option>)}
-            </select>
-          ))}
-
-          {/* Sub-category */}
-          <select
-            disabled={!filters.category}
+          {/* Filter dropdowns — each one has its own search box */}
+          <SearchableSelect
+            value={filters.brand}
+            onChange={val => setFilters(f => ({ ...f, brand: val }))}
+            options={meta.brands.map(b => ({ value: b, label: b }))}
+            emptyLabel="All Brands"
+            searchPlaceholder="Search brands…"
+          />
+          <SearchableSelect
+            value={filters.category}
+            onChange={val => setFilters(f => ({ ...f, category: val, subCategory: '' }))}
+            options={summary.categories.map(c => ({ value: c.category, label: c.category, count: c.count }))}
+            emptyLabel="All Categories"
+            searchPlaceholder="Search categories…"
+          />
+          <SearchableSelect
             value={filters.subCategory}
-            onChange={e => setFilters(f => ({ ...f, subCategory: e.target.value }))}
-            style={{
-              padding: '9px 12px', border: `1px solid ${T.border}`, borderRadius: 3,
-              fontFamily: jost, fontSize: 11, fontWeight: 300, color: T.text,
-              background: 'white', outline: 'none', cursor: filters.category ? 'pointer' : 'not-allowed',
-              opacity: filters.category ? 1 : 0.45, minWidth: 120,
-            }}
-          >
-            <option value="">All Sub Cats</option>
-            {filters.category && (meta.subCategories?.[filters.category] || []).map(s => (
-              <option key={s} value={s}>{s}</option>
-            ))}
-          </select>
+            disabled={!filters.category}
+            onChange={val => setFilters(f => ({ ...f, subCategory: val }))}
+            options={(summary.categories.find(c => c.category === filters.category)?.subCategories || [])
+              .map(sc => ({ value: sc.name, label: sc.name, count: sc.count }))}
+            emptyLabel="All Sub Cats"
+            searchPlaceholder="Search sub-categories…"
+            title={filters.category ? undefined : 'Pick a category first'}
+          />
+          {/* NEW — who added the product */}
+          <SearchableSelect
+            value={filters.source}
+            onChange={val => setFilters(f => ({ ...f, source: val }))}
+            options={[
+              { value: 'partner', label: 'Added by Partners' },
+              { value: 'marqland', label: 'Added by Marqland' },
+            ]}
+            emptyLabel="All Sources"
+            searchPlaceholder="Search…"
+            minWidth={150}
+          />
 
           {/* Price range */}
           <div style={{
@@ -1692,7 +1209,7 @@ const ProductList = () => {
           <div style={{ marginLeft: 'auto', display: 'flex', gap: 8, alignItems: 'center' }}>
             {/* Add Product */}
             <button
-              onClick={() => { resetForm(); setShowModal(true); }}
+              onClick={() => setProductModal({ id: null })}
               style={{
                 display: 'inline-flex', alignItems: 'center', gap: 7,
                 background: T.gold, color: T.navy,
@@ -1780,10 +1297,10 @@ const ProductList = () => {
               <Sparkles size={14} />
             </button>
 
-            {/* Client Mode toggle — hides cost/markup during client visits */}
+            {/* Client Mode toggle — hides cost, markup and partner names during client visits */}
             <button
               onClick={toggleClientMode}
-              title={clientMode ? 'Client Mode ON — click to show cost & markup' : 'Client Mode OFF — click to hide cost & markup'}
+              title={clientMode ? 'Client Mode ON — click to show cost, markup & partner names' : 'Client Mode OFF — click to hide cost, markup & partner names'}
               style={{
                 display: 'inline-flex', alignItems: 'center', gap: 6,
                 background: clientMode ? T.navy : 'transparent',
@@ -1816,7 +1333,16 @@ const ProductList = () => {
 
       {/* ── Product grid ─────────────────────────────────────────────────────── */}
       <div>
-        {isLoading ? (
+        {summaryError && !isLoading && (
+          <div style={{ padding: '14px 18px', marginBottom: 24, border: '1px solid #fecaca', background: '#fef2f2', display: 'flex', alignItems: 'center', gap: 10, fontFamily: jost, fontSize: 12, color: T.red }}>
+            <AlertCircle size={14} /> {summaryError}
+            <button onClick={reloadSummary} style={{ marginLeft: 'auto', background: 'none', border: `1px solid ${T.red}`, color: T.red, padding: '4px 12px', cursor: 'pointer', fontFamily: jost, fontSize: 10 }}>Retry</button>
+          </div>
+        )}
+        {filterMode && search.error && (
+          <div style={{ padding: '14px 18px', marginBottom: 24, border: '1px solid #fecaca', background: '#fef2f2', fontFamily: jost, fontSize: 12, color: T.red }}>{search.error}</div>
+        )}
+        {(isLoading || (filterMode && search.loading && search.page === 0)) ? (
           // ── Loading skeleton buffer ────────────────────────────────────────
           <div>
             {[1, 2].map(groupIdx => (
@@ -1839,7 +1365,7 @@ const ProductList = () => {
               </div>
             ))}
           </div>
-        ) : Object.keys(groupedProducts).length === 0 ? (
+        ) : categoryRows.length === 0 ? (
           <div style={{ padding: '80px 0', textAlign: 'center' }}>
             <ImageIcon size={32} style={{ color: 'rgba(0,0,0,0.10)', margin: '0 auto 12px', display: 'block' }} />
             <p style={{
@@ -1850,10 +1376,10 @@ const ProductList = () => {
             </p>
           </div>
         ) : (
-          Object.keys(groupedProducts).sort().map(category => {
-            const isCollapsed = collapsedCategories[category];
-            const catProducts = applyCatFiltersAndSort(category, groupedProducts[category]);
-            const allCatProducts = groupedProducts[category];
+          categoryRows.map(({ category, count }) => {
+            const collapsed = filterMode ? collapsedCategories[category] === true : isCollapsed(category);
+            const catProducts = productsFor(category);
+            const bucket = filterMode ? null : (buckets[category] || { items: [], page: 0, hasMore: false, loading: false, error: '' });
             const allSelected = catProducts.length > 0 && catProducts.every(p => selectedProducts.some(sp => sp._id === p._id));
             const catPriceF = categoryPriceFilter[category] || {};
             const catSortVal = categorySort[category] || '';
@@ -1872,7 +1398,7 @@ const ProductList = () => {
                     >
                       <span style={{
                         color: T.muted, fontSize: 10,
-                        transform: isCollapsed ? 'rotate(-90deg)' : 'rotate(0deg)',
+                        transform: collapsed ? 'rotate(-90deg)' : 'rotate(0deg)',
                         transition: 'transform 0.2s', display: 'inline-block',
                       }}>▼</span>
                       <h2 style={{
@@ -1880,7 +1406,7 @@ const ProductList = () => {
                         letterSpacing: '0.28em', textTransform: 'uppercase',
                         color: T.muted, margin: 0,
                       }}>
-                        {category} <span style={{ color: T.gold }}>({allCatProducts.length})</span>
+                        {category} <span style={{ color: T.gold }}>({count})</span>
                       </h2>
                     </div>
 
@@ -1902,26 +1428,21 @@ const ProductList = () => {
                     </button>
 
                     {/* ── Per-category sort ── */}
-                    <select
+                    <SearchableSelect
+                      size="sm"
+                      minWidth={96}
                       value={catSortVal}
-                      onChange={e => setCatSort(category, e.target.value)}
+                      onChange={val => setCatSort(category, val)}
                       title="Sort products in this category"
-                      style={{
-                        padding: '4px 8px',
-                        border: `1px solid ${catSortVal ? T.gold : T.border}`,
-                        borderRadius: 2,
-                        fontFamily: jost, fontSize: 9, fontWeight: 400,
-                        color: catSortVal ? T.gold : T.muted,
-                        background: 'white', outline: 'none', cursor: 'pointer',
-                        letterSpacing: '0.12em',
-                      }}
-                    >
-                      <option value="">Sort</option>
-                      <option value="asc">Name A → Z</option>
-                      <option value="desc">Name Z → A</option>
-                      <option value="price-asc">Price ↑</option>
-                      <option value="price-desc">Price ↓</option>
-                    </select>
+                      emptyLabel="Sort"
+                      searchPlaceholder="Search sort options…"
+                      options={[
+                        { value: 'asc', label: 'Name A → Z' },
+                        { value: 'desc', label: 'Name Z → A' },
+                        { value: 'price-asc', label: 'Price ↑' },
+                        { value: 'price-desc', label: 'Price ↓' },
+                      ]}
+                    />
 
                     {/* ── Per-category price range ── */}
                     <div style={{
@@ -1977,7 +1498,7 @@ const ProductList = () => {
                   </div>
                 </div>
 
-                {!isCollapsed && (
+                {!collapsed && (
                   <div style={{
                     display: 'grid',
                     gridTemplateColumns: 'repeat(auto-fill, minmax(180px, 1fr))',
@@ -2016,8 +1537,42 @@ const ProductList = () => {
 
                           <ProductImage p={p} getAssetUrl={getAssetUrl} onPreview={() => setPreviewProduct(p)} />
 
+                          {/* Background video upload state (OneDrive job) */}
+                          {['processing', 'failed'].includes(p.video?.upload?.status) && (
+                            <span
+                              title={p.video.upload.status === 'failed' ? p.video.upload.error : `Uploading ${p.video.upload.fileName}`}
+                              style={{
+                                position: 'absolute', top: 8, left: 8, zIndex: 20,
+                                display: 'inline-flex', alignItems: 'center', gap: 4,
+                                background: p.video.upload.status === 'failed' ? T.red : 'rgba(14,21,32,0.75)',
+                                color: 'white', fontFamily: jost, fontSize: 7.5, letterSpacing: '0.14em',
+                                textTransform: 'uppercase', padding: '3px 7px', borderRadius: 2,
+                              }}
+                            >
+                              {p.video.upload.status === 'failed'
+                                ? <><AlertCircle size={9} /> Video failed</>
+                                : <><Loader2 size={9} style={{ animation: 'spin 1s linear infinite' }} /> Video processing</>}
+                            </span>
+                          )}
+
                           <div style={{ padding: '12px 14px', flex: 1, display: 'flex', flexDirection: 'column', justifyContent: 'space-between' }}>
                             <div>
+                              {/* Partner + partner name — internal info, hidden in Client Mode */}
+                              {p.fromPartner && !clientMode && (
+                                <span title={p.partnerName ? `Added by ${p.partnerName}` : 'Added by a Partner'} style={{
+                                  display: 'inline-flex', alignItems: 'center', gap: 5, maxWidth: '100%', marginBottom: 6, padding: '2px 7px',
+                                  border: `1px solid ${T.borderG}`, background: T.dimBg, color: T.gold,
+                                  fontFamily: jost, fontSize: 7.5, fontWeight: 500, letterSpacing: '0.18em', textTransform: 'uppercase',
+                                  overflow: 'hidden', whiteSpace: 'nowrap',
+                                }}>
+                                  Partner
+                                  {p.partnerName && (
+                                    <span style={{ color: T.text, fontWeight: 400, letterSpacing: '0.06em', textTransform: 'none', fontSize: 9, overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                                      · {p.partnerName}
+                                    </span>
+                                  )}
+                                </span>
+                              )}
                               <h3 style={{
                                 fontFamily: jost, fontSize: 11, fontWeight: 500,
                                 color: T.text, lineHeight: 1.4, marginBottom: 8,
@@ -2058,9 +1613,8 @@ const ProductList = () => {
 
                               <div style={{ display: 'flex', gap: 2 }}>
                                 {[
-                                  { icon: <Images size={12} />, color: T.purple, action: () => setGalleryProduct(p), title: 'Image Gallery' },
-                                  { icon: <Pencil size={12} />, color: T.indigo, action: () => handleEditClick(p),   title: 'Edit' },
-                                  { icon: <Trash2 size={12} />, color: T.red,    action: () => handleDelete(p._id, p.name), title: 'Delete' },
+                                  { icon: <Pencil size={12} />, color: T.indigo, action: () => setProductModal({ id: p._id }), title: 'Edit (details, images & video)' },
+                                  { icon: <Trash2 size={12} />, color: T.red,    action: () => handleDelete(p), title: 'Delete' },
                                 ].map(({ icon, color, action, title }) => (
                                   <button
                                     key={title}
@@ -2085,9 +1639,45 @@ const ProductList = () => {
                     })}
                   </div>
                 )}
+
+                {/* Per-category paging state (browse mode) */}
+                {!collapsed && bucket && (
+                  <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', gap: 12, marginTop: catProducts.length ? 16 : 0 }}>
+                    {bucket.loading && (
+                      catProducts.length
+                        ? <span style={{ fontFamily: jost, fontSize: 10, color: T.muted, display: 'flex', alignItems: 'center', gap: 6 }}><Loader2 size={12} style={{ animation: 'spin 1s linear infinite' }} /> Loading…</span>
+                        : <div style={{ width: '100%', display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(180px, 1fr))', gap: 16 }}>
+                            {Array.from({ length: Math.min(5, count || 5) }).map((_, i) => <SkeletonCard key={i} />)}
+                          </div>
+                    )}
+                    {bucket.error && (
+                      <span style={{ fontFamily: jost, fontSize: 11, color: T.red, display: 'flex', alignItems: 'center', gap: 8 }}>
+                        <AlertCircle size={12} /> {bucket.error}
+                        <button onClick={() => loadCategory(category, { reset: !bucket.page })} style={loadMoreBtn}>Retry</button>
+                      </span>
+                    )}
+                    {!bucket.loading && !bucket.error && bucket.hasMore && (
+                      <button onClick={() => loadCategory(category)} style={loadMoreBtn}>
+                        Load more · {catProducts.length} of {bucket.total}
+                      </button>
+                    )}
+                    {!bucket.loading && !bucket.error && bucket.page > 0 && catProducts.length === 0 && (
+                      <span style={{ fontFamily: jost, fontSize: 11, color: T.muted }}>No products match this category's price range.</span>
+                    )}
+                  </div>
+                )}
               </div>
             );
           })
+        )}
+
+        {/* Search mode paging */}
+        {filterMode && !isLoading && search.hasMore && (
+          <div style={{ textAlign: 'center', marginTop: 8 }}>
+            <button onClick={loadMoreSearch} disabled={search.loading} style={loadMoreBtn}>
+              {search.loading ? 'Loading…' : `Load more results · ${search.items.length} of ${search.total}`}
+            </button>
+          </div>
         )}
       </div>
 
@@ -2099,7 +1689,9 @@ const ProductList = () => {
           fontFamily: jost, fontSize: 10, fontWeight: 300,
           letterSpacing: '0.12em', color: T.muted, textAlign: 'right',
         }}>
-          {filteredProducts.length} of {products.length} product{products.length !== 1 ? 's' : ''}
+          {filterMode
+            ? `${search.total} matching product${search.total !== 1 ? 's' : ''}`
+            : `${summary.total} product${summary.total !== 1 ? 's' : ''} in ${summary.categories.length} categories · ${loadedCount} loaded`}
         </div>
       )}
 
@@ -2285,332 +1877,20 @@ const ProductList = () => {
       )}
 
       {/* ════════════════════════════════════════════════════════════════════════
-          ADD / EDIT PRODUCT MODAL
+          ADD / EDIT PRODUCT MODAL — details, images and video in one place
       ════════════════════════════════════════════════════════════════════════ */}
-      {showModal && (
-        <div style={{
-          position: 'fixed', inset: 0,
-          background: 'rgba(14,21,32,0.75)', backdropFilter: 'blur(4px)',
-          display: 'flex', alignItems: 'center', justifyContent: 'center',
-          padding: 24, zIndex: 110,
-        }}>
-          <div className="animate-modal-up" style={{
-            background: 'white', border: `1px solid ${T.border}`,
-            padding: '36px 36px 28px',
-            width: '100%', maxWidth: 600,
-            maxHeight: '92vh', overflowY: 'auto',
-          }}>
-
-            {/* Modal header */}
-            <div style={{
-              display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start',
-              marginBottom: 32, paddingBottom: 20, borderBottom: `1px solid ${T.border}`,
-            }}>
-              <div>
-                <p style={{ fontFamily: jost, fontSize: 9, fontWeight: 400, letterSpacing: '0.28em', textTransform: 'uppercase', color: T.muted, marginBottom: 6 }}>
-                  {isEditing ? 'Update Record' : 'New Entry'}
-                </p>
-                <h2 style={{ fontFamily: serif, fontSize: 28, fontWeight: 300, color: T.navy, margin: 0 }}>
-                  {isEditing ? 'Edit Product' : 'Add Product'}
-                </h2>
-              </div>
-              <button
-                onClick={() => { setShowModal(false); resetForm(); }}
-                style={{ background: 'none', border: 'none', cursor: 'pointer', color: T.muted, fontSize: 20, lineHeight: 1, padding: 4, transition: 'color 0.2s' }}
-                onMouseEnter={e => { e.currentTarget.style.color = T.text; }}
-                onMouseLeave={e => { e.currentTarget.style.color = T.muted; }}
-              >
-                ✕
-              </button>
-            </div>
-
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
-
-              {/* Brand / Category */}
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
-                <CustomCreatableSelect label="Brand" isDisabled={isEditing}
-                  options={meta.brands.map(b => ({ label: b, value: b }))}
-                  value={formData.brand ? { label: formData.brand, value: formData.brand } : null}
-                  onChange={v => setFormData(f => ({ ...f, brand: v?.value || '' }))} />
-                <CustomCreatableSelect label="Category" isDisabled={isEditing}
-                  options={meta.categories.map(c => ({ label: c, value: c }))}
-                  value={formData.category ? { label: formData.category, value: formData.category } : null}
-                  onChange={handleCategoryChange} />
-              </div>
-
-              {/* Sub Category / Name */}
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
-                <CustomCreatableSelect label="Sub Category"
-                  isDisabled={isEditing || !formData.category}
-                  options={availableSubCats}
-                  value={formData.subCategory ? { label: formData.subCategory, value: formData.subCategory } : null}
-                  onChange={v => setFormData(f => ({ ...f, subCategory: v?.value || '' }))} />
-                <div>
-                  <FieldLabel>Name</FieldLabel>
-                  <input
-                    value={formData.name}
-                    onChange={e => setFormData(f => ({ ...f, name: e.target.value }))}
-                    style={inputStyle()}
-                    onFocus={e => { e.currentTarget.style.borderColor = T.gold; }}
-                    onBlur={e => { e.currentTarget.style.borderColor = T.border; }}
-                  />
-                  {/* Duplicate warning */}
-                  {duplicateMatches.length > 0 && (
-                    <div style={{
-                      marginTop: 6, padding: '8px 10px',
-                      background: '#fffbeb', border: '1px solid rgba(217,119,6,0.3)',
-                      display: 'flex', flexDirection: 'column', gap: 4,
-                    }}>
-                      <span style={{ fontFamily: jost, fontSize: 9, fontWeight: 500, letterSpacing: '0.2em', textTransform: 'uppercase', color: T.amber, display: 'flex', alignItems: 'center', gap: 5 }}>
-                        <AlertCircle size={10} /> Similar product{duplicateMatches.length > 1 ? 's' : ''} already exist{duplicateMatches.length === 1 ? 's' : ''}
-                      </span>
-                      {duplicateMatches.map(m => (
-                        <span key={m._id} style={{ fontFamily: jost, fontSize: 10, fontWeight: 300, color: T.text, paddingLeft: 15 }}>
-                          • {m.brand} — {m.name}
-                          {m.subCategory ? <span style={{ color: T.muted }}> ({m.subCategory})</span> : null}
-                        </span>
-                      ))}
-                    </div>
-                  )}
-                </div>
-              </div>
-
-              {/* Description */}
-              <div>
-                <FieldLabel>Description</FieldLabel>
-                <textarea
-                  rows={3}
-                  value={formData.description}
-                  onChange={e => setFormData(f => ({ ...f, description: e.target.value }))}
-                  style={{ ...inputStyle(), resize: 'none', height: 72 }}
-                  onFocus={e => { e.currentTarget.style.borderColor = T.gold; }}
-                  onBlur={e => { e.currentTarget.style.borderColor = T.border; }}
-                />
-              </div>
-
-              {/* Cost Price / Image */}
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
-                <div>
-                  <FieldLabel>Cost Price (₹)</FieldLabel>
-                  <input
-                    type="number"
-                    className="no-spinner"
-                    value={formData.purchasePrice}
-                    onChange={e => setFormData(f => ({ ...f, purchasePrice: e.target.value }))}
-                    style={inputStyle()}
-                    onFocus={e => { e.currentTarget.style.borderColor = T.gold; }}
-                    onBlur={e => { e.currentTarget.style.borderColor = T.border; }}
-                  />
-                </div>
-                <div>
-                  <FieldLabel>Image</FieldLabel>
-                  <input
-                    type="file"
-                    accept="image/*"
-                    onChange={e => handleImageFileChange(e.target.files[0])}
-                    style={{ fontFamily: jost, fontSize: 11, fontWeight: 300, color: T.text, marginTop: 2, width: '100%' }}
-                  />
-                  {isEditing && (
-                    <p style={{ fontFamily: jost, fontSize: 9, fontWeight: 300, color: T.indigo, marginTop: 4, fontStyle: 'italic' }}>
-                      Leave empty to keep current image
-                    </p>
-                  )}
-                </div>
-              </div>
-
-              {/* ── Studio AI section ── */}
-              {imageFile && (
-                <div style={{
-                  background: T.purpleBg, border: `1px solid ${T.borderG}`,
-                  padding: '18px 20px', display: 'flex', flexDirection: 'column', gap: 14,
-                }}>
-                  {/* Toggle */}
-                  <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer' }}>
-                    <input
-                      type="checkbox"
-                      checked={processImage}
-                      onChange={e => {
-                        setProcessImage(e.target.checked);
-                        if (!e.target.checked) { setGeneratedImageUrl(null); setUseGeneratedImage(false); setAiError(null); }
-                      }}
-                      style={{ accentColor: T.purple, width: 14, height: 14 }}
-                    />
-                    <span style={{ fontFamily: jost, fontSize: 9, fontWeight: 400, letterSpacing: '0.25em', textTransform: 'uppercase', color: T.purple, display: 'flex', alignItems: 'center', gap: 5 }}>
-                      <Sparkles size={10} /> Studio AI Processing (Gemini)
-                    </span>
-                  </label>
-
-                  {processImage && (
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-                      <PromptSelector
-                        prompts={savedPrompts} category={formData.category}
-                        selectedId={selectedPromptId} onSelect={setPromptId}
-                        customText={customPromptText} onCustom={setCustomPrompt}
-                        onOpenManager={() => { setShowModal(false); resetPromptManager(); setShowPromptManager(true); }}
-                      />
-
-                      {/* Generate button */}
-                      <button
-                        type="button"
-                        onClick={handleGenerateStudio}
-                        disabled={aiProcessing}
-                        style={{
-                          width: '100%', padding: '11px 0',
-                          background: aiProcessing ? 'rgba(124,58,237,0.4)' : T.purple,
-                          border: 'none', color: 'white',
-                          fontFamily: jost, fontSize: 9, fontWeight: 400,
-                          letterSpacing: '0.22em', textTransform: 'uppercase',
-                          cursor: aiProcessing ? 'not-allowed' : 'pointer',
-                          display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 7,
-                          transition: 'background 0.2s',
-                        }}
-                      >
-                        {aiProcessing
-                          ? <><Loader2 size={13} style={{ animation: 'spin 1s linear infinite' }} /> Generating with Gemini…</>
-                          : <><Sparkles size={13} /> Generate Studio Image</>}
-                      </button>
-
-                      {/* AI processing buffer — spinner shown above covers this; error surfaced below */}
-                      {aiError && (
-                        <div style={{
-                          display: 'flex', alignItems: 'flex-start', gap: 8,
-                          background: '#fef2f2', border: '1px solid #fecaca',
-                          padding: '10px 12px',
-                        }}>
-                          <AlertCircle size={13} style={{ color: T.red, marginTop: 1, flexShrink: 0 }} />
-                          <p style={{ fontFamily: jost, fontSize: 11, fontWeight: 400, color: T.red, margin: 0 }}>{aiError}</p>
-                        </div>
-                      )}
-
-                      {/* Before / After comparison */}
-                      {generatedImageUrl && (
-                        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-                          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
-                            {[
-                              { src: imagePreviewUrl,   label: 'Original',   active: !useGeneratedImage, onPick: () => setUseGeneratedImage(false) },
-                              { src: generatedImageUrl, label: 'AI Studio',  active:  useGeneratedImage, onPick: () => setUseGeneratedImage(true)  },
-                            ].map(({ src, label, active, onPick }) => (
-                              <div
-                                key={label}
-                                onClick={onPick}
-                                style={{
-                                  cursor: 'pointer', overflow: 'hidden',
-                                  border: `2px solid ${active ? T.gold : T.border}`,
-                                  opacity: active ? 1 : 0.65,
-                                  transition: 'all 0.2s',
-                                }}
-                              >
-                                <img src={src} alt={label} style={{ width: '100%', height: 88, objectFit: 'cover', display: 'block' }} />
-                                <div style={{
-                                  padding: '5px 0', textAlign: 'center',
-                                  background: active ? T.gold : T.offwhite,
-                                  display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 5,
-                                }}>
-                                  {active && <CheckCircle2 size={9} style={{ color: active ? T.navy : T.muted }} />}
-                                  <span style={{ fontFamily: jost, fontSize: 8, fontWeight: 400, letterSpacing: '0.2em', textTransform: 'uppercase', color: active ? T.navy : T.muted }}>
-                                    {label}
-                                  </span>
-                                </div>
-                              </div>
-                            ))}
-                          </div>
-                          <button
-                            type="button"
-                            onClick={() => setShowCompareModal(true)}
-                            style={{
-                              width: '100%', padding: '8px 0',
-                              background: 'none',
-                              border: `1px solid ${T.borderG}`,
-                              fontFamily: jost, fontSize: 8, fontWeight: 400,
-                              letterSpacing: '0.2em', textTransform: 'uppercase',
-                              color: T.purple, cursor: 'pointer', display: 'flex',
-                              alignItems: 'center', justifyContent: 'center', gap: 5,
-                              transition: 'background 0.2s',
-                            }}
-                            onMouseEnter={e => { e.currentTarget.style.background = T.purpleBg; }}
-                            onMouseLeave={e => { e.currentTarget.style.background = 'none'; }}
-                          >
-                            <ImageIcon size={10} /> Compare Full Size
-                          </button>
-                          <p style={{ fontFamily: jost, fontSize: 9, fontWeight: 300, color: T.purple, textAlign: 'center', margin: 0 }}>
-                            {useGeneratedImage ? '✨ AI Studio image will be saved' : '📷 Original image will be saved'}
-                          </p>
-                        </div>
-                      )}
-                    </div>
-                  )}
-                </div>
-              )}
-
-              {/* Margin / Selling price */}
-              <div style={{ background: T.indigoBg, border: `1px solid rgba(79,70,229,0.10)`, padding: '20px 22px' }}>
-                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16, alignItems: 'center' }}>
-                  <div>
-                    <FieldLabel>Margin (%)</FieldLabel>
-                    <select
-                      value={formData.markupPercent}
-                      onChange={e => setFormData(f => ({ ...f, markupPercent: parseInt(e.target.value) }))}
-                      style={{ ...inputStyle(), background: 'white' }}
-                    >
-                      {[10, 15, 20, 25, 30, 35, 40, 45, 50].map(m => (
-                        <option key={m} value={m}>{m}%</option>
-                      ))}
-                    </select>
-                  </div>
-                  <div style={{ textAlign: 'right' }}>
-                    <span style={{ display: 'block', fontFamily: jost, fontSize: 9, fontWeight: 400, letterSpacing: '0.25em', textTransform: 'uppercase', color: T.muted, marginBottom: 4 }}>
-                      Final Selling Price
-                    </span>
-                    <span style={{ fontFamily: serif, fontSize: 36, fontWeight: 600, color: T.green }}>
-                      ₹{calculateSellingPrice(formData.purchasePrice, formData.markupPercent)}
-                    </span>
-                  </div>
-                </div>
-              </div>
-            </div>
-
-            {/* Save buffer — button shows spinner while request is in flight */}
-            <div style={{
-              display: 'flex', justifyContent: 'flex-end', gap: 14,
-              borderTop: `1px solid ${T.border}`, marginTop: 28, paddingTop: 24,
-            }}>
-              <button
-                onClick={() => { setShowModal(false); resetForm(); }}
-                style={{
-                  background: 'none', border: 'none', cursor: 'pointer',
-                  fontFamily: jost, fontSize: 10, fontWeight: 400,
-                  letterSpacing: '0.2em', textTransform: 'uppercase',
-                  color: T.muted, padding: '10px 20px', transition: 'color 0.2s',
-                }}
-                onMouseEnter={e => { e.currentTarget.style.color = T.text; }}
-                onMouseLeave={e => { e.currentTarget.style.color = T.muted; }}
-              >
-                Cancel
-              </button>
-              <button
-                onClick={handleSave}
-                disabled={isSaving}
-                style={{
-                  background: isSaving ? T.gold2 : T.gold,
-                  color: T.navy,
-                  border: 'none', padding: '12px 36px',
-                  fontFamily: jost, fontSize: 10, fontWeight: 500,
-                  letterSpacing: '0.22em', textTransform: 'uppercase',
-                  cursor: isSaving ? 'not-allowed' : 'pointer',
-                  transition: 'background 0.25s',
-                  display: 'inline-flex', alignItems: 'center', gap: 8,
-                  opacity: isSaving ? 0.75 : 1,
-                }}
-                onMouseEnter={e => { if (!isSaving) e.currentTarget.style.background = T.gold2; }}
-                onMouseLeave={e => { if (!isSaving) e.currentTarget.style.background = T.gold; }}
-              >
-                {isSaving
-                  ? <><Loader2 size={13} style={{ animation: 'spin 1s linear infinite' }} />{isEditing ? 'Updating…' : 'Saving…'}</>
-                  : (isEditing ? 'Update Product' : 'Confirm')}
-              </button>
-            </div>
-          </div>
-        </div>
+      {productModal && (
+        <ProductFormModal
+          key={productModal.id || 'new'}
+          productId={productModal.id}
+          meta={meta}
+          savedPrompts={savedPrompts}
+          showToast={showToast}
+          onClose={() => setProductModal(null)}
+          onSaved={handleProductSaved}
+          onMediaProcessed={handleMediaProcessed}
+          onOpenPromptManager={() => { resetPromptManager(); setShowPromptManager(true); }}
+        />
       )}
 
       {/* ════════════════════════════════════════════════════════════════════════
@@ -2900,80 +2180,13 @@ const ProductList = () => {
       )}
 
       {/* ════════════════════════════════════════════════════════════════════════
-          FULLSCREEN AI COMPARE LIGHTBOX
-      ════════════════════════════════════════════════════════════════════════ */}
-      {showCompareModal && generatedImageUrl && (
-        <div
-          onClick={() => setShowCompareModal(false)}
-          style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.96)', zIndex: 300, display: 'flex', flexDirection: 'column' }}
-        >
-          <div
-            onClick={e => e.stopPropagation()}
-            style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '18px 24px', flexShrink: 0 }}
-          >
-            <p style={{ fontFamily: jost, fontSize: 10, fontWeight: 400, letterSpacing: '0.28em', textTransform: 'uppercase', color: 'rgba(255,255,255,0.6)', margin: 0 }}>
-              Compare — Click an image to select it
-            </p>
-            <button onClick={() => setShowCompareModal(false)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'rgba(255,255,255,0.5)', fontSize: 20, transition: 'color 0.2s' }}
-              onMouseEnter={e => { e.currentTarget.style.color = 'white'; }} onMouseLeave={e => { e.currentTarget.style.color = 'rgba(255,255,255,0.5)'; }}>
-              ✕
-            </button>
-          </div>
-
-          <div onClick={e => e.stopPropagation()} style={{ display: 'flex', flex: 1, gap: 12, padding: '0 24px 20px', overflow: 'hidden' }}>
-            {[
-              { src: imagePreviewUrl,   label: 'Original',  active: !useGeneratedImage, onPick: () => { setUseGeneratedImage(false); setShowCompareModal(false); } },
-              { src: generatedImageUrl, label: 'AI Studio', active:  useGeneratedImage, onPick: () => { setUseGeneratedImage(true);  setShowCompareModal(false); } },
-            ].map(({ src, label, active, onPick }) => (
-              <div
-                key={label}
-                onClick={onPick}
-                style={{
-                  flex: 1, display: 'flex', flexDirection: 'column',
-                  border: `3px solid ${active ? T.gold : 'rgba(255,255,255,0.07)'}`,
-                  cursor: 'pointer', overflow: 'hidden',
-                  boxShadow: active ? `0 0 32px ${T.gold}40` : 'none',
-                  transition: 'border-color 0.2s, box-shadow 0.2s',
-                }}
-              >
-                <div style={{ flex: 1, background: '#111', display: 'flex', alignItems: 'center', justifyContent: 'center', overflow: 'hidden' }}>
-                  <img src={src} alt={label} style={{ maxWidth: '100%', maxHeight: 'calc(90vh - 130px)', objectFit: 'contain' }} />
-                </div>
-                <div style={{
-                  padding: '10px 0', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6,
-                  background: active ? T.gold : 'rgba(255,255,255,0.04)',
-                }}>
-                  {active && <CheckCircle2 size={14} style={{ color: active ? T.navy : 'rgba(255,255,255,0.4)' }} />}
-                  <span style={{ fontFamily: jost, fontSize: 9, fontWeight: 400, letterSpacing: '0.25em', textTransform: 'uppercase', color: active ? T.navy : 'rgba(255,255,255,0.35)' }}>
-                    {label}
-                  </span>
-                  {active && <span style={{ fontFamily: jost, fontSize: 9, fontWeight: 300, color: T.navy, opacity: 0.7 }}>— will be saved</span>}
-                </div>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
-
-      {/* ════════════════════════════════════════════════════════════════════════
-          IMAGE GALLERY & VIDEO MODAL
-      ════════════════════════════════════════════════════════════════════════ */}
-      {galleryProduct && (
-        <ProductImageGallery
-          product={galleryProduct}
-          onClose={() => setGalleryProduct(null)}
-          onSaved={fetchData}
-        />
-      )}
-
-      {/* ════════════════════════════════════════════════════════════════════════
           PENDING SUPPLIER APPROVALS (NEW)
       ════════════════════════════════════════════════════════════════════════ */}
       {showPendingApprovals && (
         <PendingSupplierApprovals
           meta={meta}
           onClose={() => setShowPendingApprovals(false)}
-          onApproved={fetchData}
+          onApproved={() => refresh()}
         />
       )}
 
@@ -2994,8 +2207,8 @@ const ProductList = () => {
               Delete "{deletingProduct.name}"?
             </h3>
             <p style={{ fontFamily: jost, fontSize: 12, color: T.muted, lineHeight: 1.6, marginBottom: 16 }}>
-              This permanently removes the product from the catalogue. If it was submitted by a Partner,
-              your reason below will be shown to them in their portal.
+              This product was added by a Partner. It will be removed from the catalogue and your
+              reason below will be shown to the Partner in their portal.
             </p>
             <textarea
               rows={3}
