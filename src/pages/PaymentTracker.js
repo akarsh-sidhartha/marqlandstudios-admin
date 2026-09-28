@@ -1,3306 +1,123 @@
 /**
- * PaymentTracker.jsx
+ * PaymentTracker.js — vendor PIs, payments and the invoice vault.
  * ─────────────────────────────────────────────────────────────────────────────
- * REFACTORED: production-grade rewrite preserving 100% of existing functionality.
+ * Module layout (src/pages/paymentTracker/):
+ *   trackerApi.js       every HTTP call (one /overview load, idempotent creates)
+ *   hooks.js            useTrackerData · useDocumentScan · useAutoForm · useIsMobile
+ *   forms.js            Upload PI / Upload Invoice / Record Payment — shared by
+ *                       desktop (dialog) and mobile (full-screen)
+ *   modals.js           PI flow · map advance · invoice viewer
+ *   InvoiceVaultTab.js  FY → month → invoice hierarchy, CSV / ZIP export
+ *   MobileTracker.js    phone layout: the three capture actions only
+ *   components.js       UI atoms · shared.js tokens, formatters, relations
  *
- * KEY CHANGES FROM ORIGINAL:
- *
- * BUG FIXES
- * ---------
- * 1. UploadInvoiceModal — when opened from PIFlowModal, now pre-fills:
- *    vendor_name, vendor_gst, total_amount, notes, AND sets selectedVendorId.
- *    Previously only vendor_name was pre-filled.
- *
- * 2. UploadInvoiceModal — selecting a PI from the "Link to PI" dropdown now
- *    pre-fills vendor_name, vendor_gst, total_amount, notes.
- *    Previously the dropdown only stored the ID.
- *
- * 3. RecordPaymentModal — "Against Invoice" list now filters by selected vendor.
- *    Previously ALL open invoices were shown regardless of vendor selection.
- *    Also: selecting a vendor resets stale PI/invoice selections.
- *
- * 4. PIFlowModal — api.post('/payments/link-to-invoice') was passing a fetch()
- *    options object as the axios body. Fixed to pass { piId, invoiceId } directly.
- *
- * ARCHITECTURE IMPROVEMENTS
- * -------------------------
- * - `useFileReader` custom hook — eliminates copy-pasted FileReader + base64 logic
- * - `useGeminiScan` custom hook — eliminates copy-pasted AI scan logic across 3 modals
- * - `useFormData` — centralises FormData construction
- * - `usePaidByInvoice` — memoised payment→invoice aggregation (was O(n) per render)
- * - Hover states via `useHover` — eliminates 50+ inline onMouseEnter/Leave handlers
- * - `buildFormData()` utility — one place for FormData serialisation
- * - `base64ToBlob()` utility — extracted from 3 identical inline implementations
- * - Dead commented-out code removed from routes (documented in route file)
- * - `_geminiAvailable` cache converted to a proper module-level singleton class
- * - All IIFE render sections extracted to named sub-components
- * - Design tokens unified — all colours referenced through T, no stray hex literals
+ * Documents are read by the backend's open-source extractor (pdf.js +
+ * Tesseract) — no Gemini or other paid API is involved.
  * ─────────────────────────────────────────────────────────────────────────────
  */
-
-import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
-import api from '../api';
-import { createLogger } from '../utils/logger';
-import {
-  Trash2, ArrowRight, Link2, FolderOpen, Folder, ChevronDown, ChevronRight,
-  Download, Archive, Search, X, Eye, FileText, Image as ImageIcon,
-  CheckCircle, AlertCircle, AlertTriangle, MapPin, CreditCard,
-  FileUp, Plus, ClipboardList,
-} from 'lucide-react';
+import React, { useState, useMemo, useCallback } from 'react';
+import { Trash2, Search, X, MapPin, ClipboardList, FileUp, Plus } from 'lucide-react';
 import { usePopup, AppPopupStyles } from '../components/AppPopups';
+import trackerApi, { friendlyError, docUrl } from './paymentTracker/trackerApi';
+import { useIsMobile, useTrackerData } from './paymentTracker/hooks';
+import { Badge, ProgressBar, DocLink, VendorSelect, SearchSelect } from './paymentTracker/components';
+import { T, jost, serif, IS, STATUS_META, fmt, fmtDate, fiscalOf, currentFY, normalizeFY, paymentsByPi, invoiceTrail, idOf, piMatches, paymentMatches, invoiceMatches } from './paymentTracker/shared';
+import InvoiceVaultTab, { GlobalVendorNameFilter } from './paymentTracker/InvoiceVaultTab';
+import MobileTracker from './paymentTracker/MobileTracker';
+import { PiForm, InvoiceForm, PaymentForm } from './paymentTracker/forms';
+import { MapAdvanceModal, PIFlowModal, InvoiceViewerModal } from './paymentTracker/modals';
+import BulkUpload from './paymentTracker/BulkUpload';
+
+const PI_STATUSES = ['pending', 'partial', 'fully_paid', 'invoiced', 'cancelled'];
+const PAYMENT_STATUSES = ['recorded', 'verified', 'reconciled'];
 
-const log = createLogger('PaymentTracker');
-
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// DESIGN TOKENS — single source of truth; no hex literals elsewhere
-// ═══════════════════════════════════════════════════════════════════════════════
-const T = {
-  navy:    '#0e1520',
-  gold:    '#b8975a',
-  gold2:   '#d4b06a',
-  offwhite:'#faf8f5',
-  text:    '#1a1a1a',
-  muted:   '#888',
-  border:  'rgba(0,0,0,0.07)',
-  borderG: 'rgba(184,151,90,0.18)',
-  dimBg:   'rgba(184,151,90,0.04)',
-  red:     '#dc2626',
-  green:   '#10b981',
-  blue:    '#1d4ed8',
-  // Semantic aliases used by modals
-  indigo:  '#6366f1',
-  cyan:    '#0891b2',
-  amber:   '#f59e0b',
-  slate:   '#475569',
-  slateL:  '#94a3b8',
-};
-const jost  = '"Jost", sans-serif';
-const serif = '"Cormorant Garamond", Georgia, serif';
-
-const STATUS_META = {
-  pending:    { label: 'Pending',    color: '#f59e0b', bg: '#fef3c7' },
-  partial:    { label: 'Partial',    color: '#3b82f6', bg: '#dbeafe' },
-  fully_paid: { label: 'Fully Paid', color: '#10b981', bg: '#d1fae5' },
-  invoiced:   { label: 'Invoiced',   color: '#8b5cf6', bg: '#ede9fe' },
-  cancelled:  { label: 'Cancelled',  color: '#6b7280', bg: '#f3f4f6' },
-  paid:       { label: 'Paid',       color: '#10b981', bg: '#d1fae5' },
-  overdue:    { label: 'Overdue',    color: '#ef4444', bg: '#fee2e2' },
-  recorded:   { label: 'Recorded',   color: '#f59e0b', bg: '#fef3c7' },
-  advance:    { label: 'Advance',    color: '#8b5cf6', bg: '#ede9fe' },
-};
-
-// Shared input style
-const IS = {
-  width: '100%', padding: '10px 14px',
-  border: `1px solid ${T.border}`, borderRadius: 3,
-  fontSize: 13, fontWeight: 300, outline: 'none',
-  color: T.text, boxSizing: 'border-box',
-  fontFamily: jost, background: '#fff',
-  transition: 'border-color 0.2s',
-};
-const IShi = (hi) => ({
-  ...IS,
-  border: hi ? `1px solid ${T.gold}` : IS.border,
-  background: hi ? T.dimBg : '#fff',
-});
-
-const ERROR_MESSAGES = {
-  400: 'The request had invalid data — please check all fields and try again.',
-  401: 'Your session has expired — please log in again.',
-  403: "You don't have permission to perform this action.",
-  404: 'The record was not found — it may have been deleted.',
-  409: 'A duplicate record already exists.',
-  413: 'The file is too large to upload. Please use a smaller image or PDF.',
-  422: 'Some required fields are missing or invalid.',
-  429: 'Too many requests — please wait a moment and try again.',
-  500: 'A server error occurred. Please try again or contact support.',
-  502: 'The server is temporarily unavailable. Please try again shortly.',
-  503: 'This feature is temporarily disabled. Please try again later.',
-  0:   'Network error — check your internet connection and try again.',
-};
-
-function friendlyError(e) {
-  const serverMsg = e?.response?.data?.error || e?.response?.data?.message;
-  if (serverMsg && serverMsg.length < 200) return serverMsg;
-  const status = e?.response?.status || (e?.message?.includes('Network') ? 0 : null);
-  if (status !== null && ERROR_MESSAGES[status]) return ERROR_MESSAGES[status];
-  if (e?.message) return e.message;
-  return 'An unexpected error occurred. Please try again.';
-}
-
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// FORMATTERS
-// ═══════════════════════════════════════════════════════════════════════════════
-const fmt = (n = 0) =>
-  new Intl.NumberFormat('en-IN', { style: 'currency', currency: 'INR', maximumFractionDigits: 0 }).format(n);
-
-const fmtN = (n = 0) =>
-  new Intl.NumberFormat('en-IN', { maximumFractionDigits: 0 }).format(n);
-
-const fmtDate = (d) =>
-  d ? new Date(d).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' }) : '—';
-
-const getFinancialDetails = (dateStr) => {
-  const d = dateStr ? new Date(dateStr) : new Date();
-  if (isNaN(d.getTime())) return { month: 'Unknown', fy: 'Unknown' };
-  const y  = d.getFullYear();
-  const sh = (n) => String(n).slice(-2).padStart(2, '0');
-  const fy = d.getMonth() < 3 ? `${y - 1}-${sh(y)}` : `${y}-${sh(y + 1)}`;
-  return { month: d.toLocaleString('default', { month: 'long' }), fy };
-};
-
-const normalizeFY = (fy) => {
-  if (!fy || fy === 'Unknown' || fy === 'Other') return fy;
-  return fy.replace(/^(\d{4})-(\d{2,4})$/, (_, y, s) => `${y}-${String(s).slice(-2).padStart(2, '0')}`);
-};
-
-const currentFY = () => {
-  const now = new Date();
-  const y   = now.getFullYear();
-  const fy  = now.getMonth() < 3
-    ? `${y - 1}-${String(y).slice(-2)}`
-    : `${y}-${String(y + 1).slice(-2)}`;
-  return normalizeFY(fy);
-};
-
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// PROXY URL BUILDERS
-// ═══════════════════════════════════════════════════════════════════════════════
-const proxyUrl = {
-  invoice:    (id) => `/api/payment-tracker/invoices/${id}/file`,
-  piAttach:   (id) => `/api/payment-tracker/pi/${id}/attachment`,
-  payReceipt: (id) => `/api/payment-tracker/payments/${id}/screenshot`,
-};
-
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// UTILITIES
-// ═══════════════════════════════════════════════════════════════════════════════
-
-/** Convert a base64 data URL to a File-attachable Blob. */
-function base64ToBlob(dataUrl, fallbackMime = 'image/jpeg') {
-  const [meta, data] = dataUrl.split(',');
-  const mime  = meta.match(/:(.*?);/)?.[1] || fallbackMime;
-  const bytes = atob(data);
-  const arr   = new Uint8Array(bytes.length);
-  for (let i = 0; i < bytes.length; i++) arr[i] = bytes.charCodeAt(i);
-  return { blob: new Blob([arr], { type: mime }), mime };
-}
-
-/**
- * Build a FormData from a plain object + optional file blob.
- * Arrays are JSON-stringified. Nulls/undefined/''/empty arrays are omitted.
- */
-function buildFormData(fields, fileEntry = null) {
-  const fd = new FormData();
-  Object.entries(fields).forEach(([k, v]) => {
-    if (v === undefined || v === null || v === '') return;
-    if (Array.isArray(v)) {
-      if (v.length > 0) fd.append(k, JSON.stringify(v));
-      return;
-    }
-    fd.append(k, v);
-  });
-  if (fileEntry) {
-    const { fieldName, dataUrl, fallbackMime, ext } = fileEntry;
-    if (dataUrl) {
-      const { blob, mime } = base64ToBlob(dataUrl, fallbackMime);
-      fd.append(fieldName, blob, `${fieldName}${mime === 'application/pdf' ? '.pdf' : `.${ext || 'jpg'}`}`);
-    }
-  }
-  return fd;
-}
-
-/** Read a File as a base64 data URL. */
-function readFileAsBase64(file) {
-  return new Promise((resolve, reject) => {
-    const r = new FileReader();
-    r.onload  = () => resolve(r.result);
-    r.onerror = reject;
-    r.readAsDataURL(file);
-  });
-}
-
-/** Compress an image base64 to max 1600px / 85% quality. */
-const compressImage = (b64) =>
-  new Promise((resolve) => {
-    const img = new Image();
-    img.src = b64;
-    img.onload = () => {
-      const c = document.createElement('canvas');
-      let { width: w, height: h } = img;
-      const M = 1600;
-      if (Math.max(w, h) > M) {
-        if (w > h) { h = (h * M) / w; w = M; }
-        else        { w = (w * M) / h; h = M; }
-      }
-      c.width = w; c.height = h;
-      c.getContext('2d').drawImage(img, 0, 0, w, h);
-      resolve(c.toDataURL('image/jpeg', 0.85));
-    };
-    img.onerror = () => resolve(b64);
-  });
-
-
-// ── Gemini availability cache (singleton, not a module-level `let`) ───────────
-const GeminiStatus = (() => {
-  let cached = null;
-  return {
-    async check() {
-      if (cached !== null) return cached;
-      try {
-        const res = await api.get('/payment-tracker/gemini-status');
-        cached = res.data.available !== false;
-      } catch {
-        cached = true; // if check fails, attempt anyway
-      }
-      return cached;
-    },
-    reset() { cached = null; }, // for testing
-  };
-})();
-
-async function extractViaGemini(file) {
-  const b64       = await readFileAsBase64(file);
-  const optimized = file.type.startsWith('image/') ? await compressImage(b64) : b64;
-  const res = await api.post('/payment-tracker/invoices/process', {
-    image: optimized, mimeType: file.type,
-  });
-  if (res.status >= 400) throw new Error('Gemini extraction failed');
-  return res.data;
-}
-
-
-// ── Script loader ─────────────────────────────────────────────────────────────
-const _loadedScripts = new Set();
-const loadScript = (src) =>
-  new Promise((resolve) => {
-    if (_loadedScripts.has(src) || document.querySelector(`script[src="${src}"]`)) {
-      _loadedScripts.add(src);
-      resolve(true);
-      return;
-    }
-    const s = document.createElement('script');
-    s.src = src;
-    s.onload  = () => { _loadedScripts.add(src); resolve(true); };
-    s.onerror = () => resolve(false);
-    document.head.appendChild(s);
-  });
-
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// CUSTOM HOOKS
-// ═══════════════════════════════════════════════════════════════════════════════
-
-/**
- * useFileReader — handles file selection → base64 conversion → preview.
- * Eliminates the copy-pasted FileReader pattern across 3 upload modals.
- */
-function useFileReader() {
-  const [fileBase64, setFileBase64] = useState(null);
-  const [fileMime,   setFileMime]   = useState(null);
-  const [preview,    setPreview]    = useState(null);
-
-  const setFile = useCallback(async (file) => {
-    if (!file) return;
-    const b64 = await readFileAsBase64(file);
-    setFileBase64(b64);
-    setFileMime(file.type);
-    setPreview(file.type === 'application/pdf' ? 'pdf' : b64);
-  }, []);
-
-  const clear = useCallback(() => {
-    setFileBase64(null);
-    setFileMime(null);
-    setPreview(null);
-  }, []);
-
-  return { fileBase64, fileMime, preview, setFile, clear };
-}
-
-/**
- * useGeminiScan — wraps quota check + extraction + result state.
- * Eliminates copy-pasted AI scan logic across UploadPIModal,
- * UploadInvoiceModal, and RecordPaymentModal.
- *
- * @param {boolean} enabled — whether auto-read mode is active
- * @param {(ex: object) => void} onExtracted — called with the raw Gemini result
- */
-function useGeminiScan(enabled, onExtracted) {
-  const [scanning, setScanning] = useState(false);
-  const [scanRes,  setScanRes]  = useState(null); // 'success' | 'partial' | 'error' | null
-  const [scanMsg,  setScanMsg]  = useState('');
-
-  const reset = useCallback(() => { setScanRes(null); setScanMsg(''); }, []);
-
-  const scan = useCallback(async (file) => {
-    if (!enabled) return;
-    const quotaOk = await GeminiStatus.check();
-    if (!quotaOk) {
-      setScanRes('error');
-      setScanMsg('AI scan quota reached for today — fill in the fields manually.');
-      return;
-    }
-    setScanning(true);
-    setScanRes(null);
-    try {
-      const ex     = await extractViaGemini(file);
-      const filled = onExtracted(ex); // caller fills form and returns count
-      const c      = typeof filled === 'number' ? filled : 0;
-      setScanRes(c >= 4 ? 'success' : c > 0 ? 'partial' : 'error');
-      setScanMsg(
-        c >= 4 ? `${c} fields extracted.`
-               : c > 0 ? `${c} fields found — verify and fill remaining fields manually.`
-                       : 'Nothing extracted — please fill all fields manually.',
-      );
-    } catch (e) {
-      log.error('Gemini scan failed', e.message);
-      setScanRes('error');
-      setScanMsg('Extraction failed: ' + e.message);
-    }
-    setScanning(false);
-  }, [enabled, onExtracted]);
-
-  return { scanning, scanRes, scanMsg, scan, reset };
-}
-
-/**
- * usePaidByInvoice — memoised reduction of payments → per-invoice paid totals.
- * Eliminates O(n) re-computation on every render in RecordPaymentModal
- * and MapAdvanceModal.
- */
-function usePaidByInvoice(payments) {
-  return useMemo(() => {
-    return (payments || []).reduce((acc, p) => {
-      if (p.mappedTo === 'vendor_invoice' && p.vendorInvoice) {
-        const id  = String(p.vendorInvoice?._id || p.vendorInvoice);
-        acc[id] = (acc[id] || 0) + p.amount;
-      }
-      return acc;
-    }, {});
-  }, [payments]);
-}
-
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// SHARED UI ATOMS
-// ═══════════════════════════════════════════════════════════════════════════════
-
-function Badge({ status }) {
-  const m = STATUS_META[status] || { label: status, color: T.muted, bg: T.offwhite };
-  return (
-    <span style={{
-      background: 'transparent', color: m.color,
-      border: `1px solid ${m.color}55`,
-      padding: '2px 10px', fontSize: 9, fontWeight: 400,
-      fontFamily: jost, letterSpacing: '0.18em',
-      textTransform: 'uppercase', whiteSpace: 'nowrap',
-    }}>
-      {m.label}
-    </span>
-  );
-}
-
-function ProgressBar({ paid, total, height = 6 }) {
-  const pct = total > 0 ? Math.min(100, (paid / total) * 100) : 0;
-  // Round before comparing — floating-point drift from repeated `amountPaid +=`
-  // additions on the backend can leave pct at e.g. 99.9999998, which would
-  // never satisfy a strict `=== 100` check and wrongly render as "in progress"
-  // (blue) on rows that are actually fully paid. The rounded value is also
-  // what's displayed as the percentage label, so the bar and label always agree.
-  const pctRounded = Math.round(pct);
-  const color = pctRounded >= 100 ? '#10b981' : pctRounded > 0 ? '#3b82f6' : '#e5e7eb';
-  return (
-    <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-      <div style={{ flex: 1, height, borderRadius: 99, background: '#e5e7eb', overflow: 'hidden' }}>
-        <div style={{ width: `${pct}%`, height: '100%', background: color, borderRadius: 99, transition: 'width 0.5s ease' }} />
-      </div>
-      <span style={{ fontSize: 11, color: '#6b7280', minWidth: 34 }}>{pctRounded}%</span>
-    </div>
-  );
-}
-
-function Modal({ title, onClose, children, wide, extraWide }) {
-  useEffect(() => {
-    const handler = (e) => e.key === 'Escape' && onClose();
-    window.addEventListener('keydown', handler);
-    return () => window.removeEventListener('keydown', handler);
-  }, [onClose]);
-
-  return (
-    <div
-      style={{ position: 'fixed', inset: 0, background: 'rgba(14,21,32,0.75)', backdropFilter: 'blur(4px)', zIndex: 1000, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 24 }}
-      onClick={(e) => e.target === e.currentTarget && onClose()}
-    >
-      <div style={{ background: '#fff', border: `1px solid ${T.border}`, width: '100%', maxWidth: extraWide ? 1100 : wide ? 800 : 580, maxHeight: '90vh', overflowY: 'auto' }}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', padding: '28px 32px 20px', borderBottom: `1px solid ${T.border}`, position: 'sticky', top: 0, background: '#fff', zIndex: 2 }}>
-          <div>
-            <p style={{ fontFamily: jost, fontSize: 9, fontWeight: 400, letterSpacing: '0.28em', textTransform: 'uppercase', color: T.muted, marginBottom: 6 }}>
-              Payment Tracker
-            </p>
-            <h2 style={{ fontFamily: serif, fontSize: 26, fontWeight: 300, color: T.navy, margin: 0 }}>{title}</h2>
-          </div>
-          <button
-            onClick={onClose}
-            style={{ background: 'none', border: 'none', cursor: 'pointer', color: T.muted, fontSize: 20, lineHeight: 1, padding: 4, transition: 'color 0.2s' }}
-            onMouseEnter={(e) => (e.currentTarget.style.color = T.text)}
-            onMouseLeave={(e) => (e.currentTarget.style.color = T.muted)}
-          >
-            ✕
-          </button>
-        </div>
-        <div style={{ padding: '28px 32px' }}>{children}</div>
-      </div>
-    </div>
-  );
-}
-
-function Field({ label, required, hint, children }) {
-  return (
-    <div style={{ marginBottom: 18 }}>
-      <label style={{ display: 'block', fontFamily: jost, fontSize: 9, fontWeight: 400, letterSpacing: '0.25em', textTransform: 'uppercase', color: T.muted, marginBottom: 8 }}>
-        {label}
-        {required && <span style={{ color: T.red }}> *</span>}
-        {hint && <span style={{ fontWeight: 400, textTransform: 'none', color: T.gold, marginLeft: 6, letterSpacing: 0 }}>{hint}</span>}
-      </label>
-      {children}
-    </div>
-  );
-}
-
-function ErrBox({ msg }) {
-  if (!msg) return null;
-  return (
-    <div style={{ background: '#fef2f2', border: `1px solid ${T.border}`, borderLeft: `3px solid ${T.red}`, color: T.red, padding: '10px 14px', marginBottom: 18, fontSize: 12, fontFamily: jost }}>
-      {msg}
-    </div>
-  );
-}
-
-function AutoFillBanner({ count }) {
-  if (!count) return null;
-  return (
-    <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 18, padding: '9px 14px', background: T.dimBg, border: `1px solid ${T.borderG}`, fontSize: 12, color: T.gold, fontFamily: jost }}>
-      ◈ {count} field{count > 1 ? 's' : ''} auto-filled — verify before saving.
-    </div>
-  );
-}
-
-function ScanBanner({ result, msg }) {
-  if (!result) return null;
-  const map = {
-    success: { bg: '#f0fdf4', bl: T.green,  c: T.green,  i: '✓' },
-    partial: { bg: T.dimBg,   bl: T.gold,   c: T.gold,   i: '⚠' },
-    error:   { bg: '#fef2f2', bl: T.red,    c: T.red,    i: '✕' },
-  };
-  const s = map[result];
-  return (
-    <div style={{ marginTop: 8, padding: '9px 14px', background: s.bg, borderLeft: `3px solid ${s.bl}`, color: s.c, fontSize: 12, fontFamily: jost, display: 'flex', alignItems: 'center', gap: 8 }}>
-      <span>{s.i}</span>{msg}
-    </div>
-  );
-}
-
-// Duplicate warning overlay — used by UploadPIModal and UploadInvoiceModal
-function DuplicateOverlay({ info, onRetry, onClose }) {
-  if (!info) return null;
-  return (
-    <div style={{ position: 'fixed', inset: 0, background: 'rgba(15,23,42,0.5)', zIndex: 2000, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 16 }}>
-      <div style={{ background: '#fff', borderRadius: 20, padding: '32px 36px', maxWidth: 420, width: '100%', textAlign: 'center', boxShadow: '0 25px 60px rgba(0,0,0,0.22)' }}>
-        <div style={{ width: 60, height: 60, borderRadius: 16, background: '#fef3c7', display: 'flex', alignItems: 'center', justifyContent: 'center', margin: '0 auto 16px' }}>
-          <AlertTriangle size={30} color="#f59e0b" />
-        </div>
-        <h3 style={{ margin: '0 0 8px', fontSize: 18, fontWeight: 800, color: '#0f172a' }}>{info.title}</h3>
-        <p style={{ margin: '0 0 6px', fontSize: 14, color: '#475569', lineHeight: 1.6 }}>{info.body}</p>
-        <p style={{ margin: '0 0 24px', fontSize: 13, color: '#94a3b8' }}>{info.sub}</p>
-        <div style={{ display: 'flex', gap: 10 }}>
-          {onRetry && (
-            <button onClick={onRetry} style={{ flex: 1, padding: '11px 0', borderRadius: 10, border: '1.5px solid #e2e8f0', background: '#fff', color: '#475569', fontWeight: 700, fontSize: 14, cursor: 'pointer' }}>
-              {info.retryLabel || 'Try Again'}
-            </button>
-          )}
-          <button onClick={onClose} style={{ flex: 1, padding: '11px 0', borderRadius: 10, border: 'none', background: '#6366f1', color: '#fff', fontWeight: 700, fontSize: 14, cursor: 'pointer' }}>
-            Close
-          </button>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// DOC LINK (unchanged from original — proxy URL aware)
-// ═══════════════════════════════════════════════════════════════════════════════
-function DocLink({ url, mimeType, label = 'View', style: extraStyle }) {
-  const [lightbox, setLightbox] = useState(false);
-  const [blobUrl,  setBlobUrl]  = useState(null);
-  const [loading,  setLoading]  = useState(false);
-  const [fetchErr, setFetchErr] = useState(null);
-
-  if (!url) return null;
-
-  const isProxyUrl = url.startsWith('/api/');
-  const isPdf      = mimeType === 'application/pdf' || url.startsWith('data:application/pdf') || /\.pdf(\?|$)/i.test(url);
-  const isBase64   = url.startsWith('data:');
-  const isOneDrive = /onedrive|sharepoint|1drv\.ms/i.test(url);
-  const isImage    = !isPdf && (isBase64 || mimeType?.startsWith('image/') || /\.(png|jpe?g|gif|webp|bmp)(\?|$)/i.test(url));
-
-  const defaultStyle = { display: 'inline-flex', alignItems: 'center', gap: 4, padding: '4px 9px', borderRadius: 6, background: '#eff6ff', color: '#1d4ed8', fontWeight: 700, fontSize: 11, textDecoration: 'none', cursor: 'pointer', border: 'none', fontFamily: jost };
-  const merged = { ...defaultStyle, ...(extraStyle || {}) };
-
-  const fetchBlob = async () => {
-    if (blobUrl) return blobUrl;
-    setLoading(true); setFetchErr(null);
-    try {
-      const res    = await api.get(url.replace(/^\/api/, ''), { responseType: 'blob' });
-      const blob   = new Blob([res.data], { type: res.headers['content-type'] || mimeType || 'application/octet-stream' });
-      const objUrl = URL.createObjectURL(blob);
-      setBlobUrl(objUrl); setLoading(false);
-      return objUrl;
-    } catch {
-      setFetchErr('Could not load document'); setLoading(false);
-      return null;
-    }
-  };
-
-  const handleImageClick  = async () => { if (isProxyUrl) await fetchBlob(); setLightbox(true); };
-  const handleOpenClick   = async (e) => { if (!isProxyUrl) return; e.preventDefault(); const b = await fetchBlob(); if (b) window.open(b, '_blank'); };
-  const displayUrl = blobUrl || (isBase64 ? url : null);
-
-  if (isImage) {
-    return (
-      <>
-        <button onClick={handleImageClick} disabled={loading} style={{ ...merged, opacity: loading ? 0.6 : 1 }}>
-          {loading ? '…' : <><ImageIcon size={11} /> {label}</>}
-        </button>
-        {lightbox && (
-          <div style={{ position: 'fixed', inset: 0, zIndex: 9999, background: 'rgba(0,0,0,0.88)', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', padding: 20 }} onClick={() => setLightbox(false)}>
-            <div style={{ position: 'relative', maxWidth: '90vw', maxHeight: '90vh' }} onClick={(e) => e.stopPropagation()}>
-              {fetchErr  ? <div style={{ color: '#fff', fontSize: 14, padding: 20 }}>{fetchErr}</div>
-               : displayUrl ? <img src={displayUrl} alt="Document" style={{ maxWidth: '100%', maxHeight: '85vh', objectFit: 'contain', borderRadius: 8, boxShadow: '0 25px 60px rgba(0,0,0,0.5)' }} />
-                            : <div style={{ color: '#fff', fontSize: 14, padding: 20 }}>Loading…</div>}
-              <button onClick={() => setLightbox(false)} style={{ position: 'absolute', top: -12, right: -12, background: '#fff', border: 'none', borderRadius: '50%', width: 30, height: 30, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', boxShadow: '0 2px 8px rgba(0,0,0,0.3)' }}>
-                <X size={15} />
-              </button>
-              {displayUrl && (
-                <a href={displayUrl} download="document" style={{ position: 'absolute', bottom: -40, left: '50%', transform: 'translateX(-50%)', background: 'rgba(255,255,255,0.15)', color: '#fff', borderRadius: 20, padding: '5px 14px', fontSize: 11, fontWeight: 700, textDecoration: 'none', display: 'flex', alignItems: 'center', gap: 5 }}>
-                  <Download size={11} /> Download
-                </a>
-              )}
-            </div>
-          </div>
-        )}
-      </>
-    );
-  }
-
-  const icon = isPdf ? <FileText size={11} /> : isOneDrive ? <FolderOpen size={11} /> : <Eye size={11} />;
-  if (isProxyUrl) return <button onClick={handleOpenClick} disabled={loading} style={{ ...merged, opacity: loading ? 0.6 : 1 }}>{loading ? '…' : <>{icon} {label}</>}</button>;
-  return <a href={url} target="_blank" rel="noreferrer" style={merged}>{icon} {label}</a>;
-}
-
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// VENDOR SELECT — searchable dropdown
-// ═══════════════════════════════════════════════════════════════════════════════
-function VendorSelect({ vendors, value, onChange, highlighted, placeholder = 'Search & select vendor…' }) {
-  const [q,    setQ]    = useState('');
-  const [open, setOpen] = useState(false);
-  const ref      = useRef();
-  const inputRef = useRef();
-  const selected = vendors.find((v) => v._id === value);
-  const filtered = useMemo(
-    () => vendors.filter((v) => !q || v.companyName?.toLowerCase().includes(q.toLowerCase())),
-    [vendors, q],
-  );
-
-  useEffect(() => {
-    const h = (e) => { if (ref.current && !ref.current.contains(e.target)) { setOpen(false); setQ(''); } };
-    document.addEventListener('mousedown', h);
-    return () => document.removeEventListener('mousedown', h);
-  }, []);
-
-  return (
-    <div ref={ref} style={{ position: 'relative' }}>
-      <div style={{ ...IShi(highlighted), display: 'flex', alignItems: 'center', gap: 6, padding: '0 10px' }}>
-        <Search size={14} color="#94a3b8" style={{ flexShrink: 0 }} />
-        <input
-          ref={inputRef}
-          value={selected && !q ? selected.companyName : q}
-          onChange={(e) => { setQ(e.target.value); setOpen(true); }}
-          onFocus={() => { setOpen(true); if (selected) setQ(''); }}
-          placeholder={placeholder}
-          style={{ flex: 1, border: 'none', outline: 'none', padding: '9px 0', fontSize: 14, background: 'transparent', color: '#0f172a', fontFamily: 'inherit' }}
-        />
-        {value  && <span onClick={(e) => { e.stopPropagation(); onChange(''); setQ(''); inputRef.current?.focus(); setOpen(true); }} style={{ cursor: 'pointer', color: '#94a3b8', display: 'flex', alignItems: 'center', flexShrink: 0 }}><X size={13} /></span>}
-        {!value && <span style={{ color: '#94a3b8', fontSize: 11, flexShrink: 0 }}>{open ? '▲' : '▼'}</span>}
-      </div>
-      {open && (
-        <div style={{ position: 'absolute', top: 'calc(100% + 2px)', left: 0, right: 0, background: '#fff', border: '1.5px solid #3b82f6', borderRadius: 10, boxShadow: '0 12px 32px rgba(0,0,0,0.15)', zIndex: 500, overflow: 'hidden' }}>
-          <div style={{ maxHeight: 240, overflowY: 'auto' }}>
-            {q && filtered.length === 0 && <div style={{ padding: '12px 14px', color: '#94a3b8', fontSize: 13 }}>No vendors match "{q}"</div>}
-            {filtered.map((v) => (
-              <div key={v._id} onClick={() => { onChange(v._id); setOpen(false); setQ(''); }} style={{ padding: '10px 14px', cursor: 'pointer', background: v._id === value ? '#eff6ff' : '#fff', borderBottom: '1px solid #f1f5f9' }}
-                onMouseEnter={(e) => { if (v._id !== value) e.currentTarget.style.background = '#f8fafc'; }}
-                onMouseLeave={(e) => { e.currentTarget.style.background = v._id === value ? '#eff6ff' : '#fff'; }}
-              >
-                <div style={{ fontWeight: v._id === value ? 700 : 500, fontSize: 14, color: v._id === value ? '#1d4ed8' : '#0f172a' }}>{v.companyName}</div>
-                {v.gstNumber && <div style={{ fontSize: 11, color: '#94a3b8', fontFamily: 'monospace', marginTop: 1 }}>GST: {v.gstNumber}</div>}
-              </div>
-            ))}
-            {!q && <div onClick={() => { onChange(''); setOpen(false); }} style={{ padding: '9px 14px', cursor: 'pointer', color: '#94a3b8', fontSize: 12, borderTop: '1px solid #f1f5f9' }}>Clear selection</div>}
-          </div>
-        </div>
-      )}
-    </div>
-  );
-}
-
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// UPLOAD ZONE — drag / paste (Ctrl+V) / click
-// ═══════════════════════════════════════════════════════════════════════════════
-function UploadZone({ label, hint, accept, onFile, preview, onClear, scanning, children }) {
-  const [drag, setDrag] = useState(false);
-  const ref = useRef();
-  const handle = (f) => f && onFile(f);
-
-  useEffect(() => {
-    const h = (e) => {
-      const item = Array.from(e.clipboardData?.items || []).find(
-        (i) => i.type.startsWith('image/') || i.type === 'application/pdf',
-      );
-      if (item) handle(item.getAsFile());
-    };
-    window.addEventListener('paste', h);
-    return () => window.removeEventListener('paste', h);
-  }, []);
-
-  return (
-    <div style={{ marginBottom: 20 }}>
-      {label && (
-        <label style={{ display: 'block', fontSize: 12, fontWeight: 700, color: '#475569', marginBottom: 5, textTransform: 'uppercase', letterSpacing: 0.5 }}>
-          {label}
-          {hint && <span style={{ fontWeight: 400, textTransform: 'none', color: '#94a3b8', marginLeft: 6 }}>{hint}</span>}
-        </label>
-      )}
-      {!preview ? (
-        <div onDragOver={(e) => { e.preventDefault(); setDrag(true); }} onDragLeave={() => setDrag(false)} onDrop={(e) => { e.preventDefault(); setDrag(false); handle(e.dataTransfer.files[0]); }} onClick={() => ref.current?.click()}
-          style={{ border: `2px dashed ${drag ? '#3b82f6' : '#cbd5e1'}`, borderRadius: 12, padding: '28px 20px', textAlign: 'center', background: drag ? '#eff6ff' : '#f8fafc', cursor: 'pointer', transition: 'all 0.2s' }}>
-          <div style={{ fontSize: 30, marginBottom: 6 }}>📎</div>
-          <div style={{ fontSize: 13, fontWeight: 600, color: '#475569', marginBottom: 3 }}>Drop file, paste (Ctrl+V) or click to browse</div>
-          <div style={{ fontSize: 11, color: '#94a3b8' }}>{accept}</div>
-          <input ref={ref} type="file" accept={accept} style={{ display: 'none' }} onChange={(e) => handle(e.target.files[0])} />
-        </div>
-      ) : (
-        <div style={{ position: 'relative', borderRadius: 12, overflow: 'hidden', border: '1.5px solid #e2e8f0', background: '#f8fafc' }}>
-          {preview === 'pdf'
-            ? <div style={{ padding: '18px 20px', display: 'flex', alignItems: 'center', gap: 12 }}><span style={{ fontSize: 32 }}>📄</span><div><div style={{ fontWeight: 700, fontSize: 14 }}>PDF uploaded</div><div style={{ fontSize: 12, color: '#94a3b8' }}>Ready to extract</div></div></div>
-            : <img src={preview} alt="upload" style={{ width: '100%', maxHeight: 200, objectFit: 'cover', display: 'block' }} />}
-          {scanning && (
-            <div style={{ position: 'absolute', inset: 0, background: 'rgba(15,23,42,0.72)', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 10 }}>
-              <div style={{ width: 28, height: 28, border: '3px solid rgba(255,255,255,0.2)', borderTop: '3px solid #fff', borderRadius: '50%', animation: 'spin 0.8s linear infinite' }} />
-              <span style={{ color: '#fff', fontSize: 13, fontWeight: 600 }}>Reading document…</span>
-            </div>
-          )}
-          <button onClick={onClear} style={{ position: 'absolute', top: 8, right: 8, background: 'rgba(0,0,0,0.55)', border: 'none', color: '#fff', borderRadius: '50%', width: 26, height: 26, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-            <X size={14} />
-          </button>
-        </div>
-      )}
-      {children}
-    </div>
-  );
-}
-
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// MODE TOGGLE
-// ═══════════════════════════════════════════════════════════════════════════════
-function ModeToggle({ autoRead, onChange }) {
-  return (
-    <div style={{ display: 'flex', alignItems: 'center', gap: 0, marginBottom: 20, background: '#f1f5f9', borderRadius: 8, padding: 3, width: 'fit-content' }}>
-      {[{ value: false, label: '✏️ Manual Entry', desc: 'Type fields yourself' }, { value: true, label: '✨ Auto Read (AI)', desc: 'Gemini reads the document' }].map(({ value, label, desc }) => (
-        <button key={String(value)} onClick={() => onChange(value)}
-          style={{ padding: '7px 16px', border: 'none', borderRadius: 6, cursor: 'pointer', transition: 'all 0.18s', background: autoRead === value ? '#fff' : 'transparent', boxShadow: autoRead === value ? '0 1px 4px rgba(0,0,0,0.1)' : 'none', fontFamily: jost }}>
-          <div style={{ fontSize: 11, fontWeight: autoRead === value ? 600 : 400, color: autoRead === value ? T.navy : T.muted, whiteSpace: 'nowrap' }}>{label}</div>
-          <div style={{ fontSize: 9, color: autoRead === value ? T.gold : '#cbd5e1', letterSpacing: '0.04em', marginTop: 1 }}>{desc}</div>
-        </button>
-      ))}
-    </div>
-  );
-}
-
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// UPLOAD PI MODAL
-// ═══════════════════════════════════════════════════════════════════════════════
-function UploadPIModal({ vendors, onSave, onClose }) {
-  const [autoRead, setAutoRead] = useState(false);
-  const [af,       setAF]       = useState({});
-  const [saving,   setSaving]   = useState(false);
-  const [err,      setErr]      = useState('');
-  const [dupInfo,  setDupInfo]  = useState(null);
-  const [form,     setForm]     = useState({ piNumber: '', vendor: '', piDate: new Date().toISOString().split('T')[0], dueDate: '', totalAmount: '', currency: 'INR', bankDetails: '', notes: '', items: [] });
-
-  const { fileBase64, fileMime, preview, setFile, clear: clearFile } = useFileReader();
-
-  const set = (k, v) => {
-    setForm((f) => ({ ...f, [k]: v }));
-    setAF((a) => { const n = { ...a }; delete n[k]; return n; });
-  };
-
-  // Called by useGeminiScan after extraction — fills form fields, returns count
-  const onExtracted = useCallback((ex) => {
-    const filled = {};
-    if (ex.invoice_number) filled.piNumber    = ex.invoice_number;
-    if (ex.date)           filled.piDate      = ex.date;
-    if (ex.total_amount)   filled.totalAmount = String(ex.total_amount);
-    if (ex.vendor_name) {
-      const m = vendors.find((v) =>
-        v.companyName?.toLowerCase().includes(ex.vendor_name.toLowerCase()) ||
-        ex.vendor_name.toLowerCase().includes(v.companyName?.toLowerCase()),
-      );
-      if (m) filled.vendor = m._id;
-    }
-    setForm((f) => ({ ...f, ...filled }));
-    setAF(Object.fromEntries(Object.keys(filled).map((k) => [k, true])));
-    return Object.keys(filled).length;
-  }, [vendors]);
-
-  const { scanning, scanRes, scanMsg, scan, reset: resetScan } = useGeminiScan(autoRead, onExtracted);
-
-  const handleFile = async (file) => {
-    await setFile(file);
-    scan(file);
-  };
-
-  const submit = async () => {
-    setErr('');
-    if (!form.vendor)       { setErr('Select a vendor.'); return; }
-    if (!form.piNumber)     { setErr('PI Number required.'); return; }
-    if (!form.totalAmount)  { setErr('Total Amount required.'); return; }
-
-    setSaving(true);
-    try {
-      const fields = { ...form, totalAmount: parseFloat(form.totalAmount) };
-      if (!fields.dueDate) delete fields.dueDate;
-      const fd = buildFormData(fields, fileBase64 ? { fieldName: 'attachment', dataUrl: fileBase64, fallbackMime: fileMime } : null);
-      const res     = await api.post('/payment-tracker/pi', fd, { headers: { 'Content-Type': 'multipart/form-data' } });
-      const resData = res.data;
-      if (res.status === 409 && resData.duplicate) { setDupInfo({ piNumber: resData.piNumber }); setSaving(false); return; }
-      if (res.status >= 400) throw new Error(resData.error);
-      onSave(resData);
-    } catch (e) {
-      setErr(friendlyError(e));
-    }
-    setSaving(false);
-  };
-
-  const missing = [];
-  if (!fileBase64)       missing.push('document');
-  if (!form.piNumber)    missing.push('PI number');
-  if (!form.vendor)      missing.push('vendor');
-  if (!form.totalAmount) missing.push('total amount');
-  const disabled = saving || scanning || missing.length > 0;
-
-  return (
-    <Modal title="Upload Proforma Invoice (PI)" onClose={onClose} wide>
-      <DuplicateOverlay
-        info={dupInfo && { title: 'Duplicate PI', body: `PI number ${dupInfo.piNumber} already exists in the system.`, sub: 'Check the Proforma Invoices tab — it may already be saved. If this is a revised PI, change the number before saving.', retryLabel: 'Change PI Number' }}
-        onRetry={() => setDupInfo(null)}
-        onClose={onClose}
-      />
-
-      <ModeToggle autoRead={autoRead} onChange={(v) => { setAutoRead(v); resetScan(); setAF({}); }} />
-
-      <UploadZone label="PI Document" hint={autoRead ? '— AI will read fields automatically' : '— PDF or image (fields filled manually)'}
-        accept=".pdf,image/*" onFile={handleFile} preview={preview}
-        onClear={() => { clearFile(); resetScan(); }}>
-        <ScanBanner result={scanRes} msg={scanMsg} />
-      </UploadZone>
-
-      <AutoFillBanner count={Object.keys(af).length} />
-      <ErrBox msg={err} />
-
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0 16px' }}>
-        <Field label="PI Number" required>
-          <input style={IShi(af.piNumber)} value={form.piNumber} onChange={(e) => set('piNumber', e.target.value)} placeholder="e.g. PI-2024-001" />
-        </Field>
-        <Field label="Vendor" required hint={af.vendor ? '✓ matched' : ''}>
-          <VendorSelect vendors={vendors} value={form.vendor} onChange={(v) => set('vendor', v)} highlighted={af.vendor} />
-          {!af.vendor && scanRes && <div style={{ fontSize: 11, color: '#f59e0b', marginTop: 4 }}>⚠ Not matched — select manually</div>}
-        </Field>
-      </div>
-
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0 16px' }}>
-        <Field label="PI Date" required><input type="date" style={IShi(af.piDate)} value={form.piDate} onChange={(e) => set('piDate', e.target.value)} /></Field>
-        <Field label="Due Date"><input type="date" style={IShi(af.dueDate)} value={form.dueDate} onChange={(e) => set('dueDate', e.target.value)} /></Field>
-      </div>
-
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0 16px' }}>
-        <Field label="Total Amount" required><input type="number" style={IShi(af.totalAmount)} value={form.totalAmount} onChange={(e) => set('totalAmount', e.target.value)} placeholder="0.00" /></Field>
-        <Field label="Currency"><input style={IShi(af.currency)} value={form.currency} onChange={(e) => set('currency', e.target.value)} /></Field>
-      </div>
-
-      <Field label="Bank / Payment Details"><textarea style={{ ...IShi(af.bankDetails), resize: 'vertical', minHeight: 56 }} value={form.bankDetails} onChange={(e) => set('bankDetails', e.target.value)} placeholder="Bank name, account, IFSC, UPI ID…" /></Field>
-      <Field label="Notes"><textarea style={{ ...IShi(af.notes), resize: 'vertical', minHeight: 48 }} value={form.notes} onChange={(e) => set('notes', e.target.value)} /></Field>
-
-      <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 10, marginTop: 8 }}>
-        <button onClick={onClose} style={{ padding: '10px 20px', borderRadius: 8, border: '1.5px solid #e2e8f0', background: '#fff', color: '#64748b', fontWeight: 600, cursor: 'pointer', fontSize: 14 }}>Cancel</button>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 12, justifyContent: 'flex-end' }}>
-          {missing.length > 0 && !saving && <span style={{ fontSize: 12, color: '#94a3b8' }}>Still needed: {missing.join(', ')}</span>}
-          <button onClick={submit} disabled={disabled} style={{ padding: '10px 24px', borderRadius: 8, border: 'none', background: disabled ? '#e2e8f0' : '#6366f1', color: disabled ? '#94a3b8' : '#fff', fontWeight: 700, cursor: disabled ? 'not-allowed' : 'pointer', fontSize: 14 }}>
-            {saving ? 'Saving…' : 'Save PI'}
-          </button>
-        </div>
-      </div>
-    </Modal>
-  );
-}
-
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// UPLOAD VENDOR INVOICE MODAL
-// ═══════════════════════════════════════════════════════════════════════════════
-/**
- * BUG FIX 1 & 2 are both in this component.
- *
- * Fix 1: when `linkedPiId` is provided on mount (opened from PIFlowModal),
- *        pre-fill vendor_name, vendor_gst, total_amount, notes AND selectedVendorId.
- *
- * Fix 2: when user selects a PI from the "Link to Proforma Invoice" dropdown,
- *        pre-fill the same fields from that PI.
- */
-function UploadInvoiceModal({ vendors, proformaInvoices, linkedPiId, onSave, onClose, refreshVendors }) {
-  const [autoRead,         setAutoRead]         = useState(false);
-  const [af,               setAF]               = useState({});
-  const [saving,           setSaving]           = useState(false);
-  const [err,              setErr]              = useState('');
-  const [gstSaved,         setGstSaved]         = useState(false);
-  const [selectedVendorId, setSelectedVendorId] = useState('');
-  const [dupInfo,          setDupInfo]          = useState(null);
-  const [form,             setForm]             = useState({
-    vendor_name: '', vendor_gst: '', invoice_number: '',
-    date: new Date().toISOString().split('T')[0],
-    total_amount: '', cgst: '0', sgst: '0', igst: '0',
-    financialYear: '', month: '', notes: '', linkedPi: linkedPiId || '',
-  });
-
-  const { fileBase64, fileMime, preview, setFile, clear: clearFile } = useFileReader();
-
-  const set = (k, v) => {
-    setForm((f) => ({ ...f, [k]: v }));
-    setAF((a) => { const n = { ...a }; delete n[k]; return n; });
-  };
-
-  /**
-   * Pre-fill form fields from a PI object.
-   * Used by both the mount effect (Fix 1) and the PI dropdown handler (Fix 2).
-   */
-  const prefillFromPi = useCallback((pi) => {
-    if (!pi) return;
-    const vendor = vendors.find((v) => v._id === String(pi.vendor?._id || pi.vendor || ''));
-    const filled = {};
-    if (pi.vendor?.companyName)  filled.vendor_name  = pi.vendor.companyName;
-    if (pi.vendor?.gstNumber)    { filled.vendor_gst = pi.vendor.gstNumber; setGstSaved(true); }
-    if (pi.totalAmount != null)  filled.total_amount = String(pi.totalAmount);
-    if (pi.notes)                filled.notes        = pi.notes;
-    setForm((f) => ({ ...f, ...filled }));
-    setAF((a) => ({ ...a, ...Object.fromEntries(Object.keys(filled).map((k) => [k, true])) }));
-    if (vendor) setSelectedVendorId(vendor._id);
-  }, [vendors]);
-
-  // FIX 1 — pre-fill from PI when modal opens via PIFlowModal "Upload Invoice"
-  useEffect(() => {
-    if (!linkedPiId) return;
-    const pi = proformaInvoices.find((p) => p._id === linkedPiId);
-    if (pi) prefillFromPi(pi);
-  }, [linkedPiId, proformaInvoices, prefillFromPi]);
-
-  // Auto-fill vendor name + GST from vendor record on dropdown select
-  const handleVendorSelect = useCallback((vendorId) => {
-    setSelectedVendorId(vendorId);
-    if (!vendorId) { set('vendor_name', ''); set('vendor_gst', ''); setGstSaved(false); return; }
-    const vendor = vendors.find((v) => v._id === vendorId);
-    if (vendor) {
-      set('vendor_name', vendor.companyName || '');
-      if (vendor.gstNumber) { set('vendor_gst', vendor.gstNumber); setGstSaved(true); }
-      else { set('vendor_gst', ''); setGstSaved(false); }
-    }
-  }, [vendors]);
-
-  // FIX 2 — pre-fill when user selects a PI from the "Link to PI" dropdown
-  const handleLinkedPiChange = useCallback((piId) => {
-    set('linkedPi', piId);
-    if (!piId) return;
-    const pi = proformaInvoices.find((p) => p._id === piId);
-    if (pi) prefillFromPi(pi);
-  }, [proformaInvoices, prefillFromPi]);
-
-  // Gemini extraction handler
-  const onExtracted = useCallback((ex) => {
-    const filled = {};
-    ['vendor_name', 'vendor_gst', 'invoice_number', 'date', 'financialYear', 'month'].forEach(
-      (k) => { if (ex[k]) filled[k] = ex[k]; },
-    );
-    ['total_amount', 'cgst', 'sgst', 'igst'].forEach(
-      (k) => { if (ex[k] != null) filled[k] = String(ex[k]); },
-    );
-    if (ex.vendor_name && !ex.vendor_gst) {
-      const match = vendors.find(
-        (v) => v.companyName?.toLowerCase().includes(ex.vendor_name.toLowerCase()) ||
-               ex.vendor_name.toLowerCase().includes(v.companyName?.toLowerCase()),
-      );
-      if (match) {
-        setSelectedVendorId(match._id);
-        if (match.gstNumber) { filled.vendor_gst = match.gstNumber; setGstSaved(true); }
-      }
-    }
-    setForm((f) => ({ ...f, ...filled }));
-    setAF(Object.fromEntries(Object.keys(filled).map((k) => [k, true])));
-    return Object.keys(filled).length;
-  }, [vendors]);
-
-  const { scanning, scanRes, scanMsg, scan, reset: resetScan } = useGeminiScan(autoRead, onExtracted);
-
-  const handleFile = async (file) => {
-    await setFile(file);
-    scan(file);
-  };
-
-  const saveGstToVendor = async () => {
-    if (!selectedVendorId || !form.vendor_gst) return;
-    try {
-      await api.patch(`/payment-tracker/vendor-gst/${selectedVendorId}`, { gstNumber: form.vendor_gst });
-      setGstSaved(true);
-      refreshVendors?.();
-    } catch (e) {
-      log.warn('Could not save GST to vendor', e.message);
-    }
-  };
-
-  const submit = async () => {
-    setErr('');
-    if (!form.invoice_number) { setErr('Invoice number required.'); return; }
-    if (!form.total_amount)   { setErr('Total amount required.'); return; }
-    if (selectedVendorId && form.vendor_gst && !gstSaved) await saveGstToVendor();
-
-    setSaving(true);
-    try {
-      const { month, fy } = getFinancialDetails(form.date);
-      const fields = {
-        ...form,
-        total_amount: parseFloat(form.total_amount),
-        cgst: parseFloat(form.cgst) || 0,
-        sgst: parseFloat(form.sgst) || 0,
-        igst: parseFloat(form.igst) || 0,
-        mimeType: fileMime || 'image/jpeg',
-        receivedVia: 'manual_upload',
-        financialYear: form.financialYear || fy,
-        month: form.month || month,
-        notes: form.notes || 'Uploaded via Payment Tracker',
-      };
-      const fd  = buildFormData(fields, fileBase64 ? { fieldName: 'file', dataUrl: fileBase64, fallbackMime: fileMime } : null);
-      const res = await api.post('/payment-tracker/invoices', fd, { headers: { 'Content-Type': 'multipart/form-data' } });
-      const resData = res.data;
-      if (res.status === 409 && resData.duplicate) { setDupInfo({ invoice_number: resData.invoice_number, vendor_name: resData.vendor_name }); setSaving(false); return; }
-      if (res.status >= 400) throw new Error(resData.error || resData.message || 'Save failed');
-      if (form.linkedPi) {
-        await api.patch(`/payment-tracker/pi/${form.linkedPi}`, { status: 'invoiced' }).catch(() => {});
-      }
-      onSave(resData);
-    } catch (e) {
-      setErr(friendlyError(e));
-    }
-    setSaving(false);
-  };
-
-  // GST-aware field visibility
-  const gst     = form.vendor_gst?.trim() || '';
-  const isIntra = gst.length >= 2 && gst.startsWith('29');
-  const isInter = gst.length >= 2 && !isIntra;
-  const dim     = { opacity: 0.35, pointerEvents: 'none', userSelect: 'none' };
-
-  const gst2 = form.vendor_gst?.trim() || '';
-  const isIntra2 = gst2.length >= 2 && gst2.startsWith('29');
-  const isInter2 = gst2.length >= 2 && !isIntra2;
-  const taxOk = isIntra2 ? (parseFloat(form.cgst) > 0 && parseFloat(form.sgst) > 0)
-                          : isInter2 ? (parseFloat(form.igst) > 0)
-                                     : ((parseFloat(form.cgst) > 0 && parseFloat(form.sgst) > 0) || parseFloat(form.igst) > 0);
-  const vendorOk = !!(selectedVendorId || form.vendor_name?.trim());
-
-  const missing = [];
-  if (!fileBase64)          missing.push('document');
-  if (!form.invoice_number) missing.push('invoice number');
-  if (!vendorOk)            missing.push('vendor name');
-  if (!form.vendor_gst?.trim()) missing.push('GSTIN');
-  if (!form.total_amount)   missing.push('total amount');
-  if (!taxOk)               missing.push(isInter2 ? 'IGST' : 'CGST & SGST');
-  const disabled = saving || scanning || missing.length > 0;
-
-  return (
-    <Modal title="Upload Vendor Invoice" onClose={onClose} wide>
-      <DuplicateOverlay
-        info={dupInfo && { title: 'Duplicate Invoice', body: `Invoice #${dupInfo.invoice_number} from ${dupInfo.vendor_name} already exists in your vault.`, sub: 'This invoice has been uploaded before. No duplicate was saved.', retryLabel: 'Check Again' }}
-        onRetry={() => setDupInfo(null)}
-        onClose={onClose}
-      />
-
-      <ModeToggle autoRead={autoRead} onChange={(v) => { setAutoRead(v); resetScan(); setAF({}); }} />
-
-      <UploadZone label="Invoice Document" hint={autoRead ? '— AI will read fields automatically' : '— PDF or image (fill fields manually below)'}
-        accept=".pdf,image/*" onFile={handleFile} preview={preview}
-        onClear={() => { clearFile(); resetScan(); }}>
-        <ScanBanner result={scanRes} msg={scanMsg} />
-      </UploadZone>
-
-      <AutoFillBanner count={Object.keys(af).length} />
-      <ErrBox msg={err} />
-
-      {/* FIX 2 — onChange now triggers prefillFromPi */}
-      <Field label="Link to Proforma Invoice" hint="optional — auto-fills vendor details">
-        <select style={IS} value={form.linkedPi} onChange={(e) => handleLinkedPiChange(e.target.value)}>
-          <option value="">— Not linked to any PI —</option>
-          {proformaInvoices
-            .filter((p) => p.status !== 'cancelled')
-            .map((pi) => (
-              <option key={pi._id} value={pi._id}>
-                {pi.piNumber} · {pi.vendor?.companyName} · {fmt(pi.totalAmount)}
-              </option>
-            ))}
-        </select>
-      </Field>
-
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0 16px' }}>
-        <Field label="Vendor" required hint="GST auto-fills · type name if not in list">
-          <VendorSelect vendors={vendors} value={selectedVendorId} onChange={handleVendorSelect} highlighted={!!af.vendor_name} placeholder="Search & select vendor…" />
-          {!selectedVendorId && (
-            <input style={{ ...IS, marginTop: 6, fontSize: 13, background: af.vendor_name ? '#eff6ff' : '#fff', border: af.vendor_name ? '1.5px solid #3b82f6' : '1.5px solid #e2e8f0' }}
-              value={form.vendor_name} onChange={(e) => set('vendor_name', e.target.value)} placeholder="Or type vendor name manually…" />
-          )}
-        </Field>
-        <Field label="Vendor GSTIN" hint={gstSaved ? '✓ saved to vendor' : selectedVendorId && !form.vendor_gst ? 'Enter to save for next time' : ''}>
-          <div style={{ position: 'relative' }}>
-            <input style={IShi(af.vendor_gst)} value={form.vendor_gst} onChange={(e) => { set('vendor_gst', e.target.value); setGstSaved(false); }} placeholder="15-char GSTIN" maxLength={15} />
-            {selectedVendorId && form.vendor_gst && !gstSaved && (
-              <button onClick={saveGstToVendor} style={{ position: 'absolute', right: 8, top: '50%', transform: 'translateY(-50%)', background: '#10b981', color: '#fff', border: 'none', borderRadius: 6, padding: '3px 8px', fontSize: 11, fontWeight: 700, cursor: 'pointer' }}>
-                Save to Vendor
-              </button>
-            )}
-          </div>
-          {gstSaved && <div style={{ fontSize: 11, color: '#10b981', marginTop: 3 }}>✓ GST registered for this vendor</div>}
-        </Field>
-      </div>
-
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0 16px' }}>
-        <Field label="Invoice Number" required><input style={IShi(af.invoice_number)} value={form.invoice_number} onChange={(e) => set('invoice_number', e.target.value)} /></Field>
-        <Field label="Invoice Date" required><input type="date" style={IShi(af.date)} value={form.date} onChange={(e) => set('date', e.target.value)} /></Field>
-      </div>
-
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr 1fr', gap: '0 12px' }}>
-        <Field label="Total Amount" required><input type="number" style={IShi(af.total_amount)} value={form.total_amount} onChange={(e) => set('total_amount', e.target.value)} placeholder="0" /></Field>
-        <Field label="CGST" hint={isInter ? 'N/A – inter-state' : ''}>
-          <div style={isInter ? dim : {}}>
-            <input type="number" style={IShi(af.cgst)} value={isInter ? '0' : form.cgst} onChange={(e) => { if (!isInter) set('cgst', e.target.value); }} placeholder="0" disabled={isInter} />
-          </div>
-        </Field>
-        <Field label="SGST" hint={isInter ? 'N/A – inter-state' : ''}>
-          <div style={isInter ? dim : {}}>
-            <input type="number" style={IShi(af.sgst)} value={isInter ? '0' : form.sgst} onChange={(e) => { if (!isInter) set('sgst', e.target.value); }} placeholder="0" disabled={isInter} />
-          </div>
-        </Field>
-        <Field label="IGST" hint={isIntra ? 'N/A – intra-state' : ''}>
-          <div style={isIntra ? dim : {}}>
-            <input type="number" style={IShi(af.igst)} value={isIntra ? '0' : form.igst} onChange={(e) => { if (!isIntra) set('igst', e.target.value); }} placeholder="0" disabled={isIntra} />
-          </div>
-        </Field>
-      </div>
-
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0 16px' }}>
-        <Field label="Financial Year"><input style={IShi(af.financialYear)} value={form.financialYear} onChange={(e) => set('financialYear', e.target.value)} placeholder="e.g. 2024-25" /></Field>
-        <Field label="Month"><input style={IShi(af.month)} value={form.month} onChange={(e) => set('month', e.target.value)} placeholder="e.g. March" /></Field>
-      </div>
-
-      <Field label="Notes"><textarea style={{ ...IS, resize: 'vertical', minHeight: 48 }} value={form.notes} onChange={(e) => set('notes', e.target.value)} /></Field>
-
-      <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 10, marginTop: 8 }}>
-        <button onClick={onClose} style={{ padding: '10px 20px', borderRadius: 8, border: '1.5px solid #e2e8f0', background: '#fff', color: '#64748b', fontWeight: 600, cursor: 'pointer', fontSize: 14 }}>Cancel</button>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 12, justifyContent: 'flex-end' }}>
-          {missing.length > 0 && !saving && <span style={{ fontSize: 12, color: '#94a3b8' }}>Still needed: {missing.join(', ')}</span>}
-          <button onClick={submit} disabled={disabled} style={{ padding: '10px 24px', borderRadius: 8, border: 'none', background: disabled ? '#e2e8f0' : '#0891b2', color: disabled ? '#94a3b8' : '#fff', fontWeight: 700, cursor: disabled ? 'not-allowed' : 'pointer', fontSize: 14 }}>
-            {saving ? 'Saving…' : 'Save Invoice'}
-          </button>
-        </div>
-      </div>
-    </Modal>
-  );
-}
-
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// RECORD PAYMENT MODAL
-// ═══════════════════════════════════════════════════════════════════════════════
-/**
- * FIX 3 — When a vendor is selected:
- *   - "Against PI" list shows only that vendor's open PIs (was already working)
- *   - "Against Invoice" list now filters by vendor name match (was showing ALL open invoices)
- *   - Switching vendor resets any stale PI / invoice selection
- */
-function RecordPaymentModal({ vendors, proformaInvoices, vendorInvoices, payments, onSave, onClose }) {
-  const [autoRead, setAutoRead] = useState(false);
-  const [af,       setAF]       = useState({});
-  const [saving,   setSaving]   = useState(false);
-  const [err,      setErr]      = useState('');
-  const [piSearch, setPiSearch] = useState('');
-  const [invSearch,setInvSearch]= useState('');
-  const [form,     setForm]     = useState({
-    vendor: '', paymentDate: new Date().toISOString().split('T')[0],
-    amount: '', currency: 'INR', paymentMode: 'neft',
-    bankRef: '', remarks: '', mappedTo: 'advance',
-    proformaInvoice: '', vendorInvoice: '',
-  });
-
-  const { fileBase64, fileMime, preview, setFile, clear: clearFile } = useFileReader();
-
-  // Memoised payment aggregation — O(n) once, not on every render
-  const paidByInvoice = usePaidByInvoice(payments);
-
-  const set = (k, v) => {
-    setForm((f) => ({ ...f, [k]: v }));
-    setAF((a) => { const n = { ...a }; delete n[k]; return n; });
-  };
-
-  // FIX 3 — resetting PI/invoice selection when vendor changes
-  const handleVendorChange = (vendorId) => {
-    setForm((f) => ({ ...f, vendor: vendorId, proformaInvoice: '', vendorInvoice: '' }));
-    setAF((a) => { const n = { ...a }; delete n.vendor; return n; });
-    setPiSearch('');
-    setInvSearch('');
-  };
-
-  // PIs filtered by selected vendor (existing behaviour, unchanged)
-  const filteredPIs = useMemo(
-    () => proformaInvoices.filter((pi) => !form.vendor || pi.vendor?._id === form.vendor),
-    [proformaInvoices, form.vendor],
-  );
-
-  // FIX 3 — invoices now filtered by selected vendor name
-  const invoicesWithDue = useMemo(() => {
-    const selectedVendor = vendors.find((v) => v._id === form.vendor);
-    return vendorInvoices.filter((vi) => {
-      const paid = paidByInvoice[String(vi._id)] || 0;
-      if (vi.total_amount - paid <= 0) return false;            // no balance
-      if (!form.vendor || !selectedVendor) return true;         // no vendor filter active
-      const viName  = (vi.vendor_name || '').toLowerCase();
-      const selName = selectedVendor.companyName.toLowerCase();
-      return viName.includes(selName) || selName.includes(viName);
-    });
-  }, [vendorInvoices, paidByInvoice, form.vendor, vendors]);
-
-  const onExtracted = useCallback((ex) => {
-    const filled = {};
-    if (ex.total_amount) filled.amount      = String(ex.total_amount);
-    if (ex.date)         filled.paymentDate = ex.date;
-    if (ex.vendor_name) {
-      const m = vendors.find(
-        (v) => v.companyName?.toLowerCase().includes(ex.vendor_name.toLowerCase()) ||
-               ex.vendor_name.toLowerCase().includes(v.companyName?.toLowerCase()),
-      );
-      if (m) filled.vendor = m._id;
-    }
-    setForm((f) => ({ ...f, ...filled }));
-    setAF(Object.fromEntries(Object.keys(filled).map((k) => [k, true])));
-    return Object.keys(filled).length;
-  }, [vendors]);
-
-  const { scanning, scanRes, scanMsg, scan, reset: resetScan } = useGeminiScan(autoRead, onExtracted);
-
-  const handleFile = async (file) => {
-    await setFile(file);
-    scan(file);
-  };
-
-  const submit = async () => {
-    setErr('');
-    if (!form.amount || !form.paymentDate)                               { setErr('Amount and date required.'); return; }
-    if (form.mappedTo === 'proforma_invoice' && !form.proformaInvoice) { setErr('Select a PI.'); return; }
-    if (form.mappedTo === 'vendor_invoice'   && !form.vendorInvoice)   { setErr('Select an Invoice.'); return; }
-
-    setSaving(true);
-    try {
-      const payload = { ...form, amount: parseFloat(form.amount) };
-      if (payload.mappedTo !== 'proforma_invoice') delete payload.proformaInvoice;
-      if (payload.mappedTo !== 'vendor_invoice')   delete payload.vendorInvoice;
-      if (!payload.vendor) delete payload.vendor;
-      const fd  = buildFormData(payload, fileBase64 ? { fieldName: 'screenshot', dataUrl: fileBase64, fallbackMime: fileMime } : null);
-      const res = await api.post('/payment-tracker/payments', fd, { headers: { 'Content-Type': 'multipart/form-data' } });
-      if (res.status >= 400) throw new Error(res.data.error);
-      onSave(res.data);
-    } catch (e) {
-      setErr(friendlyError(e));
-    }
-    setSaving(false);
-  };
-
-  const selectedPI  = proformaInvoices.find((p) => p._id === form.proformaInvoice);
-  const payAmt      = parseFloat(form.amount) || 0;
-
-  // PI list section — extracted from IIFE to named variable for readability
-  const openPIs = filteredPIs.filter((p) => p.status !== 'cancelled' && p.amountDue > 0);
-  const searchedPIs = piSearch
-    ? openPIs.filter((pi) => pi.piNumber?.toLowerCase().includes(piSearch.toLowerCase()) || pi.vendor?.companyName?.toLowerCase().includes(piSearch.toLowerCase()))
-    : openPIs;
-
-  // Invoice list section
-  const amountMatchedInvs = payAmt > 0
-    ? invoicesWithDue.filter((vi) => { const due = vi.total_amount - (paidByInvoice[String(vi._id)] || 0); return Math.abs(due - payAmt) <= 2; })
-    : invoicesWithDue;
-  const searchedInvs = invSearch
-    ? amountMatchedInvs.filter((vi) => vi.invoice_number?.toLowerCase().includes(invSearch.toLowerCase()) || vi.vendor_name?.toLowerCase().includes(invSearch.toLowerCase()))
-    : amountMatchedInvs;
-  const selectedInv = invoicesWithDue.find((vi) => vi._id === form.vendorInvoice);
-
-  return (
-    <Modal title="Record Payment" onClose={onClose} wide>
-      <ModeToggle autoRead={autoRead} onChange={(v) => { setAutoRead(v); resetScan(); setAF({}); }} />
-
-      <UploadZone label="Payment Screenshot" hint={autoRead ? '— AI will read amount & date automatically' : '— paste Ctrl+V or drag (fill fields manually)'}
-        accept="image/*" onFile={handleFile} preview={preview}
-        onClear={() => { clearFile(); resetScan(); }}>
-        <ScanBanner result={scanRes} msg={scanMsg} />
-      </UploadZone>
-
-      <AutoFillBanner count={Object.keys(af).length} />
-      <ErrBox msg={err} />
-
-      {/* FIX 3 — uses handleVendorChange instead of set('vendor', v) */}
-      <Field label="Vendor" hint="auto-detected or select">
-        <VendorSelect vendors={vendors} value={form.vendor} onChange={handleVendorChange} highlighted={af.vendor} placeholder="Unknown / select later" />
-      </Field>
-
-      <Field label="Map Payment Against" required>
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 8 }}>
-          {[
-            ['advance',          '💰 Advance',          'Map later'],
-            ['proforma_invoice', '📋 Against PI',       'PI exists'],
-            ['vendor_invoice',   '🧾 Against Invoice',  'Final invoice received'],
-          ].map(([val, lbl, sub]) => (
-            <button key={val} onClick={() => set('mappedTo', val)} style={{ padding: '10px 8px', borderRadius: 10, border: `2px solid ${form.mappedTo === val ? '#3b82f6' : '#e2e8f0'}`, background: form.mappedTo === val ? '#eff6ff' : '#fff', cursor: 'pointer', textAlign: 'center', transition: 'all 0.15s' }}>
-              <div style={{ fontWeight: 700, fontSize: 13, color: form.mappedTo === val ? '#1d4ed8' : '#475569' }}>{lbl}</div>
-              <div style={{ fontSize: 11, color: '#94a3b8', marginTop: 2 }}>{sub}</div>
-            </button>
-          ))}
-        </div>
-      </Field>
-
-      {/* Proforma Invoice selector */}
-      {form.mappedTo === 'proforma_invoice' && (
-        <Field label="Proforma Invoice" required>
-          <SearchableList
-            items={searchedPIs}
-            search={piSearch}
-            onSearch={(v) => { setPiSearch(v); set('proformaInvoice', ''); }}
-            selectedId={form.proformaInvoice}
-            onSelect={(pi) => { set('proformaInvoice', pi._id); setPiSearch(''); }}
-            emptyMsg={piSearch ? `No PIs match "${piSearch}"` : 'No open PIs with outstanding balance'}
-            renderRow={(pi, selected) => (
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                <div>
-                  <div style={{ fontWeight: 700, fontSize: 13, color: selected ? '#1d4ed8' : '#0f172a' }}>{pi.piNumber}</div>
-                  <div style={{ fontSize: 11, color: '#64748b' }}>{pi.vendor?.companyName}</div>
-                </div>
-                <div style={{ textAlign: 'right' }}>
-                  <div style={{ fontSize: 13, fontWeight: 800, color: '#ef4444' }}>Due: {fmt(pi.amountDue)}</div>
-                  <div style={{ fontSize: 11, color: '#94a3b8' }}>of {fmt(pi.totalAmount)}</div>
-                </div>
-              </div>
-            )}
-            placeholder="Search by PI number or vendor…"
-          />
-          {selectedPI && <SummaryRow total={selectedPI.totalAmount} paid={selectedPI.amountPaid} due={selectedPI.amountDue} />}
-        </Field>
-      )}
-
-      {/* Vendor Invoice selector — FIX 3: now vendor-filtered */}
-      {form.mappedTo === 'vendor_invoice' && (
-        <Field label="Vendor Invoice" required hint={payAmt > 0 ? `showing invoices with outstanding ≈ ${fmt(payAmt)} (±₹2)` : 'showing invoices with outstanding balance only'}>
-          <SearchableList
-            items={searchedInvs}
-            search={invSearch}
-            onSearch={(v) => { setInvSearch(v); set('vendorInvoice', ''); }}
-            selectedId={form.vendorInvoice}
-            onSelect={(vi) => { set('vendorInvoice', vi._id); setInvSearch(''); }}
-            emptyMsg={
-              invoicesWithDue.length === 0 ? '✓ All invoices are fully paid'
-                : invSearch ? `No invoices match "${invSearch}"`
-                : payAmt > 0 ? `No invoices with outstanding ≈ ${fmt(payAmt)} (±₹2)`
-                : 'No open invoices found'
-            }
-            renderRow={(vi, selected) => {
-              const due = vi.total_amount - (paidByInvoice[String(vi._id)] || 0);
-              return (
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                  <div>
-                    <div style={{ fontWeight: 700, fontSize: 13, color: selected ? '#0891b2' : '#0f172a' }}>{vi.invoice_number}</div>
-                    <div style={{ fontSize: 11, color: '#64748b' }}>{vi.vendor_name}</div>
-                  </div>
-                  <div style={{ textAlign: 'right' }}>
-                    <div style={{ fontSize: 13, fontWeight: 800, color: '#ef4444' }}>Due: {fmt(due)}</div>
-                    <div style={{ fontSize: 11, color: '#94a3b8' }}>of {fmt(vi.total_amount)}</div>
-                  </div>
-                </div>
-              );
-            }}
-            placeholder="Search by invoice number or vendor…"
-          />
-          {selectedInv && (
-            <SummaryRow
-              total={selectedInv.total_amount}
-              paid={paidByInvoice[String(selectedInv._id)] || 0}
-              due={selectedInv.total_amount - (paidByInvoice[String(selectedInv._id)] || 0)}
-            />
-          )}
-        </Field>
-      )}
-
-      {form.mappedTo === 'advance' && (
-        <div style={{ padding: '12px 16px', background: '#fefce8', border: '1px solid #fde68a', borderRadius: 10, marginBottom: 16, fontSize: 13, color: '#92400e' }}>
-          💡 Saved as <b>advance</b> — map to PI or Invoice later.
-        </div>
-      )}
-
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0 16px' }}>
-        <Field label="Amount" required><input type="number" style={IShi(af.amount)} value={form.amount} onChange={(e) => set('amount', e.target.value)} placeholder="0.00" /></Field>
-        <Field label="Payment Date" required><input type="date" style={IShi(af.paymentDate)} value={form.paymentDate} onChange={(e) => set('paymentDate', e.target.value)} /></Field>
-      </div>
-
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0 16px' }}>
-        <Field label="Payment Mode">
-          <select style={IShi(af.paymentMode)} value={form.paymentMode} onChange={(e) => set('paymentMode', e.target.value)}>
-            {['neft', 'rtgs', 'imps', 'upi', 'cheque', 'cash', 'other'].map((m) => <option key={m} value={m}>{m.toUpperCase()}</option>)}
-          </select>
-        </Field>
-        <Field label="Bank Ref / UTR"><input style={IShi(af.bankRef)} value={form.bankRef} onChange={(e) => set('bankRef', e.target.value)} placeholder="UTR / UPI ref" /></Field>
-      </div>
-
-      <Field label="Remarks"><textarea style={{ ...IShi(af.remarks), resize: 'vertical', minHeight: 48 }} value={form.remarks} onChange={(e) => set('remarks', e.target.value)} /></Field>
-
-      <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 10, marginTop: 8 }}>
-        <button onClick={onClose} style={{ padding: '10px 20px', borderRadius: 8, border: '1.5px solid #e2e8f0', background: '#fff', color: '#64748b', fontWeight: 600, cursor: 'pointer', fontSize: 14 }}>Cancel</button>
-        <button onClick={submit} disabled={saving} style={{ padding: '10px 24px', borderRadius: 8, border: 'none', background: saving ? '#94a3b8' : '#1d4ed8', color: '#fff', fontWeight: 700, cursor: saving ? 'not-allowed' : 'pointer', fontSize: 14 }}>
-          {saving ? 'Saving…' : form.mappedTo === 'advance' ? 'Save as Advance' : 'Record Payment'}
-        </button>
-      </div>
-    </Modal>
-  );
-}
-
-
-// ─── Shared sub-components used by RecordPaymentModal and MapAdvanceModal ──────
-
-/** Scrollable list with a search input, used for PI and Invoice selectors. */
-function SearchableList({ items, search, onSearch, selectedId, onSelect, emptyMsg, renderRow, placeholder }) {
-  return (
-    <>
-      <div style={{ position: 'relative', marginBottom: 6 }}>
-        <Search size={14} style={{ position: 'absolute', left: 10, top: '50%', transform: 'translateY(-50%)', color: '#94a3b8' }} />
-        <input value={search} onChange={(e) => onSearch(e.target.value)} placeholder={placeholder} style={{ ...IS, paddingLeft: 32, fontSize: 13 }} />
-        {search && (
-          <button onClick={() => onSearch('')} style={{ position: 'absolute', right: 8, top: '50%', transform: 'translateY(-50%)', background: 'none', border: 'none', cursor: 'pointer', color: '#94a3b8', display: 'flex', alignItems: 'center' }}>
-            <X size={13} />
-          </button>
-        )}
-      </div>
-      <div style={{ border: '1.5px solid #e2e8f0', borderRadius: 8, overflow: 'hidden', maxHeight: 220, overflowY: 'auto' }}>
-        {items.length === 0 ? (
-          <div style={{ padding: '14px 12px', color: '#94a3b8', fontSize: 13, textAlign: 'center' }}>{emptyMsg}</div>
-        ) : (
-          items.map((item) => {
-            const isSelected = item._id === selectedId;
-            return (
-              <div key={item._id}
-                onClick={() => onSelect(item)}
-                style={{ padding: '10px 14px', cursor: 'pointer', borderBottom: '1px solid #f1f5f9', background: isSelected ? '#eff6ff' : '#fff', borderLeft: isSelected ? '3px solid #3b82f6' : '3px solid transparent' }}
-                onMouseEnter={(e) => { if (!isSelected) e.currentTarget.style.background = '#f8fafc'; }}
-                onMouseLeave={(e) => { e.currentTarget.style.background = isSelected ? '#eff6ff' : '#fff'; }}
-              >
-                {renderRow(item, isSelected)}
-              </div>
-            );
-          })
-        )}
-      </div>
-    </>
-  );
-}
-
-/** Three-column Total / Paid / Due summary strip. */
-function SummaryRow({ total, paid, due }) {
-  return (
-    <div style={{ marginTop: 8, display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 6 }}>
-      {[['Total', fmt(total), '#0f172a'], ['Paid', fmt(paid), '#10b981'], ['Due', fmt(due), '#ef4444']].map(([l, v, c]) => (
-        <div key={l} style={{ padding: '7px 10px', background: '#f8fafc', borderRadius: 8 }}>
-          <div style={{ fontSize: 10, color: '#94a3b8', textTransform: 'uppercase', fontWeight: 700 }}>{l}</div>
-          <div style={{ fontSize: 13, fontWeight: 700, color: c }}>{v}</div>
-        </div>
-      ))}
-    </div>
-  );
-}
-
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// MAP ADVANCE MODAL (unchanged logic, uses shared SearchableList + SummaryRow)
-// ═══════════════════════════════════════════════════════════════════════════════
-function MapAdvanceModal({ payment, proformaInvoices, vendorInvoices, payments, onSave, onClose }) {
-  const [mt,       setMt]     = useState('proforma_invoice');
-  const [piId,     setPiId]   = useState('');
-  const [viId,     setViId]   = useState('');
-  const [piSearch, setPiSearch] = useState('');
-  const [viSearch, setViSearch] = useState('');
-  const [saving,   setSaving] = useState(false);
-  const [err,      setErr]    = useState('');
-
-  const paidByInvoice = usePaidByInvoice(payments);
-  const payVendorId   = String(payment.vendor?._id || payment.vendor || '');
-
-  const vendorPIs = useMemo(() => proformaInvoices.filter((pi) => {
-    const piVendorId = String(pi.vendor?._id || pi.vendor || '');
-    const sameVendor = payVendorId && piVendorId ? piVendorId === payVendorId : true;
-    return sameVendor && pi.amountDue > 0 && pi.status !== 'cancelled';
-  }), [proformaInvoices, payVendorId]);
-
-  const searchedPIs = piSearch
-    ? vendorPIs.filter((pi) => pi.piNumber?.toLowerCase().includes(piSearch.toLowerCase()) || pi.vendor?.companyName?.toLowerCase().includes(piSearch.toLowerCase()))
-    : vendorPIs;
-
-  const matchedVendorInvoices = useMemo(() => vendorInvoices.filter((vi) => {
-    const viVendorName  = (vi.vendor_name || '').toLowerCase();
-    const payVendorName = (payment.vendor?.companyName || '').toLowerCase();
-    const sameVendor    = payVendorName ? viVendorName.includes(payVendorName) || payVendorName.includes(viVendorName) : true;
-    const due = (vi.total_amount || 0) - (paidByInvoice[String(vi._id)] || 0);
-    return sameVendor && due > 0;
-  }), [vendorInvoices, paidByInvoice, payment.vendor]);
-
-  const searchedVIs = viSearch
-    ? matchedVendorInvoices.filter((vi) => vi.invoice_number?.toLowerCase().includes(viSearch.toLowerCase()) || vi.vendor_name?.toLowerCase().includes(viSearch.toLowerCase()))
-    : matchedVendorInvoices;
-
-  const selectedPI = proformaInvoices.find((p) => p._id === piId);
-  const selectedVI = vendorInvoices.find((vi) => vi._id === viId);
-
-  const submit = async () => {
-    setErr('');
-    if (mt === 'proforma_invoice' && !piId) { setErr('Select a PI.'); return; }
-    if (mt === 'vendor_invoice'   && !viId) { setErr('Select an Invoice.'); return; }
-    setSaving(true);
-    try {
-      const res = await api.patch(`/payment-tracker/payments/${payment._id}/map`, {
-        mappedTo: mt,
-        proformaInvoice: piId || undefined,
-        vendorInvoice:   viId || undefined,
-      });
-      if (res.status >= 400) throw new Error(res.data.error);
-      onSave(res.data);
-    } catch (e) {
-      setErr(e.message);
-    }
-    setSaving(false);
-  };
-
-  return (
-    <Modal title="Map Advance Payment" onClose={onClose}>
-      <div style={{ padding: '14px 16px', background: '#f8fafc', borderRadius: 12, marginBottom: 20, display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 8 }}>
-        {[['Ref', payment.paymentRef, '#1d4ed8'], ['Amount', fmt(payment.amount), '#10b981'], ['Vendor', payment.vendor?.companyName || '—', '#0f172a'], ['Date', fmtDate(payment.paymentDate), '#475569'], ['Mode', payment.paymentMode?.toUpperCase(), '#475569']].map(([l, v, c]) => (
-          <div key={l}>
-            <div style={{ fontSize: 11, color: '#94a3b8', textTransform: 'uppercase', fontWeight: 700 }}>{l}</div>
-            <div style={{ fontSize: 13, fontWeight: 700, color: c }}>{v}</div>
-          </div>
-        ))}
-      </div>
-
-      <ErrBox msg={err} />
-
-      <Field label="Map To">
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
-          {[['proforma_invoice', '📋 Proforma Invoice (PI)'], ['vendor_invoice', '🧾 Vendor Invoice']].map(([val, lbl]) => (
-            <button key={val} onClick={() => setMt(val)} style={{ padding: '12px 8px', borderRadius: 10, border: `2px solid ${mt === val ? '#3b82f6' : '#e2e8f0'}`, background: mt === val ? '#eff6ff' : '#fff', fontWeight: 700, fontSize: 13, color: mt === val ? '#1d4ed8' : '#475569', cursor: 'pointer' }}>
-              {lbl}
-            </button>
-          ))}
-        </div>
-      </Field>
-
-      {mt === 'proforma_invoice' && (
-        <Field label={`Select PI${vendorPIs.length === 0 ? '' : ` — ${vendorPIs.length} available`}`}>
-          <SearchableList items={searchedPIs} search={piSearch} onSearch={(v) => { setPiSearch(v); setPiId(''); }} selectedId={piId} onSelect={(pi) => { setPiId(pi._id); setPiSearch(''); }}
-            emptyMsg={vendorPIs.length === 0 ? `No open PIs for ${payment.vendor?.companyName || 'this vendor'}.` : `No PIs match "${piSearch}"`}
-            renderRow={(pi, sel) => (
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                <div><div style={{ fontWeight: 700, fontSize: 13, color: sel ? '#1d4ed8' : '#0f172a' }}>{pi.piNumber}</div><div style={{ fontSize: 11, color: '#64748b' }}>{pi.vendor?.companyName}</div></div>
-                <div style={{ textAlign: 'right' }}><div style={{ fontSize: 13, fontWeight: 800, color: '#ef4444' }}>Due: {fmt(pi.amountDue)}</div><div style={{ fontSize: 11, color: '#94a3b8' }}>of {fmt(pi.totalAmount)}</div></div>
-              </div>
-            )}
-            placeholder="Search by PI number or vendor…"
-          />
-          {selectedPI && <SummaryRow total={selectedPI.totalAmount} paid={selectedPI.amountPaid} due={selectedPI.amountDue} />}
-          {selectedPI && payment.amount > selectedPI.amountDue && (
-            <div style={{ marginTop: 8, padding: '8px 12px', background: '#fef2f2', border: '1px solid #fca5a5', borderRadius: 8, fontSize: 12, color: '#dc2626', fontWeight: 600 }}>
-              ⚠ Payment ({fmt(payment.amount)}) exceeds PI balance ({fmt(selectedPI.amountDue)})
-            </div>
-          )}
-        </Field>
-      )}
-
-      {mt === 'vendor_invoice' && (
-        <Field label={`Select Invoice${matchedVendorInvoices.length === 0 ? '' : ` — ${matchedVendorInvoices.length} available`}`}>
-          <SearchableList items={searchedVIs} search={viSearch} onSearch={(v) => { setViSearch(v); setViId(''); }} selectedId={viId} onSelect={(vi) => { setViId(vi._id); setViSearch(''); }}
-            emptyMsg={matchedVendorInvoices.length === 0 ? `No open invoices for ${payment.vendor?.companyName || 'this vendor'}.` : `No invoices match "${viSearch}"`}
-            renderRow={(vi, sel) => {
-              const due = (vi.total_amount || 0) - (paidByInvoice[String(vi._id)] || 0);
-              return (
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                  <div><div style={{ fontWeight: 700, fontSize: 13, color: sel ? '#0891b2' : '#0f172a' }}>{vi.invoice_number}</div><div style={{ fontSize: 11, color: '#64748b' }}>{vi.vendor_name}</div></div>
-                  <div style={{ textAlign: 'right' }}><div style={{ fontSize: 13, fontWeight: 800, color: '#ef4444' }}>Due: {fmt(due)}</div><div style={{ fontSize: 11, color: '#94a3b8' }}>of {fmt(vi.total_amount)}</div></div>
-                </div>
-              );
-            }}
-            placeholder="Search by Invoice number or vendor…"
-          />
-          {selectedVI && (() => {
-            const due = (selectedVI.total_amount || 0) - (paidByInvoice[String(selectedVI._id)] || 0);
-            return (
-              <>
-                <SummaryRow total={selectedVI.total_amount} paid={paidByInvoice[String(selectedVI._id)] || 0} due={due} />
-                {payment.amount > due && (
-                  <div style={{ marginTop: 8, padding: '8px 12px', background: '#fef2f2', border: '1px solid #fca5a5', borderRadius: 8, fontSize: 12, color: '#dc2626', fontWeight: 600 }}>
-                    ⚠ Payment ({fmt(payment.amount)}) exceeds Invoice balance ({fmt(due)})
-                  </div>
-                )}
-              </>
-            );
-          })()}
-        </Field>
-      )}
-
-      <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 10, marginTop: 8 }}>
-        <button onClick={onClose} style={{ padding: '10px 20px', borderRadius: 8, border: '1.5px solid #e2e8f0', background: '#fff', color: '#64748b', fontWeight: 600, cursor: 'pointer', fontSize: 14 }}>Cancel</button>
-        <button onClick={submit} disabled={saving} style={{ padding: '10px 24px', borderRadius: 8, border: 'none', background: saving ? '#94a3b8' : '#10b981', color: '#fff', fontWeight: 700, cursor: saving ? 'not-allowed' : 'pointer', fontSize: 14 }}>
-          {saving ? 'Mapping…' : 'Confirm Mapping'}
-        </button>
-      </div>
-    </Modal>
-  );
-}
-
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// PI FLOW MODAL
-// ═══════════════════════════════════════════════════════════════════════════════
-/**
- * FIX 4 — api.post('/payments/link-to-invoice') was passing a fetch() options
- * object as the axios body. Fixed to pass { piId, invoiceId } directly.
- */
-function PIFlowModal({ pi: piProp, payments, invoices, onMapPayment, onUploadInvoice, onClose, onRefresh }) {
-  const [pi,        setPi]        = React.useState(piProp);
-  const [linkingId, setLinkingId] = React.useState(null);
-  const [linkErr,   setLinkErr]   = React.useState('');
-
-  React.useEffect(() => { setPi(piProp); }, [piProp]);
-
-  const piId = String(pi._id);
-
-  const piPayments = payments.filter((p) => {
-    const pPiId = String(p.proformaInvoice?._id || p.proformaInvoice || '');
-    return p.mappedTo === 'proforma_invoice' && pPiId === piId;
-  });
-
-  const linkedInvoice = pi.finalInvoice
-    ? invoices.find((inv) => {
-        const fiId = String(pi.finalInvoice?._id || pi.finalInvoice);
-        return fiId === String(inv._id);
-      }) || null
-    : null;
-
-  const suggestedInvoices = !linkedInvoice
-    ? invoices.filter((inv) =>
-        inv.vendor_name && pi.vendor?.companyName &&
-        (inv.vendor_name.toLowerCase().includes(pi.vendor.companyName.toLowerCase()) ||
-         pi.vendor.companyName.toLowerCase().includes(inv.vendor_name.toLowerCase())) &&
-        Math.abs(inv.total_amount - pi.totalAmount) < pi.totalAmount * 0.5,
-      )
-    : [];
-
-  const advances = payments.filter((p) =>
-    p.mappedTo === 'advance' &&
-    (!p.vendor || p.vendor?._id === pi.vendor?._id || String(p.vendor) === String(pi.vendor?._id)) &&
-    Math.abs(p.amount - pi.amountDue) <= 2,
-  );
-
-  // FIX 4 — pass { piId, invoiceId } as the body, not a fetch options object
-  const linkInvoice = async (inv) => {
-    setLinkingId(inv._id);
-    setLinkErr('');
-    try {
-      const res = await api.post('/payment-tracker/payments/link-to-invoice', {
-        piId: pi._id, invoiceId: inv._id,
-      });
-      if (res.status >= 400) throw new Error(res.data?.error || 'Link failed');
-      onClose();
-      onRefresh?.();
-    } catch (e) {
-      log.error('Invoice link failed', e.message);
-      setLinkErr(e.message);
-      setLinkingId(null);
-    }
-  };
-
-  return (
-    <Modal title={`Payment Flow — ${pi.piNumber}`} onClose={onClose} extraWide>
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 40px 1fr 40px 1fr', alignItems: 'flex-start', marginBottom: 28 }}>
-
-        {/* Column 1 — PI */}
-        <div style={{ background: 'linear-gradient(135deg,#6366f1,#8b5cf6)', borderRadius: 16, padding: '20px 22px', color: '#fff' }}>
-          <div style={{ fontSize: 10, fontWeight: 700, textTransform: 'uppercase', opacity: 0.8, marginBottom: 8 }}>📋 Proforma Invoice</div>
-          <div style={{ fontSize: 20, fontWeight: 900, marginBottom: 4 }}>{fmt(pi.totalAmount)}</div>
-          <div style={{ fontSize: 13, opacity: 0.9, marginBottom: 10 }}>{pi.piNumber} · {pi.vendor?.companyName}</div>
-          <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 10 }}>
-            <Badge status={pi.status} />
-            {pi.dueDate && <span style={{ fontSize: 11, background: 'rgba(255,255,255,0.15)', color: '#fff', padding: '2px 8px', borderRadius: 20 }}>Due {fmtDate(pi.dueDate)}</span>}
-          </div>
-          {pi.bankDetails && <div style={{ fontSize: 11, opacity: 0.75, borderTop: '1px solid rgba(255,255,255,0.2)', paddingTop: 8, marginTop: 6 }}>{pi.bankDetails}</div>}
-          {pi.attachmentFileId && (
-            <div style={{ marginTop: 8 }}>
-              <DocLink url={proxyUrl.piAttach(pi._id)} mimeType={pi.attachmentMime} label="PI Document" style={{ background: 'rgba(255,255,255,0.15)', color: '#fff' }} />
-            </div>
-          )}
-        </div>
-
-        <div style={{ textAlign: 'center', paddingTop: 30, fontSize: 22, color: '#94a3b8' }}>→</div>
-
-        {/* Column 2 — Payments */}
-        <div>
-          <div style={{ fontSize: 11, fontWeight: 700, textTransform: 'uppercase', color: '#475569', marginBottom: 10 }}>💳 Payments ({piPayments.length})</div>
-          {piPayments.length === 0
-            ? <div style={{ padding: '16px', background: '#f8fafc', borderRadius: 12, textAlign: 'center', color: '#94a3b8', fontSize: 13 }}>No payments yet</div>
-            : piPayments.map((pay, i) => (
-                <div key={pay._id || i} style={{ padding: '10px 12px', background: '#f0fdf4', border: '1px solid #bbf7d0', borderRadius: 10, marginBottom: 6 }}>
-                  <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-                    <span style={{ fontSize: 14, fontWeight: 800, color: '#15803d' }}>{fmt(pay.amount)}</span>
-                    <span style={{ fontSize: 11, color: '#94a3b8' }}>{pay.paymentRef}</span>
-                  </div>
-                  <div style={{ fontSize: 11, color: '#64748b' }}>{fmtDate(pay.paymentDate)} · {pay.paymentMode?.toUpperCase()}</div>
-                  {pay.bankRef && <div style={{ fontSize: 11, color: '#94a3b8', fontFamily: 'monospace' }}>Ref: {pay.bankRef}</div>}
-                  {pay.screenshotFileId && (
-                    <div style={{ marginTop: 4 }}>
-                      <DocLink url={proxyUrl.payReceipt(pay._id)} mimeType={pay.screenshotMime} label="Screenshot" style={{ background: '#f0fdf4', color: '#15803d' }} />
-                    </div>
-                  )}
-                </div>
-              ))}
-
-          <div style={{ marginTop: 8, padding: '10px 12px', background: '#f8fafc', borderRadius: 10 }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11, fontWeight: 700, marginBottom: 5 }}>
-              <span style={{ color: '#10b981' }}>Paid: {fmt(pi.amountPaid)}</span>
-              <span style={{ color: '#ef4444' }}>Due: {fmt(pi.amountDue)}</span>
-            </div>
-            <ProgressBar paid={pi.amountPaid} total={pi.totalAmount} height={8} />
-          </div>
-
-          {advances.length > 0 && (
-            <div style={{ marginTop: 10 }}>
-              <div style={{ fontSize: 11, fontWeight: 700, color: '#f59e0b', textTransform: 'uppercase', marginBottom: 6 }}>⚠ Unlinked advances</div>
-              {advances.map((pay) => (
-                <div key={pay._id} style={{ padding: '9px 12px', background: '#fffbeb', border: '1px solid #fde68a', borderRadius: 10, display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 5 }}>
-                  <div>
-                    <div style={{ fontSize: 13, fontWeight: 700 }}>{fmt(pay.amount)}</div>
-                    <div style={{ fontSize: 11, color: '#64748b' }}>{fmtDate(pay.paymentDate)} · {pay.paymentRef}</div>
-                  </div>
-                  <button onClick={() => onMapPayment(pay)} style={{ padding: '5px 10px', borderRadius: 7, border: 'none', background: '#f59e0b', color: '#fff', fontWeight: 700, fontSize: 11, cursor: 'pointer' }}>Map</button>
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
-
-        <div style={{ textAlign: 'center', paddingTop: 30, fontSize: 22, color: '#94a3b8' }}>→</div>
-
-        {/* Column 3 — Final Invoice */}
-        <div>
-          <div style={{ fontSize: 11, fontWeight: 700, textTransform: 'uppercase', color: '#475569', marginBottom: 10 }}>🧾 Final Invoice</div>
-          {linkedInvoice ? (
-            <div style={{ background: 'linear-gradient(135deg,#0891b2,#06b6d4)', borderRadius: 16, padding: '20px 22px', color: '#fff' }}>
-              <div style={{ fontSize: 10, fontWeight: 700, textTransform: 'uppercase', opacity: 0.8, marginBottom: 4 }}>Vendor Invoice</div>
-              <div style={{ fontSize: 20, fontWeight: 900, marginBottom: 4 }}>{fmt(linkedInvoice.total_amount)}</div>
-              <div style={{ fontSize: 13, opacity: 0.9, marginBottom: 6 }}>{linkedInvoice.invoice_number}</div>
-              <div style={{ fontSize: 11, opacity: 0.75, marginBottom: 10 }}>{fmtDate(linkedInvoice.date)}</div>
-              {(linkedInvoice.cgst || linkedInvoice.sgst || linkedInvoice.igst) && (
-                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 6, borderTop: '1px solid rgba(255,255,255,0.2)', paddingTop: 8, marginBottom: 10 }}>
-                  {[['CGST', linkedInvoice.cgst], ['SGST', linkedInvoice.sgst], ['IGST', linkedInvoice.igst]].map(([l, v]) => (
-                    <div key={l} style={{ textAlign: 'center' }}>
-                      <div style={{ fontSize: 9, opacity: 0.7, textTransform: 'uppercase', fontWeight: 700 }}>{l}</div>
-                      <div style={{ fontSize: 12, fontWeight: 700 }}>{fmt(v)}</div>
-                    </div>
-                  ))}
-                </div>
-              )}
-              {(linkedInvoice.oneDriveFileId || linkedInvoice.image) && (
-                <div style={{ borderTop: '1px solid rgba(255,255,255,0.2)', paddingTop: 10 }}>
-                  <DocLink url={linkedInvoice.oneDriveFileId ? proxyUrl.invoice(linkedInvoice._id) : linkedInvoice.image} mimeType={linkedInvoice.mimeType} label="View Invoice" style={{ background: 'rgba(255,255,255,0.15)', color: '#fff' }} />
-                </div>
-              )}
-            </div>
-          ) : (
-            <div>
-              {linkErr && <div style={{ padding: '8px 12px', background: '#fef2f2', border: '1px solid #fca5a5', borderRadius: 8, color: '#dc2626', fontSize: 12, fontWeight: 600, marginBottom: 10 }}>{linkErr}</div>}
-              {suggestedInvoices.length > 0 && (
-                <div style={{ marginBottom: 12 }}>
-                  <div style={{ fontSize: 11, fontWeight: 700, color: '#0891b2', textTransform: 'uppercase', marginBottom: 8, display: 'flex', alignItems: 'center', gap: 6 }}>
-                    <Link2 size={12} /> Invoice already in vault — link it?
-                  </div>
-                  {suggestedInvoices.map((inv) => (
-                    <div key={inv._id} style={{ padding: '12px 14px', background: '#e0f2fe', border: '1px solid #7dd3fc', borderRadius: 12, marginBottom: 8 }}>
-                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 8 }}>
-                        <div>
-                          <div style={{ fontWeight: 700, fontSize: 13, color: '#0f172a' }}>{inv.invoice_number}</div>
-                          <div style={{ fontSize: 11, color: '#64748b' }}>{inv.vendor_name} · {fmtDate(inv.date)}</div>
-                          <div style={{ fontSize: 13, fontWeight: 800, color: '#0891b2', marginTop: 2 }}>{fmt(inv.total_amount)}</div>
-                        </div>
-                        {/* FIX 4 — linkInvoice() passes correct body */}
-                        <button disabled={linkingId === inv._id} onClick={() => linkInvoice(inv)}
-                          style={{ display: 'flex', alignItems: 'center', gap: 5, padding: '7px 14px', borderRadius: 8, border: 'none', background: linkingId === inv._id ? '#94a3b8' : '#0891b2', color: '#fff', fontWeight: 700, fontSize: 12, cursor: linkingId === inv._id ? 'not-allowed' : 'pointer', whiteSpace: 'nowrap' }}>
-                          {linkingId === inv._id
-                            ? <><span style={{ width: 10, height: 10, border: '2px solid rgba(255,255,255,0.3)', borderTop: '2px solid #fff', borderRadius: '50%', display: 'inline-block', animation: 'spin .6s linear infinite' }} /> Linking…</>
-                            : <><Link2 size={12} /> Link This</>}
-                        </button>
-                      </div>
-                      {Math.abs(inv.total_amount - pi.totalAmount) > 10 && (
-                        <div style={{ fontSize: 11, color: '#0369a1', background: '#bae6fd', borderRadius: 6, padding: '3px 8px', display: 'inline-block' }}>
-                          ⚠ Amount differs from PI ({fmt(pi.totalAmount)})
-                        </div>
-                      )}
-                    </div>
-                  ))}
-                </div>
-              )}
-              <div style={{ padding: '20px 16px', background: '#f8fafc', border: '2px dashed #cbd5e1', borderRadius: 16, textAlign: 'center' }}>
-                <FileText size={28} color="#94a3b8" style={{ margin: '0 auto 8px', display: 'block' }} />
-                <div style={{ fontSize: 13, color: '#64748b', marginBottom: 12 }}>{suggestedInvoices.length > 0 ? 'Or upload a new invoice' : 'No invoice received yet'}</div>
-                <button onClick={() => onUploadInvoice(pi._id)} style={{ display: 'inline-flex', alignItems: 'center', gap: 6, padding: '8px 14px', borderRadius: 9, border: 'none', background: '#0891b2', color: '#fff', fontWeight: 700, fontSize: 12, cursor: 'pointer' }}>
-                  <FileUp size={13} /> Upload Invoice
-                </button>
-              </div>
-            </div>
-          )}
-        </div>
-      </div>
-
-      {/* Payment timeline */}
-      {piPayments.length > 0 && (
-        <div style={{ background: '#f8fafc', borderRadius: 14, padding: '18px 22px' }}>
-          <div style={{ fontSize: 12, fontWeight: 700, color: '#475569', textTransform: 'uppercase', marginBottom: 14 }}>Payment Timeline</div>
-          {piPayments.map((pay, i) => {
-            const pct = pi.totalAmount > 0 ? (pay.amount / pi.totalAmount) * 100 : 0;
-            return (
-              <div key={pay._id || i} style={{ display: 'grid', gridTemplateColumns: '120px 1fr 100px auto', alignItems: 'center', gap: 12, marginBottom: 8 }}>
-                <div style={{ fontSize: 11, color: '#64748b' }}>{fmtDate(pay.paymentDate)}</div>
-                <div style={{ height: 10, borderRadius: 99, background: '#e2e8f0', overflow: 'hidden' }}>
-                  <div style={{ width: `${pct}%`, height: '100%', background: i % 2 === 0 ? '#10b981' : '#3b82f6', borderRadius: 99 }} />
-                </div>
-                <div style={{ fontSize: 12, fontWeight: 700, color: '#10b981', textAlign: 'right' }}>{fmt(pay.amount)}</div>
-                <div style={{ minWidth: 64 }}>
-                  {pay.screenshotFileId && <DocLink url={proxyUrl.payReceipt(pay._id)} mimeType={pay.screenshotMime} label="Receipt" style={{ background: '#f0fdf4', color: '#15803d', fontSize: 10, padding: '3px 8px' }} />}
-                </div>
-              </div>
-            );
-          })}
-          <div style={{ display: 'grid', gridTemplateColumns: '120px 1fr 100px', alignItems: 'center', gap: 12, marginTop: 8, paddingTop: 8, borderTop: '1px solid #e2e8f0' }}>
-            <div style={{ fontSize: 11, fontWeight: 700, color: '#475569' }}>TOTAL</div>
-            <div style={{ height: 10, borderRadius: 99, background: '#e2e8f0', overflow: 'hidden' }}>
-              <div style={{ width: `${pi.totalAmount > 0 ? (pi.amountPaid / pi.totalAmount) * 100 : 0}%`, height: '100%', background: pi.amountDue < 1 ? '#10b981' : '#6366f1', borderRadius: 99 }} />
-            </div>
-            <div style={{ fontSize: 12, fontWeight: 800, color: '#6366f1', textAlign: 'right' }}>{fmt(pi.amountPaid)} / {fmt(pi.totalAmount)}</div>
-          </div>
-        </div>
-      )}
-    </Modal>
-  );
-}
-
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// ═══════════════════════════════════════════════════════════════════════════════
-// BLOB PREVIEW — fetches a proxy URL via axios (correct port) and renders
-// the result inline as an iframe (PDF) or img (image).
-// Used by InvoiceViewerModal right panel to avoid the localhost:3000 trap.
-// ═══════════════════════════════════════════════════════════════════════════════
-function BlobPreview({ url, mimeType }) {
-  const [blobUrl, setBlobUrl] = useState(null);
-  const [loading, setLoading] = useState(false);
-  const [err, setErr] = useState(null);
-
-  useEffect(() => {
-    if (!url) return;
-    // base64 data URIs don't need fetching
-    if (url.startsWith('data:')) { setBlobUrl(url); return; }
-    let revoked = false;
-    setLoading(true);
-    setErr(null);
-    // Strip /api prefix — axios baseURL already ends in /api
-    const axiosPath = url.replace(/^\/api/, '');
-    api.get(axiosPath, { responseType: 'blob' })
-      .then((res) => {
-        if (revoked) return;
-        const mime = res.headers['content-type'] || mimeType || 'application/octet-stream';
-        const objUrl = URL.createObjectURL(new Blob([res.data], { type: mime }));
-        setBlobUrl(objUrl);
-        setLoading(false);
-      })
-      .catch((e) => {
-        if (revoked) return;
-        setErr(e?.response?.status === 404 ? 'File not found on server.' : 'Could not load document.');
-        setLoading(false);
-      });
-    return () => {
-      revoked = true;
-      // Revoke on unmount to free memory
-      setBlobUrl((prev) => { if (prev && prev.startsWith('blob:')) URL.revokeObjectURL(prev); return null; });
-    };
-  }, [url]);
-
-  const isPdf = mimeType === 'application/pdf' || blobUrl?.startsWith('blob:') && mimeType === 'application/pdf';
-
-  return (
-    <div style={{ background: '#f1f5f9', borderRadius: 16, overflow: 'hidden', minHeight: 400, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-      {!url ? (
-        <div style={{ textAlign: 'center', color: '#94a3b8' }}>
-          <div style={{ fontSize: 40, marginBottom: 8 }}>📄</div>
-          <div style={{ fontSize: 13, fontWeight: 600 }}>No document attached</div>
-        </div>
-      ) : loading ? (
-        <div style={{ textAlign: 'center', color: '#94a3b8' }}>
-          <div style={{ width: 28, height: 28, border: '2px solid #e2e8f0', borderTop: '2px solid #6366f1', borderRadius: '50%', animation: 'spin 0.8s linear infinite', margin: '0 auto 10px' }} />
-          <div style={{ fontSize: 12 }}>Loading document…</div>
-        </div>
-      ) : err ? (
-        <div style={{ textAlign: 'center', color: '#ef4444', fontSize: 13, padding: 20 }}>⚠ {err}</div>
-      ) : mimeType === 'application/pdf' ? (
-        <iframe src={blobUrl} style={{ width: '100%', height: 500, border: 'none' }} title="PDF" />
-      ) : (
-        <div style={{ overflowY: 'auto', maxHeight: 600, width: '100%' }}>
-          <img src={blobUrl} style={{ width: '100%' }} alt="Invoice" />
-        </div>
-      )}
-    </div>
-  );
-}
-
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// INVOICE VIEWER MODAL
-// ═══════════════════════════════════════════════════════════════════════════════
-function InvoiceViewerModal({ invoice, onClose }) {
-  return (
-    <Modal title={`Invoice — ${invoice.invoice_number}`} onClose={onClose} extraWide>
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 24 }}>
-
-        {/* Left column — metadata + tax breakdown + documents */}
-        <div>
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginBottom: 18 }}>
-            {[
-              ['Vendor', invoice.vendor_name || '—'],
-              ['GSTIN', invoice.vendor_gst || 'N/A'],
-              ['Invoice #', invoice.invoice_number],
-              ['Date', fmtDate(invoice.date)],
-              ['FY', invoice.financialYear || '—'],
-              ['Month', invoice.month || '—'],
-              ['Source', invoice.receivedVia || '—'],
-            ].map(([l, v]) => (
-              <div key={l} style={{ padding: '10px 14px', background: '#f8fafc', borderRadius: 10 }}>
-                <div style={{ fontSize: 10, color: '#94a3b8', textTransform: 'uppercase', fontWeight: 700, marginBottom: 3 }}>{l}</div>
-                <div style={{ fontSize: 13, fontWeight: 600, color: '#0f172a' }}>{v}</div>
-              </div>
-            ))}
-          </div>
-
-          {/* Tax breakdown */}
-          <div style={{ padding: '16px 20px', background: '#eff6ff', borderRadius: 14, marginBottom: 14 }}>
-            <div style={{ fontSize: 11, color: '#6366f1', fontWeight: 700, textTransform: 'uppercase', marginBottom: 10 }}>
-              Tax Breakdown
-            </div>
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr 1fr', gap: 8 }}>
-              {[
-                ['Total', fmt(invoice.total_amount), '#1d4ed8'],
-                ['CGST', fmt(invoice.cgst), '#475569'],
-                ['SGST', fmt(invoice.sgst), '#475569'],
-                ['IGST', fmt(invoice.igst), '#475569'],
-              ].map(([l, v, c]) => (
-                <div key={l} style={{ textAlign: 'center', padding: '10px 6px', background: '#fff', borderRadius: 10, border: '1px solid #dbeafe' }}>
-                  <div style={{ fontSize: 10, color: '#94a3b8', textTransform: 'uppercase', fontWeight: 700 }}>{l}</div>
-                  <div style={{ fontSize: 16, fontWeight: 800, color: c, marginTop: 4 }}>{v}</div>
-                </div>
-              ))}
-            </div>
-          </div>
-
-          {invoice.notes && (
-            <div style={{ padding: '10px 14px', background: '#fffbeb', border: '1px solid #fde68a', borderRadius: 10, fontSize: 13, color: '#92400e', marginBottom: 14 }}>
-              📝 {invoice.notes}
-            </div>
-          )}
-
-          {/* All documents */}
-          <div style={{ background: '#f8fafc', borderRadius: 12, padding: '14px 16px' }}>
-            <div style={{ fontSize: 11, fontWeight: 800, color: '#475569', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 10 }}>
-              All Documents
-            </div>
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 7 }}>
-
-              {/* Invoice document */}
-              {(invoice.oneDriveFileId || invoice.image) && (
-                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '8px 12px', background: '#fff', border: '1px solid #e2e8f0', borderRadius: 8 }}>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                    <span style={{ fontSize: 16 }}>{invoice.mimeType === 'application/pdf' ? '📄' : '🖼'}</span>
-                    <div>
-                      <div style={{ fontSize: 12, fontWeight: 700, color: '#0f172a' }}>Invoice Document</div>
-                      <div style={{ fontSize: 10, color: '#94a3b8' }}>
-                        {invoice.fileName || invoice.invoice_number}{invoice.oneDriveFileId ? ' · OneDrive' : ''}
-                      </div>
-                    </div>
-                  </div>
-                  <div style={{ display: 'flex', gap: 6 }}>
-                    <DocLink
-                      url={invoice.oneDriveFileId ? proxyUrl.invoice(invoice._id) : invoice.image}
-                      mimeType={invoice.mimeType}
-                      label="View"
-                      style={{ background: '#eff6ff', color: '#1d4ed8' }}
-                    />
-                  </div>
-                </div>
-              )}
-
-              {/* Linked PI document */}
-              {invoice._linkedPI?.attachmentFileId && (
-                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '8px 12px', background: '#fff', border: '1px solid #e2e8f0', borderRadius: 8 }}>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                    <span style={{ fontSize: 16 }}>📋</span>
-                    <div>
-                      <div style={{ fontSize: 12, fontWeight: 700, color: '#6366f1' }}>Proforma Invoice</div>
-                      <div style={{ fontSize: 10, color: '#94a3b8' }}>
-                        {invoice._linkedPI.piNumber} · OneDrive
-                      </div>
-                    </div>
-                  </div>
-                  <DocLink
-                    url={proxyUrl.piAttach(invoice._linkedPI._id)}
-                    mimeType={invoice._linkedPI.attachmentMime}
-                    label="View"
-                    style={{ background: '#ede9fe', color: '#6d28d9' }}
-                  />
-                </div>
-              )}
-
-              {/* Payment receipts */}
-              {invoice._linkedPayments?.filter((p) => p.screenshotFileId).map((p, i) => (
-                <div key={p._id || i} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '8px 12px', background: '#fff', border: '1px solid #e2e8f0', borderRadius: 8 }}>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                    <span style={{ fontSize: 16 }}>💳</span>
-                    <div>
-                      <div style={{ fontSize: 12, fontWeight: 700, color: '#10b981' }}>Payment Receipt — {fmt(p.amount)}</div>
-                      <div style={{ fontSize: 10, color: '#94a3b8' }}>
-                        {p.paymentRef} · {fmtDate(p.paymentDate)} · OneDrive
-                      </div>
-                    </div>
-                  </div>
-                  <DocLink
-                    url={proxyUrl.payReceipt(p._id)}
-                    mimeType={p.screenshotMime}
-                    label="View"
-                    style={{ background: '#f0fdf4', color: '#15803d' }}
-                  />
-                </div>
-              ))}
-
-              {!invoice.oneDriveFileId && !invoice.image &&
-                !invoice._linkedPI?.attachmentFileId &&
-                !invoice._linkedPayments?.some((p) => p.screenshotFileId) && (
-                  <div style={{ textAlign: 'center', color: '#94a3b8', fontSize: 12, padding: '10px 0' }}>
-                    No documents attached
-                  </div>
-                )}
-            </div>
-          </div>
-        </div>
-
-        {/* Right column — document preview (fetched via axios to avoid port mismatch) */}
-        <BlobPreview
-          url={invoice.oneDriveFileId ? proxyUrl.invoice(invoice._id) : invoice.image || null}
-          mimeType={invoice.mimeType}
-        />
-      </div>
-    </Modal>
-  );
-}
-
-
-// ── Shared vendor-name filter for Invoice tab (uses name strings, not IDs) ────
-function GlobalVendorNameFilter({ vendors, invoices, value, onChange }) {
-  const [open, setOpen] = useState(false);
-  const [q, setQ] = useState('');
-  const ref = useRef();
-
-  useEffect(() => {
-    const h = (e) => { if (ref.current && !ref.current.contains(e.target)) setOpen(false); };
-    document.addEventListener('mousedown', h);
-    return () => document.removeEventListener('mousedown', h);
-  }, []);
-
-  const names = [...new Set(invoices.map((i) => i.vendor_name).filter(Boolean))].sort();
-  const filtered = names.filter((n) => !q || n.toLowerCase().includes(q.toLowerCase()));
-
-  return (
-    <div ref={ref} style={{ position: 'relative', width: 200, flexShrink: 0 }}>
-      <div
-        onClick={() => setOpen((o) => !o)}
-        style={{ ...IS, display: 'flex', alignItems: 'center', justifyContent: 'space-between', cursor: 'pointer', userSelect: 'none', color: value ? T.text : T.muted, fontSize: 12 }}
-      >
-        <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{value || 'Filter by Vendor'}</span>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 4, flexShrink: 0 }}>
-          {value && (
-            <span onClick={(e) => { e.stopPropagation(); onChange(''); setQ(''); }} style={{ color: T.muted, cursor: 'pointer', display: 'flex', alignItems: 'center' }}>
-              <X size={13} />
-            </span>
-          )}
-          <span style={{ color: T.muted, fontSize: 11 }}>{open ? '▲' : '▼'}</span>
-        </div>
-      </div>
-      {open && (
-        <div style={{ position: 'absolute', top: 'calc(100% + 4px)', left: 0, right: 0, background: '#fff', border: `1.5px solid ${T.border}`, borderRadius: 8, boxShadow: '0 10px 28px rgba(0,0,0,0.12)', zIndex: 600, overflow: 'hidden' }}>
-          <div style={{ padding: '7px 9px', borderBottom: `1px solid ${T.border}` }}>
-            <input autoFocus placeholder="Search vendor…" value={q} onChange={(e) => setQ(e.target.value)} style={{ ...IS, padding: '5px 9px', fontSize: 12 }} />
-          </div>
-          <div style={{ maxHeight: 200, overflowY: 'auto' }}>
-            <div onClick={() => { onChange(''); setOpen(false); setQ(''); }} style={{ padding: '8px 13px', cursor: 'pointer', color: T.muted, fontSize: 12 }}>All Vendors</div>
-            {filtered.map((name) => (
-              <div
-                key={name}
-                onClick={() => { onChange(name); setOpen(false); setQ(''); }}
-                style={{ padding: '8px 13px', cursor: 'pointer', background: name === value ? T.dimBg : '#fff', color: name === value ? T.gold : T.text, fontWeight: name === value ? 600 : 400, fontSize: 12, borderBottom: `1px solid ${T.offwhite}` }}
-                onMouseEnter={(e) => { if (name !== value) e.currentTarget.style.background = T.offwhite; }}
-                onMouseLeave={(e) => { if (name !== value) e.currentTarget.style.background = '#fff'; }}
-              >
-                {name}
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
-    </div>
-  );
-}
-
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// INVOICE VAULT TAB — FY/Month hierarchy with payment backtrack
-// ═══════════════════════════════════════════════════════════════════════════════
-function InvoiceVaultTab({ invoices, payments, proformaInvoices, vendors, onDelete, onViewInvoice, onUpload, onToast, externalSearch, externalVendorFilter }) {
-  const [expandedFY, setExpandedFY] = useState(null);
-  const [expandedMo, setExpandedMo] = useState(null);
-  const [expandedInv, setExpandedInv] = useState(null);
-  const [zipLoading, setZipLoading] = useState(false);
-  const [zipProgress, setZipProgress] = useState(null); // { current, total }
-  const [docList, setDocList] = useState(null);
-
-  // Case-insensitive, type-safe field matcher
-  const hit = (value, q) => value !== null && value !== undefined && String(value).toLowerCase().includes(q);
-
-  const filteredInvoices = invoices.filter((inv) => {
-    const vendorMatch = !externalVendorFilter || inv.vendor_name === externalVendorFilter;
-    if (!vendorMatch) return false;
-    const s = (externalSearch || '').toLowerCase();
-    if (!s) return true;
-    // Searches every visible column: identifiers, vendor, GST, amounts,
-    // tax breakdown, date, FY, month, source, notes, filename.
-    return (
-      hit(inv.vendor_name, s) ||
-      hit(inv.vendor_gst, s) ||
-      hit(inv.invoice_number, s) ||
-      hit(inv.date ? fmtDate(inv.date) : null, s) ||
-      hit(inv.financialYear, s) ||
-      hit(inv.month, s) ||
-      hit(inv.total_amount, s) ||
-      hit(inv.cgst, s) ||
-      hit(inv.sgst, s) ||
-      hit(inv.igst, s) ||
-      hit(inv.notes, s) ||
-      hit(inv.receivedVia, s) ||
-      hit(inv.currency, s) ||
-      hit(inv.fileName, s)
-    );
-  });
-
-  const hierarchy = filteredInvoices.reduce((acc, inv) => {
-    const fy = normalizeFY(inv.financialYear || 'Other');
-    const mo = inv.month || 'Other';
-    if (!acc[fy]) acc[fy] = {};
-    if (!acc[fy][mo]) acc[fy][mo] = [];
-    acc[fy][mo].push(inv);
-    return acc;
-  }, {});
-
-  const getTotals = (items) =>
-    items.reduce(
-      (s, i) => ({
-        total: s.total + (Number(i.total_amount) || 0),
-        cgst: s.cgst + (Number(i.cgst) || 0),
-        sgst: s.sgst + (Number(i.sgst) || 0),
-        igst: s.igst + (Number(i.igst) || 0),
-      }),
-      { total: 0, cgst: 0, sgst: 0, igst: 0 },
-    );
-
-  const exportCSV = (label, items) => {
-    const hdr = ['Date', 'Vendor Name', 'GSTIN', 'Invoice Number', 'CGST', 'SGST', 'IGST', 'Total Amount'];
-    const rows = items.map((inv) => [
-      inv.date,
-      `"${(inv.vendor_name || '').replace(/"/g, '""')}"`,
-      inv.vendor_gst, inv.invoice_number,
-      inv.cgst || 0, inv.sgst || 0, inv.igst || 0, inv.total_amount || 0,
-    ]);
-    const a = document.createElement('a');
-    a.href = URL.createObjectURL(new Blob([[hdr, ...rows].map((r) => r.join(',')).join('\n')], { type: 'text/csv' }));
-    a.download = `Invoices_${label}.csv`;
-    a.click();
-    log.debug('CSV exported', { label, count: items.length });
-  };
-
-  const downloadZip = async (label, items, isYearly = false) => {
-    const J = window.JSZip;
-    const S = window.saveAs;
-    if (!J || !S) { onToast('Zip libraries are still loading — please try again in a moment.', 'warning'); return; }
-
-    // Invoices that have a file in OneDrive or embedded image
-    const downloadable = items.filter((inv) => inv.oneDriveFileId || inv.image);
-    if (downloadable.length === 0) {
-      onToast('No invoice documents found to zip for this period.', 'warning'); return;
-    }
-
-    log.debug('Starting zip download', { label, total: downloadable.length });
-    setZipLoading(true);
-    setZipProgress({ current: 0, total: downloadable.length });
-
-    const zip = new J();
-    const root = zip.folder(label);
-    let done = 0;
-
-    try {
-      for (const inv of downloadable) {
-        const mime = inv.mimeType
-          || (inv.image?.startsWith('data:application/pdf') ? 'application/pdf' : 'image/jpeg');
-        const ext = mime === 'application/pdf' ? 'pdf' : 'jpg';
-
-        // Filename = {invoice_number}_{vendor_name}.{ext}
-        const safeNo = (inv.invoice_number || 'UNKNOWN').replace(/[^a-z0-9_\-]/gi, '_');
-        const safeVend = (inv.vendor_name || '').replace(/[^a-z0-9_\-]/gi, '_').replace(/_+/g, '_').replace(/^_|_$/g, '');
-        const name = safeVend ? `${safeNo}_${safeVend}` : safeNo;
-
-        // For FY zips, put each invoice in a {Month} subfolder
-        const folder = isYearly
-          ? root.folder(inv.month || (() => {
-            const d = new Date(inv.date);
-            return !isNaN(d.getTime())
-              ? d.toLocaleString('default', { month: 'long' })
-              : 'Unknown';
-          })())
-          : root;
-
-        // Use api (axios) — strip /api prefix since baseURL already includes it
-        if (inv.oneDriveFileId) {
-          try {
-            const axiosPath = proxyUrl.invoice(inv._id).replace(/^\/api/, '');
-            const res = await api.get(axiosPath, { responseType: 'blob' });
-            const blob = new Blob([res.data], { type: res.headers['content-type'] || mime });
-            folder.file(`${name}.${ext}`, blob);
-            log.debug('Zip: file fetched', { invoice: inv.invoice_number });
-          } catch (fetchErr) {
-            log.warn('Zip: skipping file — fetch failed', { invoice: inv.invoice_number, error: fetchErr.message });
-          }
-        }
-
-        done++;
-        setZipProgress({ current: done, total: downloadable.length });
-      }
-
-      const blob = await zip.generateAsync({ type: 'blob' });
-      S(blob, `${label.replace(/[\s/]/g, '_')}.zip`);
-      log.info('Zip downloaded', { label, count: done });
-    } catch (e) {
-      log.error('Zip failed', e.message);
-      onToast(`Zip failed: ${e.message}`, 'error');
-    } finally {
-      setZipLoading(false);
-      setZipProgress(null);
-    }
-  };
-
-  // Build payment backtrack for an invoice: Invoice → PI → Payments
-  const getInvoicePayments = (inv) => {
-    const invId = String(inv._id);
-    const direct = payments.filter((p) =>
-      p.mappedTo === 'vendor_invoice' && (
-        String(p.vendorInvoice?._id) === invId ||
-        String(p.vendorInvoice) === invId
-      ),
-    );
-    const matchedPI = proformaInvoices.find((pi) =>
-      String(pi.finalInvoice?._id) === invId ||
-      String(pi.finalInvoice) === invId,
-    );
-    const piId = matchedPI ? String(matchedPI._id) : null;
-    const piPayments = piId
-      ? payments.filter((p) => {
-        const pPiId = String(p.proformaInvoice?._id || p.proformaInvoice || '');
-        return p.mappedTo === 'proforma_invoice' && pPiId === piId;
-      })
-      : [];
-    return { direct, matchedPI, piPayments };
-  };
-
-  const grandT = getTotals(filteredInvoices);
-
-  if (invoices.length === 0) {
-    return (
-      <div style={{ textAlign: 'center', padding: '60px 20px', background: '#fff', borderRadius: 14 }}>
-        <div style={{ fontSize: 40, marginBottom: 12 }}>🧾</div>
-        <div style={{ fontWeight: 700, fontSize: 16, marginBottom: 6 }}>Invoice Vault is empty</div>
-        <div style={{ color: '#94a3b8', marginBottom: 20, fontSize: 13 }}>
-          Upload invoices, or they appear automatically from WhatsApp & Outlook.
-        </div>
-        <button
-          onClick={onUpload}
-          style={{ background: '#0891b2', color: '#fff', border: 'none', borderRadius: 8, padding: '10px 22px', fontWeight: 700, cursor: 'pointer', fontSize: 14 }}
-        >
-          🧾 Upload First Invoice
-        </button>
-      </div>
-    );
-  }
-
-  return (
-    <div>
-      {/* Zip loading overlay */}
-      {zipLoading && (
-        <div style={{ position: 'fixed', inset: 0, background: 'rgba(15,23,42,0.5)', zIndex: 2000, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-          <div style={{ background: '#fff', borderRadius: 20, padding: '30px 40px', textAlign: 'center', minWidth: 220 }}>
-            <div style={{ width: 36, height: 36, border: '3px solid #e2e8f0', borderTop: '3px solid #6366f1', borderRadius: '50%', animation: 'spin 0.8s linear infinite', margin: '0 auto 12px' }} />
-            <div style={{ fontWeight: 700, fontSize: 13, color: '#475569', textTransform: 'uppercase', marginBottom: zipProgress ? 8 : 0 }}>Preparing Zip…</div>
-            {zipProgress && (
-              <>
-                <div style={{ fontSize: 12, color: '#94a3b8', marginBottom: 8 }}>
-                  {zipProgress.current} / {zipProgress.total} invoices
-                </div>
-                <div style={{ height: 4, background: '#e2e8f0', borderRadius: 99, overflow: 'hidden' }}>
-                  <div style={{
-                    height: '100%', borderRadius: 99, background: '#6366f1',
-                    width: `${Math.round((zipProgress.current / zipProgress.total) * 100)}%`,
-                    transition: 'width 0.2s ease',
-                  }} />
-                </div>
-              </>
-            )}
-          </div>
-        </div>
-      )}
-
-      {/* Document list modal */}
-      {docList && (
-        <div style={{ position: 'fixed', inset: 0, background: 'rgba(15,23,42,0.6)', zIndex: 1500, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 16 }}>
-          <div style={{ background: '#fff', borderRadius: 20, width: '100%', maxWidth: 600, maxHeight: '80vh', overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
-            <div style={{ padding: '18px 22px', borderBottom: '1px solid #f1f5f9', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-              <div>
-                <div style={{ fontWeight: 800, fontSize: 15 }}>{docList.title}</div>
-                <div style={{ fontSize: 11, color: '#94a3b8' }}>{docList.items.length} docs</div>
-              </div>
-              <button onClick={() => setDocList(null)} style={{ background: 'none', border: 'none', color: '#94a3b8', cursor: 'pointer', display: 'flex', alignItems: 'center' }}>
-                <X size={18} />
-              </button>
-            </div>
-            <div style={{ overflowY: 'auto', padding: 14, display: 'flex', flexDirection: 'column', gap: 8 }}>
-              {docList.items.map((inv) => (
-                <div key={inv._id} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '11px 14px', background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: 10 }}>
-                  <div>
-                    <div style={{ fontWeight: 700, fontSize: 13 }}>{inv.vendor_name}</div>
-                    <div style={{ fontSize: 11, color: '#94a3b8' }}>INV: {inv.invoice_number} · {fmt(inv.total_amount)}</div>
-                  </div>
-                  <div style={{ display: 'flex', gap: 8 }}>
-                    <button onClick={() => { onViewInvoice(inv); setDocList(null); }} style={{ display: 'flex', alignItems: 'center', gap: 5, padding: '6px 12px', borderRadius: 7, border: 'none', background: '#eff6ff', color: '#1d4ed8', fontWeight: 700, fontSize: 11, cursor: 'pointer' }}>
-                      <Eye size={12} /> View
-                    </button>
-                    {(inv.oneDriveFileId || inv.image) && (
-                      <DocLink
-                        url={inv.oneDriveFileId ? proxyUrl.invoice(inv._id) : inv.image}
-                        mimeType={inv.mimeType}
-                        label="⬇"
-                        style={{ padding: '6px 12px', borderRadius: 7, background: '#f1f5f9', color: '#475569', fontSize: 11 }}
-                      />
-                    )}
-                  </div>
-                </div>
-              ))}
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Grand totals */}
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4,1fr)', gap: 12, marginBottom: 18 }}>
-        {[
-          ['Total Invoiced', fmt(grandT.total), '#1d4ed8'],
-          ['Total CGST', fmt(grandT.cgst), '#475569'],
-          ['Total SGST', fmt(grandT.sgst), '#475569'],
-          ['Total IGST', fmt(grandT.igst), '#475569'],
-        ].map(([l, v, c]) => (
-          <div key={l} style={{ padding: '14px 16px', background: '#fff', borderRadius: 12, boxShadow: '0 1px 4px rgba(0,0,0,0.06)' }}>
-            <div style={{ fontSize: 10, color: '#94a3b8', textTransform: 'uppercase', fontWeight: 700, marginBottom: 4 }}>{l}</div>
-            <div style={{ fontSize: 18, fontWeight: 800, color: c }}>{v}</div>
-          </div>
-        ))}
-      </div>
-
-      {/* FY / Month / Invoice hierarchy */}
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-        {Object.entries(hierarchy).sort().reverse().map(([fy, months]) => {
-          const allFYItems = Object.values(months).flat();
-          const fyT = getTotals(allFYItems);
-
-          return (
-            <div key={fy} style={{ background: '#fff', borderRadius: 14, border: '1px solid #e2e8f0', overflow: 'hidden', boxShadow: '0 1px 4px rgba(0,0,0,0.05)' }}>
-
-              {/* FY row */}
-              <div
-                style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '14px 18px', background: '#f8fafc', cursor: 'pointer' }}
-                onClick={() => setExpandedFY(expandedFY === fy ? null : fy)}
-              >
-                <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-                  <span style={{ display: 'flex', alignItems: 'center' }}>
-                    {expandedFY === fy ? <FolderOpen size={18} color="#6366f1" /> : <Folder size={18} color="#6366f1" />}
-                  </span>
-                  <div>
-                    <div style={{ fontWeight: 800, fontSize: 14 }}>FY {fy}</div>
-                    <div style={{ fontSize: 11, color: '#94a3b8' }}>{allFYItems.length} invoices</div>
-                  </div>
-                </div>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 14 }}>
-                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4,80px)', gap: 8, textAlign: 'right' }}>
-                    {[['CGST', fyT.cgst], ['SGST', fyT.sgst], ['IGST', fyT.igst], ['Total', fyT.total]].map(([l, v]) => (
-                      <div key={l}>
-                        <div style={{ fontSize: 9, color: '#94a3b8', textTransform: 'uppercase', fontWeight: 700 }}>{l}</div>
-                        <div style={{ fontSize: 12, fontWeight: 700, color: l === 'Total' ? '#6366f1' : '#0f172a' }}>₹{fmtN(v)}</div>
-                      </div>
-                    ))}
-                  </div>
-                  <div style={{ display: 'flex', gap: 6 }}>
-                    <button onClick={(e) => { e.stopPropagation(); setDocList({ title: `FY ${fy} Vault`, items: allFYItems.filter((i) => i.oneDriveFileId || i.image) }); }} style={{ display: 'flex', alignItems: 'center', gap: 5, padding: '5px 10px', borderRadius: 6, border: '1px solid #e2e8f0', background: '#fff', fontSize: 11, fontWeight: 700, cursor: 'pointer' }}>
-                      <Link2 size={12} /> Links
-                    </button>
-                    <button onClick={(e) => { e.stopPropagation(); downloadZip(`FY_${fy}`, allFYItems, true); }} style={{ display: 'flex', alignItems: 'center', gap: 5, padding: '5px 10px', borderRadius: 6, border: '1px solid #e2e8f0', background: '#fff', fontSize: 11, fontWeight: 700, cursor: 'pointer' }}>
-                      <Archive size={12} /> Zip
-                    </button>
-                    <button onClick={(e) => { e.stopPropagation(); exportCSV(`FY_${fy}`, allFYItems); }} style={{ display: 'flex', alignItems: 'center', gap: 5, padding: '5px 12px', borderRadius: 6, border: 'none', background: '#6366f1', color: '#fff', fontSize: 11, fontWeight: 700, cursor: 'pointer' }}>
-                      <Download size={12} /> Excel
-                    </button>
-                  </div>
-                </div>
-              </div>
-
-              {/* Month rows */}
-              {expandedFY === fy && (
-                <div style={{ padding: '10px 14px', display: 'flex', flexDirection: 'column', gap: 8 }}>
-                  {Object.entries(months).map(([month, items]) => {
-                    const moKey = `${fy}-${month}`;
-                    const moT = getTotals(items);
-
-                    return (
-                      <div key={month} style={{ border: '1px solid #f1f5f9', borderRadius: 12, overflow: 'hidden' }}>
-
-                        {/* Month header */}
-                        <div
-                          style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '11px 16px', background: '#fafafa', cursor: 'pointer' }}
-                          onClick={() => setExpandedMo(expandedMo === moKey ? null : moKey)}
-                        >
-                          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                            <span style={{ display: 'flex', alignItems: 'center', color: '#94a3b8' }}>
-                              {expandedMo === moKey ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
-                            </span>
-                            <span style={{ fontWeight: 700, fontSize: 13 }}>{month}</span>
-                            <span style={{ fontSize: 11, background: '#eff6ff', color: '#1d4ed8', borderRadius: 20, padding: '1px 8px', fontWeight: 700 }}>{items.length}</span>
-                          </div>
-                          <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-                            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4,80px)', gap: 8, textAlign: 'right' }}>
-                              {[['CGST', moT.cgst], ['SGST', moT.sgst], ['IGST', moT.igst], ['Total', moT.total]].map(([l, v]) => (
-                                <div key={l}>
-                                  <div style={{ fontSize: 9, color: '#94a3b8', textTransform: 'uppercase', fontWeight: 700 }}>{l}</div>
-                                  <div style={{ fontSize: 11, fontWeight: 700, color: l === 'Total' ? '#0891b2' : '#0f172a' }}>₹{fmtN(v)}</div>
-                                </div>
-                              ))}
-                            </div>
-                            <div style={{ display: 'flex', gap: 6 }}>
-                              <button onClick={(e) => { e.stopPropagation(); downloadZip(`${month}_${fy}`, items); }} style={{ display: 'flex', alignItems: 'center', gap: 3, padding: '4px 8px', borderRadius: 6, border: '1px solid #e2e8f0', background: '#fff', fontSize: 10, fontWeight: 700, cursor: 'pointer' }}>
-                                <Archive size={11} />
-                              </button>
-                              <button onClick={(e) => { e.stopPropagation(); exportCSV(`${month}_${fy}`, items); }} style={{ display: 'flex', alignItems: 'center', gap: 3, padding: '4px 8px', borderRadius: 6, border: 'none', background: '#10b981', color: '#fff', fontSize: 10, fontWeight: 700, cursor: 'pointer' }}>
-                                <Download size={11} />
-                              </button>
-                            </div>
-                          </div>
-                        </div>
-
-                        {/* Invoice rows */}
-                        {expandedMo === moKey && (
-                          <div style={{ padding: '10px 14px' }}>
-                            {items.map((inv) => {
-                              const invKey = `${moKey}-${inv._id}`;
-                              const { direct, matchedPI, piPayments } = getInvoicePayments(inv);
-                              const hasPayments = direct.length > 0 || piPayments.length > 0 || !!matchedPI;
-
-                              return (
-                                <div key={inv._id} style={{ background: '#fff', border: '1px solid #e2e8f0', borderRadius: 12, marginBottom: 8, overflow: 'hidden' }}>
-
-                                  {/* Invoice summary row */}
-                                  <div
-                                    style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '12px 16px', cursor: 'pointer' }}
-                                    onClick={() => setExpandedInv(expandedInv === invKey ? null : invKey)}
-                                  >
-                                    <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-                                      <span style={{ fontSize: 18 }}>{inv.mimeType === 'application/pdf' ? '📄' : '🖼'}</span>
-                                      <div>
-                                        <div style={{ fontWeight: 700, fontSize: 13 }}>{inv.vendor_name}</div>
-                                        <div style={{ fontSize: 11, color: '#94a3b8' }}>INV: {inv.invoice_number} · {fmtDate(inv.date)}</div>
-                                        {inv.notes && (
-                                          <div style={{
-                                            display: 'inline-flex', alignItems: 'center', gap: 4,
-                                            marginTop: 4, padding: '3px 8px',
-                                            background: '#fefce8', border: '1px solid #fde68a',
-                                            borderRadius: 6, maxWidth: 300,
-                                          }}>
-                                            <FileText size={10} style={{ color: '#b45309', flexShrink: 0 }} />
-                                            <span style={{
-                                              fontSize: 11, color: '#78350f', fontWeight: 500,
-                                              overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
-                                            }} title={inv.notes}>
-                                              {inv.notes}
-                                            </span>
-                                          </div>
-                                        )}
-                                        <div style={{ display: 'flex', gap: 5, flexWrap: 'wrap', marginTop: 3 }}>
-                                          {matchedPI && (
-                                            <span style={{ fontSize: 10, fontWeight: 700, background: '#ede9fe', color: '#6d28d9', borderRadius: 20, padding: '1px 7px' }}>
-                                              PI: {matchedPI.piNumber}
-                                            </span>
-                                          )}
-                                          {(direct.length + piPayments.length) > 0 && (
-                                            <span style={{ fontSize: 10, fontWeight: 700, background: '#d1fae5', color: '#065f46', borderRadius: 20, padding: '1px 7px' }}>
-                                              {direct.length + piPayments.length} payment{direct.length + piPayments.length > 1 ? 's' : ''}
-                                            </span>
-                                          )}
-                                          {inv.receivedVia && inv.receivedVia !== 'manual_upload' && (
-                                            <span style={{ fontSize: 9, fontWeight: 700, textTransform: 'uppercase', background: inv.receivedVia === 'whatsapp' ? '#dcfce7' : '#dbeafe', color: inv.receivedVia === 'whatsapp' ? '#15803d' : '#1d4ed8', borderRadius: 20, padding: '1px 6px' }}>
-                                              {inv.receivedVia}
-                                            </span>
-                                          )}
-                                        </div>
-                                      </div>
-                                    </div>
-                                    <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-                                      <div style={{ textAlign: 'right' }}>
-                                        <div style={{ fontSize: 15, fontWeight: 800, color: '#6366f1' }}>{fmt(inv.total_amount)}</div>
-                                        {hasPayments && (
-                                          <div style={{ fontSize: 11, color: '#10b981' }}>
-                                            ✓ {direct.length + piPayments.length} payment{(direct.length + piPayments.length) > 1 ? 's' : ''} tracked
-                                          </div>
-                                        )}
-                                      </div>
-                                      <button onClick={(e) => { e.stopPropagation(); onViewInvoice(inv); }} style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', width: 30, height: 30, borderRadius: 7, border: 'none', background: '#eff6ff', color: '#1d4ed8', cursor: 'pointer' }}>
-                                        <Eye size={13} />
-                                      </button>
-                                      <button onClick={(e) => { e.stopPropagation(); onDelete(inv._id); }} style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', width: 30, height: 30, borderRadius: 7, border: 'none', background: '#fef2f2', color: '#ef4444', cursor: 'pointer' }}>
-                                        <Trash2 size={13} />
-                                      </button>
-                                      <span style={{ display: 'flex', alignItems: 'center', color: '#94a3b8' }}>
-                                        {expandedInv === invKey ? <ChevronDown size={15} /> : <ChevronRight size={15} />}
-                                      </span>
-                                    </div>
-                                  </div>
-
-                                  {/* Payment backtrack hierarchy */}
-                                  {expandedInv === invKey && (
-                                    <div style={{ background: '#f8fafc', borderTop: '1px solid #f1f5f9', padding: '14px 18px' }}>
-
-                                      {/* Level 1 — Invoice node */}
-                                      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
-                                        <div style={{ width: 28, height: 28, borderRadius: 8, background: '#0891b2', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
-                                          <FileText size={14} color="#fff" />
-                                        </div>
-                                        <div style={{ fontSize: 13, fontWeight: 700, color: '#0f172a' }}>
-                                          Invoice {inv.invoice_number}
-                                          <span style={{ fontSize: 12, fontWeight: 400, color: '#64748b', marginLeft: 8 }}>{fmt(inv.total_amount)}</span>
-                                        </div>
-                                      </div>
-
-                                      {/* Level 2 — Linked PI */}
-                                      {matchedPI && (
-                                        <div style={{ marginLeft: 14, borderLeft: '2px solid #e2e8f0', paddingLeft: 18, marginBottom: 8 }}>
-                                          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, marginBottom: 8 }}>
-                                            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                                              <div style={{ width: 24, height: 24, borderRadius: 7, background: '#6366f1', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
-                                                <ClipboardList size={12} color="#fff" />
-                                              </div>
-                                              <div style={{ fontSize: 12, fontWeight: 700, color: '#6366f1' }}>
-                                                PI: {matchedPI.piNumber}
-                                                <span style={{ fontSize: 11, fontWeight: 400, color: '#64748b', marginLeft: 8 }}>
-                                                  Total: {fmt(matchedPI.totalAmount)} · Paid: {fmt(matchedPI.amountPaid)}
-                                                </span>
-                                              </div>
-                                            </div>
-                                            {matchedPI.attachmentFileId && (
-                                              <DocLink
-                                                url={proxyUrl.piAttach(matchedPI._id)}
-                                                mimeType={matchedPI.attachmentMime}
-                                                label="PI Doc"
-                                                style={{ background: '#ede9fe', color: '#6d28d9', padding: '4px 9px', fontSize: 10 }}
-                                              />
-                                            )}
-                                          </div>
-
-                                          {/* Level 3 — Payments via PI */}
-                                          {piPayments.length > 0 && (
-                                            <div style={{ marginLeft: 14, borderLeft: '2px solid #e2e8f0', paddingLeft: 14 }}>
-                                              <div style={{ fontSize: 11, color: '#94a3b8', fontWeight: 700, textTransform: 'uppercase', marginBottom: 6 }}>
-                                                Payments via PI ({piPayments.length})
-                                              </div>
-                                              {piPayments.map((p, i) => (
-                                                <div key={p._id || i} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '7px 10px', background: '#ede9fe', borderRadius: 8, marginBottom: 4 }}>
-                                                  <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                                                    <CreditCard size={12} style={{ color: '#6366f1', flexShrink: 0 }} />
-                                                    <div>
-                                                      <div style={{ fontSize: 12, fontWeight: 700, color: '#4f46e5' }}>{fmt(p.amount)}</div>
-                                                      <div style={{ fontSize: 11, color: '#64748b' }}>{fmtDate(p.paymentDate)} · {p.paymentMode?.toUpperCase()}{p.bankRef ? ` · ${p.bankRef}` : ''}</div>
-                                                    </div>
-                                                  </div>
-                                                  <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                                                    <span style={{ fontSize: 11, color: '#94a3b8', fontFamily: 'monospace' }}>{p.paymentRef}</span>
-                                                    {p.screenshotFileId && (
-                                                      <DocLink
-                                                        url={proxyUrl.payReceipt(p._id)}
-                                                        mimeType={p.screenshotMime}
-                                                        label="Receipt"
-                                                        style={{ background: '#ddd6fe', color: '#5b21b6', padding: '3px 7px', fontSize: 10 }}
-                                                      />
-                                                    )}
-                                                  </div>
-                                                </div>
-                                              ))}
-                                            </div>
-                                          )}
-                                          {piPayments.length === 0 && (
-                                            <div style={{ marginLeft: 14, fontSize: 11, color: '#94a3b8', paddingBottom: 4 }}>
-                                              No payments recorded against this PI yet
-                                            </div>
-                                          )}
-                                        </div>
-                                      )}
-
-                                      {/* Direct payments against invoice */}
-                                      {direct.length > 0 && (
-                                        <div style={{ marginLeft: 14, borderLeft: '2px solid #e2e8f0', paddingLeft: 18, marginBottom: 8 }}>
-                                          <div style={{ fontSize: 11, color: '#0891b2', fontWeight: 700, textTransform: 'uppercase', marginBottom: 6 }}>
-                                            Direct Invoice Payments ({direct.length})
-                                          </div>
-                                          {direct.map((p, i) => (
-                                            <div key={p._id || i} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '7px 10px', background: '#e0f2fe', borderRadius: 8, marginBottom: 4 }}>
-                                              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                                                <CreditCard size={12} style={{ color: '#0891b2', flexShrink: 0 }} />
-                                                <div>
-                                                  <div style={{ fontSize: 12, fontWeight: 700, color: '#0369a1' }}>{fmt(p.amount)}</div>
-                                                  <div style={{ fontSize: 11, color: '#64748b' }}>{fmtDate(p.paymentDate)} · {p.paymentMode?.toUpperCase()}{p.bankRef ? ` · ${p.bankRef}` : ''}</div>
-                                                </div>
-                                              </div>
-                                              <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                                                <span style={{ fontSize: 11, color: '#94a3b8', fontFamily: 'monospace' }}>{p.paymentRef}</span>
-                                                {p.screenshotFileId && (
-                                                  <DocLink
-                                                    url={proxyUrl.payReceipt(p._id)}
-                                                    mimeType={p.screenshotMime}
-                                                    label="Receipt"
-                                                    style={{ background: '#bfdbfe', color: '#1d4ed8', padding: '3px 7px', fontSize: 10 }}
-                                                  />
-                                                )}
-                                              </div>
-                                            </div>
-                                          ))}
-                                        </div>
-                                      )}
-
-                                      {/* No payments at all */}
-                                      {direct.length === 0 && !matchedPI && (
-                                        <div style={{ marginLeft: 14, fontSize: 12, color: '#94a3b8', fontStyle: 'italic' }}>
-                                          No payments linked to this invoice yet.
-                                        </div>
-                                      )}
-
-                                      {/* Summary footer */}
-                                      {(direct.length > 0 || piPayments.length > 0) && (
-                                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: 10, paddingTop: 10, borderTop: '1px solid #e2e8f0' }}>
-                                          <div style={{ fontSize: 12, color: '#475569' }}>
-                                            Total paid:{' '}
-                                            <b style={{ color: '#10b981' }}>
-                                              {fmt([...direct, ...piPayments].reduce((s, p) => s + p.amount, 0))}
-                                            </b>
-                                            <span style={{ color: '#94a3b8', marginLeft: 6 }}>
-                                              / Invoice: <b style={{ color: '#0891b2' }}>{fmt(inv.total_amount)}</b>
-                                            </span>
-                                          </div>
-                                          <div style={{ width: 120 }}>
-                                            <ProgressBar
-                                              paid={[...direct, ...piPayments].reduce((s, p) => s + p.amount, 0)}
-                                              total={inv.total_amount}
-                                              height={6}
-                                            />
-                                          </div>
-                                        </div>
-                                      )}
-                                    </div>
-                                  )}
-                                </div>
-                              );
-                            })}
-                          </div>
-                        )}
-                      </div>
-                    );
-                  })}
-                </div>
-              )}
-            </div>
-          );
-        })}
-      </div>
-    </div>
-  );
-}
-
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// MOBILE INVOICE UPLOAD PAGE
-// Shown on small screens — capture, upload, or manually enter invoices
-// ═══════════════════════════════════════════════════════════════════════════════
-function MobileInvoicePage({ vendors, proformaInvoices, onSaved }) {
-  const [step, setStep] = useState('home'); // "home" | "upload" | "camera" | "manual"
-  const [preview, setPreview] = useState(null);
-  const [scanning, setScanning] = useState(false);
-  const [scanRes, setScanRes] = useState(null);
-  const [scanMsg, setScanMsg] = useState('');
-  const [af, setAF] = useState({});
-  const [saving, setSaving] = useState(false);
-  const [err, setErr] = useState('');
-  const [gstSaved, setGstSaved] = useState(false);
-  const [selectedVendorId, setSelectedVendorId] = useState('');
-  const [fileBase64, setFileBase64] = useState(null);
-  const [fileMime, setFileMime] = useState(null);
-  const [dupInfo, setDupInfo] = useState(null);
-  const [done, setDone] = useState(null);
-
-  const fileRef = useRef();
-  const cameraRef = useRef();
-
-  const [form, setForm] = useState({
-    vendor_name: '', vendor_gst: '', invoice_number: '',
-    date: new Date().toISOString().split('T')[0],
-    total_amount: '', cgst: '0', sgst: '0', igst: '0',
-    financialYear: '', month: '', notes: '', linkedPi: '',
-  });
-
-  const set = (k, v) => {
-    setForm((f) => ({ ...f, [k]: v }));
-    setAF((a) => { const n = { ...a }; delete n[k]; return n; });
-  };
-
-  const handleVendorSelect = (vendorId) => {
-    setSelectedVendorId(vendorId);
-    if (!vendorId) { set('vendor_name', ''); set('vendor_gst', ''); setGstSaved(false); return; }
-    const v = vendors.find((v) => v._id === vendorId);
-    if (v) {
-      set('vendor_name', v.companyName || '');
-      if (v.gstNumber) { set('vendor_gst', v.gstNumber); setGstSaved(true); }
-      else { set('vendor_gst', ''); setGstSaved(false); }
-    }
-  };
-
-  const processFile = async (f) => {
-    const b64 = await new Promise((res, rej) => {
-      const r = new FileReader(); r.onload = () => res(r.result); r.onerror = rej; r.readAsDataURL(f);
-    });
-    setFileBase64(b64);
-    setFileMime(f.type);
-    setPreview(f.type === 'application/pdf' ? 'pdf' : b64);
-    setScanning(true);
-    setScanRes(null);
-    setStep('upload');
-
-    log.debug('Mobile: scanning invoice with Gemini');
-    try {
-      const ex = await extractViaGemini(f);
-      const filled = {};
-      ['vendor_name', 'vendor_gst', 'invoice_number', 'date', 'financialYear', 'month'].forEach(
-        (k) => { if (ex[k]) filled[k] = ex[k]; },
-      );
-      ['total_amount', 'cgst', 'sgst', 'igst'].forEach(
-        (k) => { if (ex[k] != null) filled[k] = String(ex[k]); },
-      );
-      if (ex.vendor_name) {
-        const m = vendors.find(
-          (v) => v.companyName?.toLowerCase().includes(ex.vendor_name.toLowerCase()) ||
-            ex.vendor_name.toLowerCase().includes(v.companyName?.toLowerCase()),
-        );
-        if (m) {
-          setSelectedVendorId(m._id);
-          if (m.gstNumber) { filled.vendor_gst = m.gstNumber; setGstSaved(true); }
-        }
-      }
-      const c = Object.keys(filled).length;
-      setForm((f) => ({ ...f, ...filled }));
-      setAF(Object.fromEntries(Object.keys(filled).map((k) => [k, true])));
-      setScanRes(c >= 3 ? 'success' : c > 0 ? 'partial' : 'error');
-      setScanMsg(c >= 3 ? `${c} fields extracted — verify below` : c > 0 ? `${c} fields found — fill the rest` : "Couldn't read — fill manually");
-      log.info('Mobile Gemini scan complete', { fieldsExtracted: c });
-    } catch (e) {
-      log.error('Mobile Gemini scan failed', e.message);
-      setScanRes('error');
-      setScanMsg('Scan failed: ' + e.message);
-    }
-    setScanning(false);
-  };
-
-  const saveGstToVendor = async () => {
-    if (!selectedVendorId || !form.vendor_gst) return;
-    try {
-      await api.patch(`/payment-tracker/vendor-gst/${selectedVendorId}`, { gstNumber: form.vendor_gst });
-      setGstSaved(true);
-    } catch (e) {
-      log.warn('Could not save GST (mobile)', e.message);
-    }
-  };
-
-  const submit = async () => {
-    setErr('');
-    if (!form.invoice_number) { setErr('Invoice number required'); return; }
-    if (!form.total_amount) { setErr('Total amount required'); return; }
-    if (selectedVendorId && form.vendor_gst && !gstSaved) await saveGstToVendor();
-
-    log.info('Mobile: saving invoice', { invoiceNumber: form.invoice_number });
-    setSaving(true);
-    try {
-      const { month, fy } = getFinancialDetails(form.date);
-      const fd = new FormData();
-      const fields = {
-        ...form,
-        total_amount: parseFloat(form.total_amount),
-        cgst: parseFloat(form.cgst) || 0,
-        sgst: parseFloat(form.sgst) || 0,
-        igst: parseFloat(form.igst) || 0,
-        mimeType: fileMime || 'image/jpeg',
-        receivedVia: 'manual_upload',
-        financialYear: form.financialYear || fy,
-        month: form.month || month,
-      };
-      Object.entries(fields).forEach(([k, v]) => {
-        if (v === undefined || v === null || v === '') return;
-        if (Array.isArray(v)) {
-          if (v.length > 0) fd.append(k, JSON.stringify(v));
-          return;
-        }
-        fd.append(k, v);
-      });
-      if (fileBase64) {
-        const [meta, data] = fileBase64.split(',');
-        const mime = meta.match(/:(.*?);/)?.[1] || fileMime || 'image/jpeg';
-        const bytes = atob(data);
-        const arr = new Uint8Array(bytes.length);
-        for (let i = 0; i < bytes.length; i++) arr[i] = bytes.charCodeAt(i);
-        fd.append('file', new Blob([arr], { type: mime }),
-          `invoice${mime === 'application/pdf' ? '.pdf' : '.jpg'}`);
-      }
-      const res = await api.post('/payment-tracker/invoices', fd, {
-        headers: { 'Content-Type': 'multipart/form-data' },
-      });
-      const d = res.data;
-      if (res.status === 409 && d.duplicate) {
-        setDupInfo({ invoice_number: d.invoice_number, vendor_name: d.vendor_name });
-        setSaving(false);
-        return;
-      }
-      if (res.status >= 400) throw new Error(d.error || 'Save failed');
-      log.info('Mobile invoice saved', { invoiceNumber: form.invoice_number });
-      setDone(d);
-      onSaved && onSaved();
-    } catch (e) {
-      log.error('Mobile invoice save failed', e.message);
-      setErr(e.message);
-    }
-    setSaving(false);
-  };
-
-  const reset = () => {
-    setStep('home');
-    setPreview(null);
-    setFileBase64(null);
-    setFileMime(null);
-    setScanRes(null);
-    setDone(null);
-    setDupInfo(null);
-    setErr('');
-    setAF({});
-    setSelectedVendorId('');
-    setGstSaved(false);
-    setForm({
-      vendor_name: '', vendor_gst: '', invoice_number: '',
-      date: new Date().toISOString().split('T')[0],
-      total_amount: '', cgst: '0', sgst: '0', igst: '0',
-      financialYear: '', month: '', notes: '', linkedPi: '',
-    });
-  };
-
-  // Local mobile styles
-  const IS2 = { width: '100%', padding: '12px 14px', border: '1.5px solid #e2e8f0', borderRadius: 10, fontSize: 15, outline: 'none', boxSizing: 'border-box', fontFamily: 'inherit', background: '#fff' };
-  const ISh2 = (hi) => ({ ...IS2, border: hi ? '1.5px solid #3b82f6' : IS2.border, background: hi ? '#eff6ff' : '#fff' });
-  const Lbl = ({ children, req }) => (
-    <div style={{ fontSize: 12, fontWeight: 700, color: '#475569', textTransform: 'uppercase', letterSpacing: 0.4, marginBottom: 5 }}>
-      {children}{req && <span style={{ color: '#ef4444' }}> *</span>}
-    </div>
-  );
-  const MBtn = ({ children, onClick, color = '#0891b2', disabled, outline }) => (
-    <button
-      onClick={onClick}
-      disabled={disabled}
-      style={{
-        display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8,
-        width: '100%', padding: '15px 20px', borderRadius: 14,
-        border: outline ? `2px solid ${color}` : 'none',
-        background: disabled ? '#94a3b8' : outline ? '#fff' : color,
-        color: disabled ? '#fff' : outline ? color : '#fff',
-        fontWeight: 700, fontSize: 16, cursor: disabled ? 'not-allowed' : 'pointer',
-        marginBottom: 12,
-        boxShadow: outline ? 'none' : '0 4px 14px rgba(0,0,0,0.15)',
-      }}
-    >
-      {children}
-    </button>
-  );
-
-  // ── Done state ──────────────────────────────────────────────────────────────
-  if (done) {
-    return (
-      <div style={{ minHeight: '100dvh', background: '#f0fdf4', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', padding: 24, textAlign: 'center' }}>
-        <div style={{ width: 72, height: 72, borderRadius: 20, background: '#10b981', display: 'flex', alignItems: 'center', justifyContent: 'center', margin: '0 auto 20px', boxShadow: '0 8px 24px #10b98140' }}>
-          <CheckCircle size={40} color="#fff" />
-        </div>
-        <h2 style={{ margin: '0 0 8px', fontSize: 22, fontWeight: 900, color: '#0f172a' }}>Invoice Saved!</h2>
-        <div style={{ fontSize: 14, color: '#475569', marginBottom: 6 }}>{done.vendor_name}</div>
-        <div style={{ fontSize: 20, fontWeight: 800, color: '#10b981', marginBottom: 4 }}>{fmt(done.total_amount)}</div>
-        <div style={{ fontSize: 13, color: '#64748b', marginBottom: 32 }}>
-          INV: {done.invoice_number} · {done.month} {done.financialYear}
-        </div>
-        <button
-          onClick={reset}
-          style={{ background: '#0891b2', color: '#fff', border: 'none', borderRadius: 12, padding: '14px 32px', fontWeight: 700, fontSize: 16, cursor: 'pointer', boxShadow: '0 4px 14px #0891b240' }}
-        >
-          Upload Another
-        </button>
-      </div>
-    );
-  }
-
-  // ── Home screen ─────────────────────────────────────────────────────────────
-  if (step === 'home') {
-    return (
-      <div style={{ minHeight: '100dvh', background: '#f8fafc', fontFamily: "'DM Sans',-apple-system,sans-serif" }}>
-        <div style={{ background: '#0891b2', padding: '32px 20px 28px', textAlign: 'center', color: '#fff' }}>
-          <div style={{ width: 56, height: 56, borderRadius: 16, background: 'rgba(255,255,255,0.2)', display: 'flex', alignItems: 'center', justifyContent: 'center', margin: '0 auto 14px' }}>
-            <FileUp size={28} color="#fff" />
-          </div>
-          <h1 style={{ margin: 0, fontSize: 22, fontWeight: 900 }}>Upload Invoice</h1>
-          <p style={{ margin: '6px 0 0', fontSize: 13, opacity: 0.85 }}>Capture, upload or type invoice details</p>
-        </div>
-        <div style={{ padding: '28px 20px' }}>
-          <MBtn onClick={() => cameraRef.current?.click()} color="#0f172a"><span style={{ fontSize: 22 }}>📷</span> Take a Photo</MBtn>
-          <MBtn onClick={() => fileRef.current?.click()} color="#6366f1"><FileUp size={20} /> Upload PDF / Image</MBtn>
-          <MBtn onClick={() => setStep('upload')} color="#0891b2" outline><Plus size={20} /> Enter Manually</MBtn>
-          {/* capture="environment" hands off straight to the native camera app */}
-          <input
-            ref={cameraRef}
-            type="file"
-            accept="image/*"
-            capture="environment"
-            style={{ display: 'none' }}
-            onChange={(e) => e.target.files[0] && processFile(e.target.files[0])}
-          />
-          {/* no capture attribute here — this opens the photo library / file picker */}
-          <input
-            ref={fileRef}
-            type="file"
-            accept=".pdf,image/*"
-            style={{ display: 'none' }}
-            onChange={(e) => e.target.files[0] && processFile(e.target.files[0])}
-          />
-        </div>
-        {err && (
-          <div style={{ margin: '0 20px', padding: '12px 16px', background: '#fef2f2', border: '1px solid #fecaca', borderRadius: 10, color: '#dc2626', fontSize: 13, fontWeight: 600 }}>
-            {err}
-          </div>
-        )}
-      </div>
-    );
-  }
-
-  // ── Form — upload result + manual entry ─────────────────────────────────────
-  return (
-    <div style={{ minHeight: '100dvh', background: '#f8fafc', fontFamily: "'DM Sans',-apple-system,sans-serif", paddingBottom: 100 }}>
-
-      {/* Sticky header */}
-      <div style={{ background: '#fff', borderBottom: '1px solid #e2e8f0', padding: '14px 16px', display: 'flex', alignItems: 'center', gap: 12, position: 'sticky', top: 0, zIndex: 100 }}>
-        <button onClick={reset} style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#475569', display: 'flex', alignItems: 'center', padding: 4 }}>
-          <ChevronRight size={20} style={{ transform: 'rotate(180deg)' }} />
-        </button>
-        <div style={{ flex: 1 }}>
-          <div style={{ fontWeight: 800, fontSize: 16 }}>Invoice Details</div>
-          <div style={{ fontSize: 11, color: '#94a3b8' }}>Verify and save</div>
-        </div>
-        {scanning && (
-          <div style={{ fontSize: 12, color: '#0891b2', fontWeight: 600, display: 'flex', alignItems: 'center', gap: 5 }}>
-            <div style={{ width: 14, height: 14, border: '2px solid #e0f2fe', borderTop: '2px solid #0891b2', borderRadius: '50%', animation: 'spin .7s linear infinite' }} />
-            Reading…
-          </div>
-        )}
-      </div>
-
-      {/* Preview thumbnail */}
-      {preview && preview !== 'pdf' && (
-        <div style={{ margin: '12px 16px', borderRadius: 12, overflow: 'hidden', height: 140, position: 'relative' }}>
-          <img src={preview} alt="Invoice" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
-          <div style={{ position: 'absolute', inset: 0, background: 'linear-gradient(to top,rgba(0,0,0,0.4),transparent)' }} />
-          {scanRes && (
-            <div style={{ position: 'absolute', bottom: 10, left: 12, fontSize: 12, fontWeight: 700, color: '#fff' }}>
-              {scanRes === 'success' ? '✓ ' + scanMsg : scanRes === 'partial' ? '⚠ ' + scanMsg : '✕ ' + scanMsg}
-            </div>
-          )}
-        </div>
-      )}
-      {preview === 'pdf' && (
-        <div style={{ margin: '12px 16px', padding: '14px 16px', background: '#eff6ff', borderRadius: 12, display: 'flex', alignItems: 'center', gap: 10 }}>
-          <FileText size={24} color="#3b82f6" />
-          <div>
-            <div style={{ fontWeight: 700, color: '#1d4ed8' }}>PDF uploaded</div>
-            {scanRes && <div style={{ fontSize: 12, color: '#475569' }}>{scanMsg}</div>}
-          </div>
-        </div>
-      )}
-
-      {/* Duplicate banner */}
-      {dupInfo && (
-        <div style={{ margin: '0 16px 12px', padding: '16px', background: '#fef3c7', border: '1px solid #fde68a', borderRadius: 12, textAlign: 'center' }}>
-          <AlertTriangle size={24} color="#f59e0b" style={{ display: 'block', margin: '0 auto 8px' }} />
-          <div style={{ fontWeight: 800, fontSize: 15, marginBottom: 4 }}>Duplicate Invoice</div>
-          <div style={{ fontSize: 13, color: '#475569' }}>#{dupInfo.invoice_number} from {dupInfo.vendor_name} already in vault.</div>
-          <button onClick={() => setDupInfo(null)} style={{ marginTop: 10, background: '#f59e0b', color: '#fff', border: 'none', borderRadius: 8, padding: '8px 20px', fontWeight: 700, fontSize: 13, cursor: 'pointer' }}>
-            OK
-          </button>
-        </div>
-      )}
-
-      {/* Form fields */}
-      <div style={{ padding: '8px 16px 16px' }}>
-        {err && (
-          <div style={{ padding: '10px 14px', background: '#fef2f2', border: '1px solid #fecaca', borderRadius: 10, color: '#dc2626', fontSize: 13, fontWeight: 600, marginBottom: 12 }}>
-            {err}
-          </div>
-        )}
-        {Object.keys(af).length > 0 && (
-          <div style={{ padding: '9px 14px', background: '#eff6ff', border: '1px solid #bfdbfe', borderRadius: 10, fontSize: 13, color: '#1d4ed8', fontWeight: 600, marginBottom: 12 }}>
-            🔵 {Object.keys(af).length} fields auto-filled — verify before saving
-          </div>
-        )}
-
-        {/* Vendor */}
-        <div style={{ marginBottom: 16 }}>
-          <Lbl req>Vendor</Lbl>
-          <VendorSelect vendors={vendors} value={selectedVendorId} onChange={handleVendorSelect} highlighted={!!af.vendor_name} placeholder="Type vendor name…" />
-          {!selectedVendorId && (
-            <input style={{ ...IS2, marginTop: 6, fontSize: 13 }} value={form.vendor_name} onChange={(e) => set('vendor_name', e.target.value)} placeholder="Or type manually…" />
-          )}
-        </div>
-
-        {/* GST */}
-        <div style={{ marginBottom: 16 }}>
-          <Lbl>{`Vendor GSTIN ${gstSaved ? '✓ saved' : selectedVendorId && !form.vendor_gst ? '(enter to save)' : ''}`}</Lbl>
-          <div style={{ position: 'relative' }}>
-            <input style={ISh2(af.vendor_gst)} value={form.vendor_gst} onChange={(e) => { set('vendor_gst', e.target.value); setGstSaved(false); }} placeholder="15-char GSTIN" maxLength={15} />
-            {selectedVendorId && form.vendor_gst && !gstSaved && (
-              <button onClick={saveGstToVendor} style={{ position: 'absolute', right: 8, top: '50%', transform: 'translateY(-50%)', background: '#10b981', color: '#fff', border: 'none', borderRadius: 6, padding: '4px 10px', fontSize: 11, fontWeight: 700, cursor: 'pointer' }}>
-                Save
-              </button>
-            )}
-          </div>
-        </div>
-
-        {/* Invoice # + Date */}
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0 12px', marginBottom: 16 }}>
-          <div><Lbl req>Invoice #</Lbl><input style={ISh2(af.invoice_number)} value={form.invoice_number} onChange={(e) => set('invoice_number', e.target.value)} /></div>
-          <div><Lbl req>Date</Lbl><input type="date" style={ISh2(af.date)} value={form.date} onChange={(e) => set('date', e.target.value)} /></div>
-        </div>
-
-        {/* Amounts */}
-        <div style={{ marginBottom: 16 }}>
-          <Lbl req>Total Amount (₹)</Lbl>
-          <input type="number" style={ISh2(af.total_amount)} value={form.total_amount} onChange={(e) => set('total_amount', e.target.value)} placeholder="0" inputMode="decimal" />
-        </div>
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '0 10px', marginBottom: 16 }}>
-          <div>
-            <Lbl>CGST</Lbl>
-            <input type="number" style={ISh2(af.cgst)} value={form.cgst}
-              onChange={(e) => set('cgst', e.target.value)}
-              placeholder="0" inputMode="decimal" />
-          </div>
-          <div>
-            <Lbl>SGST</Lbl>
-            <input type="number" style={ISh2(af.sgst)} value={form.sgst}
-              onChange={(e) => set('sgst', e.target.value)}
-              placeholder="0" inputMode="decimal" />
-          </div>
-          <div>
-            <Lbl>IGST</Lbl>
-            <input type="number" style={ISh2(af.igst)} value={form.igst}
-              onChange={(e) => set('igst', e.target.value)}
-              placeholder="0" inputMode="decimal" />
-          </div>
-        </div>
-
-        <div style={{ marginBottom: 16 }}>
-          <Lbl>Notes</Lbl>
-          <textarea style={{ ...IS2, resize: 'vertical', minHeight: 60 }} value={form.notes} onChange={(e) => set('notes', e.target.value)} placeholder="Optional" />
-        </div>
-      </div>
-
-      {/* Sticky save bar */}
-      <div style={{ position: 'fixed', bottom: 0, left: 0, right: 0, padding: '12px 16px', background: '#fff', borderTop: '1px solid #e2e8f0', boxShadow: '0 -4px 20px rgba(0,0,0,0.08)' }}>
-        <button
-          onClick={submit}
-          disabled={saving || scanning}
-          style={{
-            width: '100%', padding: '15px', borderRadius: 14, border: 'none',
-            background: saving || scanning ? '#94a3b8' : '#0891b2',
-            color: '#fff', fontWeight: 800, fontSize: 16,
-            cursor: saving || scanning ? 'not-allowed' : 'pointer',
-            boxShadow: '0 4px 14px #0891b240',
-          }}
-        >
-          {saving ? 'Saving…' : scanning ? 'Reading document…' : 'Save Invoice'}
-        </button>
-      </div>
-
-      <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
-    </div>
-  );
-}
-
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// MAIN VIEW
-// ═══════════════════════════════════════════════════════════════════════════════
 export default function PaymentTracker() {
-  // Mobile detection — show stripped-down invoice-only page on phones
-  const isMobile = typeof window !== 'undefined' && window.matchMedia('(max-width: 768px)').matches;
+  // All hooks run unconditionally (the old page returned early on mobile
+  // before its effects, which broke React's rules of hooks).
+  const isMobile = useIsMobile();
+  const { data, loading, error, reload } = useTrackerData();
+  const { showToast: popupToast, confirm, Toast, ConfirmDialog } = usePopup();
+  const showToast = useCallback((msg, type = 'success') => popupToast(type, msg, type === 'success' ? 2500 : 6000), [popupToast]);
 
   const [tab, setTab] = useState('pi');
-  const [data, setData] = useState({ pi: [], payments: [], invoices: [] });
-  const [vendors, setVendors] = useState([]);
-  const [loading, setLoading] = useState(true);
-  const [modal, setModal] = useState(null);
-  const [selected, setSelected] = useState(null);
-  const [linkedPiId, setLinkedPiId] = useState(null);
-  const [pendingPiFlowId, setPendingPiFlowId] = useState(null);
+  const [modal, setModal] = useState(null); // { type, id?, linkedPiId?, returnTo? }
   const [filterVendor, setFilterVendor] = useState('');
   const [filterStatus, setFilterStatus] = useState('');
   const [globalSearch, setGlobalSearch] = useState('');
   const [globalVendorFilter, setGlobalVendorFilter] = useState('');
 
-  const { showToast: _showToast, confirm, Toast, ConfirmDialog } = usePopup();
-  const showToast = (msg, type = 'success') => _showToast(type, msg);
+  const openModal = useCallback((type, extra = {}) => setModal({ type, ...extra }), []);
+  const closeModal = useCallback(() => setModal(null), []);
+  const toBulk = useCallback((kind) => (files) => setModal({ type: 'bulk', kind, files }), []);
 
-  // Load JSZip + FileSaver once
-  useEffect(() => {
-    loadScript('https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js');
-    loadScript('https://cdnjs.cloudflare.com/ajax/libs/FileSaver.js/2.0.5/FileSaver.min.js');
-  }, []);
+  /** After any successful write: toast, return to the PI flow if we came from it, refresh. */
+  const onSaved = useCallback((record, message) => {
+    if (record?._warning) showToast(`${message}. ${record._warning}`, 'warning');
+    else showToast(message);
+    setModal((m) => (m?.returnTo ? { type: 'pi_flow', id: m.returnTo } : null));
+    reload({ silent: true });
+  }, [reload, showToast]);
 
-  const load = useCallback(async () => {
-    log.debug('Loading PaymentTracker data…');
-    setLoading(true);
-    try {
-      const params = new URLSearchParams();
-      if (filterVendor) params.set('vendorId', filterVendor);
-      const qs = params.toString() ? '?' + params.toString() : '';
-      const [piR, payR, invR] = await Promise.all([
-        api.get(`/payment-tracker/pi${qs}`),
-        api.get(`/payment-tracker/payments${qs}`),
-        api.get('/payment-tracker/invoices?limit=500'),
-      ]);
-      const [piD, payD, invD] = [piR.data, payR.data, invR.data];
-      setData({
-        pi: piD.data || [],
-        payments: payD.data || [],
-        invoices: invD.invoices || (Array.isArray(invD) ? invD : []),
-        invoiceFYs: invD.financialYears || [],
-      });
-      log.info('PaymentTracker data loaded', {
-        piCount: piD.data?.length,
-        paymentCount: payD.data?.length,
-        invoiceCount: invD.invoices?.length,
-      });
-    } catch (e) {
-      log.error('Failed to load PaymentTracker data', e.message);
-    }
-    setLoading(false);
-  }, [filterVendor]);
+  // ── Derived data (memoised — recomputed only when the data changes) ────────
+  const payByPi = useMemo(() => paymentsByPi(data.payments), [data.payments]);
 
-  const loadVendors = useCallback(() => {
-    log.debug('Loading vendors…');
-    api.get('/vendors')
-      .then((r) => setVendors(Array.isArray(r.data) ? r.data : (r.data?.data || [])))
-      .catch((e) => log.warn('Could not load vendors', e.message));
-  }, []);
+  const filteredPIs = useMemo(() => data.pis.filter((p) => {
+    if (filterVendor && idOf(p.vendor) !== filterVendor) return false;
+    if (filterStatus) { if (p.status !== filterStatus) return false; }
+    else if (!globalSearch && p.status === 'invoiced' && p.amountDue <= 0) return false; // closed PIs hidden unless searched
+    return piMatches(p, globalSearch);
+  }), [data.pis, filterVendor, filterStatus, globalSearch]);
 
-  useEffect(() => { loadVendors(); }, [loadVendors]);
+  // Payments tab: unmapped advances by default; a search looks through every
+  // payment so one made against a PI or invoice can be found by its number.
+  const filteredPayments = useMemo(() => data.payments.filter((p) => {
+    if (!globalSearch && p.mappedTo !== 'advance') return false;
+    if (filterVendor && idOf(p.vendor) !== filterVendor) return false;
+    if (filterStatus && p.status !== filterStatus) return false;
+    return paymentMatches(p, globalSearch);
+  }), [data.payments, filterVendor, filterStatus, globalSearch]);
 
-  // On mobile — render only the invoice upload page
-  if (isMobile) {
-    return <MobileInvoicePage vendors={vendors} proformaInvoices={data.pi} onSaved={() => load()} />;
-  }
+  // "Also found in …" hints when the current tab has no (or few) matches.
+  const otherTabHits = useMemo(() => {
+    if (!globalSearch) return [];
+    return [
+      ['pi', 'Proforma Invoices', data.pis.filter((p) => piMatches(p, globalSearch)).length],
+      ['payments', 'Payments', data.payments.filter((p) => paymentMatches(p, globalSearch)).length],
+      ['invoices', 'Invoice Vault', data.invoices.filter((i) => invoiceMatches(i, globalSearch)).length],
+    ].filter(([key, , n]) => key !== tab && n > 0);
+  }, [globalSearch, data, tab]);
 
-  useEffect(() => { load(); }, [load]);
+  const { statCards, tabs } = useMemo(() => {
+    const thisFY = currentFY();
+    const inFY = (d) => d && normalizeFY(fiscalOf(d).fy) === thisFY;
+    const fyPIs = data.pis.filter((p) => inFY(p.piDate));
+    const fyPayments = data.payments.filter((p) => inFY(p.paymentDate));
+    const fyInvoices = data.invoices.filter((inv) => normalizeFY(inv.financialYear) === thisFY);
+    const fyAdvances = fyPayments.filter((p) => p.mappedTo === 'advance').length;
+    const advanceCount = data.payments.filter((p) => p.mappedTo === 'advance').length;
+    const activePIs = data.pis.filter((p) => !(p.status === 'invoiced' && p.amountDue <= 0)).length;
+    return {
+      statCards: [
+        { label: `PI Value ${thisFY}`, value: fmt(fyPIs.reduce((s, p) => s + p.totalAmount, 0)), sub: `${fyPIs.length} PIs this FY`, color: '#6366f1' },
+        { label: `Paid ${thisFY}`, value: fmt(fyPayments.filter((p) => p.mappedTo !== 'advance').reduce((s, p) => s + p.amount, 0)), sub: `${fyPayments.length} payments · ${fyAdvances} unmapped`, color: '#10b981' },
+        { label: 'Outstanding', value: fmt(fyPIs.filter((p) => p.status !== 'cancelled').reduce((s, p) => s + p.amountDue, 0)), sub: `Across FY ${thisFY} PIs`, color: '#f59e0b' },
+        { label: 'Invoice Vault', value: String(fyInvoices.length), sub: `${fyAdvances} advances unmapped`, color: fyAdvances > 0 ? '#ef4444' : '#0891b2' },
+      ],
+      tabs: [
+        { key: 'pi', label: '📋 Proforma Invoices', count: activePIs, total: data.pis.length },
+        { key: 'payments', label: '💳 Advances', count: advanceCount, alert: advanceCount },
+        { key: 'invoices', label: '🧾 Invoice Vault', count: data.invoices.length },
+      ],
+    };
+  }, [data]);
 
-  // Re-open PI flow modal after invoice upload + data reload
-  useEffect(() => {
-    if (pendingPiFlowId && !modal && data.pi.length > 0) {
-      const freshPi = data.pi.find((p) => p._id === pendingPiFlowId);
-      if (freshPi) { setSelected(freshPi); setModal('pi_flow'); }
-      setPendingPiFlowId(null);
-    }
-  }, [data.pi, pendingPiFlowId, modal]);
+  if (isMobile) return <MobileTracker data={data} loading={loading} error={error} reload={reload} />;
 
-  // ─── Case-insensitive search helper ─────────────────────────────────────────
-  // Converts any value to a searchable string and checks for the query.
-  // Handles strings, numbers, dates, and null/undefined safely.
-  const matchesSearch = (value, query) => {
-    if (!query) return true;
-    if (value === null || value === undefined) return false;
-    return String(value).toLowerCase().includes(query);
-  };
-
-  // ─── PI tab filter ───────────────────────────────────────────────────────────
-  // Searches every user-visible field: identifiers, vendor, amounts,
-  // dates, status, currency, bank details, and notes.
-  const filteredPIs = data.pi.filter((p) => {
-    if (filterStatus) return p.status === filterStatus;
-    if (p.status === 'invoiced' && p.amountDue <= 0) return false;
-    return true;
-  }).filter((p) => {
-    if (!globalSearch) return true;
-    const s = globalSearch.toLowerCase();
-    return (
-      matchesSearch(p.piNumber, s) ||
-      matchesSearch(p.vendor?.companyName, s) ||
-      matchesSearch(p.vendor?.gstNumber, s) ||
-      matchesSearch(p.status, s) ||
-      matchesSearch(STATUS_META[p.status]?.label, s) ||
-      matchesSearch(p.currency, s) ||
-      matchesSearch(p.totalAmount, s) ||
-      matchesSearch(p.amountPaid, s) ||
-      matchesSearch(p.amountDue, s) ||
-      matchesSearch(p.notes, s) ||
-      matchesSearch(p.bankDetails, s) ||
-      matchesSearch(p.piDate ? fmtDate(p.piDate) : null, s) ||
-      matchesSearch(p.dueDate ? fmtDate(p.dueDate) : null, s) ||
-      matchesSearch(p.finalInvoice?.invoice_number, s)
-    );
-  });
-
-  // ─── Payments tab filter ─────────────────────────────────────────────────────
-  // Searches all payment fields: ref, vendor, date, amount, mode,
-  // bank ref, UTR, remarks, status, mapping type, and linked PI/invoice.
-  const filteredPayments = data.payments.filter((p) => {
-    const isAdvance = p.mappedTo === 'advance';
-    if (!filterStatus) return isAdvance;
-    if (filterStatus === 'advance') return isAdvance;
-    return isAdvance && p.status === filterStatus;
-  }).filter((p) => {
-    if (!globalSearch) return true;
-    const s = globalSearch.toLowerCase();
-    return (
-      matchesSearch(p.paymentRef, s) ||
-      matchesSearch(p.vendor?.companyName, s) ||
-      matchesSearch(p.paymentDate ? fmtDate(p.paymentDate) : null, s) ||
-      matchesSearch(p.amount, s) ||
-      matchesSearch(p.currency, s) ||
-      matchesSearch(p.paymentMode, s) ||
-      matchesSearch(p.bankRef, s) ||
-      matchesSearch(p.remarks, s) ||
-      matchesSearch(p.status, s) ||
-      matchesSearch(STATUS_META[p.status]?.label, s) ||
-      matchesSearch(p.mappedTo, s) ||
-      matchesSearch(p.proformaInvoice?.piNumber, s) ||
-      matchesSearch(p.vendorInvoice?.invoice_number, s)
-    );
-  });
-
-  const thisFY = currentFY();
-  const fyPIs = data.pi.filter((p) => normalizeFY(p.piDate
-    ? (new Date(p.piDate).getMonth() < 3
-      ? `${new Date(p.piDate).getFullYear() - 1}-${String(new Date(p.piDate).getFullYear()).slice(-2)}`
-      : `${new Date(p.piDate).getFullYear()}-${String(new Date(p.piDate).getFullYear() + 1).slice(-2)}`)
-    : '') === thisFY);
-  const fyPayments = data.payments.filter((p) => {
-    const d = new Date(p.paymentDate);
-    const y = d.getFullYear();
-    const fy = d.getMonth() < 3 ? `${y - 1}-${String(y).slice(-2)}` : `${y}-${String(y + 1).slice(-2)}`;
-    return normalizeFY(fy) === thisFY;
-  });
-  const fyInvoices = data.invoices.filter((inv) => normalizeFY(inv.financialYear) === thisFY);
-  const fyAdvanceCount = fyPayments.filter((p) => p.mappedTo === 'advance').length;
-
-  const statCards = [
-    { label: `PI Value ${thisFY}`, value: fmt(fyPIs.reduce((s, p) => s + p.totalAmount, 0)), sub: `${fyPIs.length} PIs this FY`, color: '#6366f1' },
-    { label: `Paid ${thisFY}`, value: fmt(fyPayments.filter((p) => p.mappedTo !== 'advance').reduce((s, p) => s + p.amount, 0)), sub: `${fyPayments.length} payments · ${fyAdvanceCount} unmapped`, color: '#10b981' },
-    { label: 'Outstanding', value: fmt(fyPIs.reduce((s, p) => s + p.amountDue, 0)), sub: `Across FY ${thisFY} PIs`, color: '#f59e0b' },
-    { label: 'Invoice Vault', value: String(fyInvoices.length), sub: `${fyAdvanceCount} advances unmapped`, color: fyAdvanceCount > 0 ? '#ef4444' : '#0891b2' },
-  ];
-
-  const advanceCount = data.payments.filter((p) => p.mappedTo === 'advance').length;
-  const activePICount = data.pi.filter((p) => !(p.status === 'invoiced' && p.amountDue <= 0)).length;
-
-  const tabs = [
-    { key: 'pi', label: '📋 Proforma Invoices', count: activePICount, total: data.pi.length },
-    { key: 'payments', label: '💳 Payments', count: advanceCount, alert: advanceCount },
-    { key: 'invoices', label: '🧾 Invoice Vault', count: data.invoices.length },
-  ];
-
-  const statusOptions = tab === 'pi'
-    ? ['pending', 'partial', 'fully_paid', 'invoiced', 'cancelled']
-    : ['recorded', 'verified', 'reconciled', 'advance'];
+  const statusOptions = tab === 'pi' ? PI_STATUSES : PAYMENT_STATUSES;
+  const byId = (list, id) => list.find((x) => x._id === id);
+  const modalPi = modal?.type === 'pi_flow' ? byId(data.pis, modal.id) : null;
+  const modalPayment = modal?.type === 'map' ? byId(data.payments, modal.id) : null;
+  const modalInvoice = modal?.type === 'invoice_view' ? byId(data.invoices, modal.id) : null;
 
   return (
     <div style={{ minHeight: '100vh', background: T.offwhite, fontFamily: jost, padding: '56px 48px' }}>
@@ -3328,7 +145,7 @@ export default function PaymentTracker() {
         {/* Action controls */}
         <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', alignItems: 'center' }}>
           <button
-            onClick={() => setModal('upload_pi')}
+            onClick={() => openModal('pi')}
             style={{
               display: 'inline-flex', alignItems: 'center', gap: 8,
               background: 'transparent', color: T.muted,
@@ -3343,7 +160,7 @@ export default function PaymentTracker() {
             <ClipboardList size={13} /> Upload PI
           </button>
           <button
-            onClick={() => { setLinkedPiId(null); setModal('upload_invoice'); }}
+            onClick={() => openModal('invoice')}
             style={{
               display: 'inline-flex', alignItems: 'center', gap: 8,
               background: 'transparent', color: T.muted,
@@ -3358,7 +175,7 @@ export default function PaymentTracker() {
             <FileUp size={13} /> Upload Invoice
           </button>
           <button
-            onClick={() => setModal('pay')}
+            onClick={() => openModal('payment')}
             style={{
               display: 'inline-flex', alignItems: 'center', gap: 8,
               background: T.gold, color: T.navy, border: 'none',
@@ -3442,11 +259,7 @@ export default function PaymentTracker() {
           <input
             value={globalSearch}
             onChange={(e) => setGlobalSearch(e.target.value)}
-            placeholder={
-              tab === 'pi' ? 'Search PI number, vendor…' :
-                tab === 'payments' ? 'Search ref, vendor, bank ref…' :
-                  'Search vendor or invoice #…'
-            }
+            placeholder="Search invoice #, PI #, vendor, GSTIN, bank ref…"
             style={{ ...IS, paddingLeft: 34, paddingRight: globalSearch ? 34 : 12, fontSize: 12 }}
           />
           {globalSearch && (
@@ -3462,29 +275,21 @@ export default function PaymentTracker() {
         {/* Vendor filter — for invoice tab uses vendor name strings; others use VendorSelect with IDs */}
         {tab === 'invoices' ? (
           <GlobalVendorNameFilter
-            vendors={vendors}
             invoices={data.invoices}
             value={globalVendorFilter}
             onChange={setGlobalVendorFilter}
           />
         ) : (
           <div style={{ width: 200, flexShrink: 0 }}>
-            <VendorSelect vendors={vendors} value={filterVendor} onChange={setFilterVendor} placeholder="All Vendors" showReset />
+            <VendorSelect vendors={data.vendors} value={filterVendor} onChange={setFilterVendor} placeholder="All Vendors" />
           </div>
         )}
 
         {/* Status filter — PI and Payments tabs only */}
         {tab !== 'invoices' && (
-          <select
-            style={{ ...IS, width: 150, flexShrink: 0, fontSize: 11, padding: '8px 12px' }}
-            value={filterStatus}
-            onChange={(e) => setFilterStatus(e.target.value)}
-          >
-            <option value="">All Statuses</option>
-            {statusOptions.map((s) => (
-              <option key={s} value={s}>{STATUS_META[s]?.label || s}</option>
-            ))}
-          </select>
+          <div style={{ width: 170, flexShrink: 0 }}>
+            <SearchSelect compact options={statusOptions.map((s) => ({ value: s, label: STATUS_META[s]?.label || s }))} value={filterStatus} onChange={setFilterStatus} placeholder="All statuses" />
+          </div>
         )}
 
         {/* Clear all */}
@@ -3507,6 +312,17 @@ export default function PaymentTracker() {
         )}
       </div>
 
+      {otherTabHits.length > 0 && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', padding: '8px 16px', background: T.dimBg, border: `1px solid ${T.border}`, borderTop: 'none', fontFamily: jost, fontSize: 11, color: T.muted }}>
+          Also found:
+          {otherTabHits.map(([key, label, n]) => (
+            <button key={key} onClick={() => { setTab(key); setFilterStatus(''); }} style={{ background: '#fff', border: `1px solid ${T.borderG}`, color: T.gold, borderRadius: 12, padding: '2px 10px', fontSize: 11, cursor: 'pointer', fontFamily: jost }}>
+              {n} in {label} →
+            </button>
+          ))}
+        </div>
+      )}
+
       {/* ── Tab content panel ──────────────────────────────────────────── */}
       <div style={{ background: 'white', border: `1px solid ${T.border}`, borderTop: 'none', overflow: 'hidden' }}>
 
@@ -3527,7 +343,7 @@ export default function PaymentTracker() {
                       No proforma invoices found
                     </p>
                     <button
-                      onClick={() => setModal('upload_pi')}
+                      onClick={() => openModal('pi')}
                       style={{
                         background: T.gold, color: T.navy, border: 'none',
                         padding: '11px 28px', fontFamily: jost, fontSize: 10, fontWeight: 500,
@@ -3557,7 +373,7 @@ export default function PaymentTracker() {
                       {filteredPIs.map((pi) => (
                         <tr
                           key={pi._id}
-                          onClick={() => { setSelected(pi); setModal('pi_flow'); }}
+                          onClick={() => openModal('pi_flow', { id: pi._id })}
                           style={{ borderBottom: `1px solid ${T.border}`, cursor: 'pointer', transition: 'background 0.15s' }}
                           onMouseEnter={e => e.currentTarget.style.background = T.dimBg}
                           onMouseLeave={e => e.currentTarget.style.background = 'transparent'}
@@ -3596,7 +412,7 @@ export default function PaymentTracker() {
                               {pi.attachmentFileId && (
                                 <span onClick={(e) => e.stopPropagation()}>
                                   <DocLink
-                                    url={proxyUrl.piAttach(pi._id)}
+                                    url={docUrl.piAttach(pi._id)}
                                     mimeType={pi.attachmentMime}
                                     label="PI"
                                     style={{
@@ -3610,17 +426,12 @@ export default function PaymentTracker() {
                               )}
 
                               {/* Payment receipt chips — one per payment that has a screenshot */}
-                              {data.payments
-                                .filter((p) => {
-                                  const pPiId = String(p.proformaInvoice?._id || p.proformaInvoice || '');
-                                  return p.mappedTo === 'proforma_invoice'
-                                    && pPiId === String(pi._id)
-                                    && p.screenshotFileId;
-                                })
+                              {(payByPi.get(String(pi._id)) || [])
+                                .filter((p) => p.screenshotFileId)
                                 .map((pay, i) => (
                                   <span key={pay._id || i} onClick={(e) => e.stopPropagation()}>
                                     <DocLink
-                                      url={proxyUrl.payReceipt(pay._id)}
+                                      url={docUrl.payReceipt(pay._id)}
                                       mimeType={pay.screenshotMime}
                                       label={fmt(pay.amount)}
                                       style={{
@@ -3652,9 +463,9 @@ export default function PaymentTracker() {
                                   });
                                   if (!ok) return;
                                   try {
-                                    await api.delete(`/payment-tracker/pi/${pi._id}`);
+                                    await trackerApi.deletePi(pi._id);
                                     showToast('PI deleted', 'success');
-                                    load();
+                                    reload({ silent: true });
                                   } catch (err) {
                                     showToast(friendlyError(err), 'error');
                                   }
@@ -3680,7 +491,7 @@ export default function PaymentTracker() {
                   </table>
                 )}
                 <div style={{ borderTop: `1px solid ${T.border}`, padding: '10px 18px', fontFamily: jost, fontSize: 10, fontWeight: 300, letterSpacing: '0.12em', color: T.muted, textAlign: 'right' }}>
-                  {filteredPIs.length} of {data.pi.length} proforma invoice{data.pi.length !== 1 ? 's' : ''}
+                  {filteredPIs.length} of {data.pis.length} proforma invoice{data.pis.length !== 1 ? 's' : ''}
                 </div>
               </>
             )}
@@ -3691,7 +502,7 @@ export default function PaymentTracker() {
                 {filteredPayments.length === 0 ? (
                   <div style={{ padding: '64px 0', textAlign: 'center' }}>
                     <p style={{ fontFamily: jost, fontSize: 12, fontWeight: 300, letterSpacing: '0.1em', color: T.muted }}>
-                      No unmapped advances
+                      {globalSearch ? `No payments match "${globalSearch}"` : 'No unmapped advances'}
                     </p>
                   </div>
                 ) : (
@@ -3740,22 +551,22 @@ export default function PaymentTracker() {
                             )}
                           </td>
                           <td style={{ padding: '14px 18px' }}>
-                            <span style={{ fontFamily: jost, fontSize: 9, color: T.gold, border: `1px solid ${T.borderG}`, padding: '2px 8px', letterSpacing: '0.1em', textTransform: 'uppercase' }}>
-                              Advance
+                            <span style={{ fontFamily: jost, fontSize: 9, color: T.gold, border: `1px solid ${T.borderG}`, padding: '2px 8px', letterSpacing: '0.1em', textTransform: 'uppercase', whiteSpace: 'nowrap' }}>
+                              {pay.mappedTo === 'advance' ? 'Advance' : pay.mappedTo === 'proforma_invoice' ? `PI ${pay.proformaInvoice?.piNumber || ''}` : `Inv ${pay.vendorInvoice?.invoice_number || ''}`}
                             </span>
                           </td>
                           <td style={{ padding: '14px 18px', textAlign: 'right' }}>
                             <div style={{ display: 'flex', alignItems: 'center', gap: 10, justifyContent: 'flex-end' }}>
                               {pay.screenshotFileId && (
                                 <DocLink
-                                  url={proxyUrl.payReceipt(pay._id)}
+                                  url={docUrl.payReceipt(pay._id)}
                                   mimeType={pay.screenshotMime}
                                   label="Receipt"
                                   style={{ fontFamily: jost, fontSize: 9, fontWeight: 400, letterSpacing: '0.18em', textTransform: 'uppercase', color: T.muted, background: 'none', padding: '0' }}
                                 />
                               )}
-                              <button
-                                onClick={() => { setSelected(pay); setModal('map_advance'); }}
+                              {pay.mappedTo === 'advance' && <button
+                                onClick={() => openModal('map', { id: pay._id })}
                                 title="Map to PI or Invoice"
                                 style={{
                                   display: 'flex', alignItems: 'center', gap: 5,
@@ -3769,7 +580,7 @@ export default function PaymentTracker() {
                                 onMouseLeave={e => { e.currentTarget.style.background = 'none'; }}
                               >
                                 <MapPin size={11} /> Map
-                              </button>
+                              </button>}
                               <button
                                 onClick={async () => {
                                   const ok = await confirm({
@@ -3780,9 +591,9 @@ export default function PaymentTracker() {
                                   });
                                   if (!ok) return;
                                   try {
-                                    await api.delete(`/payment-tracker/payments/${pay._id}`);
+                                    await trackerApi.deletePayment(pay._id);
                                     showToast('Payment deleted', 'success');
-                                    load();
+                                    reload({ silent: true });
                                   } catch (err) {
                                     showToast(friendlyError(err), 'error');
                                   }
@@ -3808,7 +619,7 @@ export default function PaymentTracker() {
                   </table>
                 )}
                 <div style={{ borderTop: `1px solid ${T.border}`, padding: '10px 18px', fontFamily: jost, fontSize: 10, fontWeight: 300, letterSpacing: '0.12em', color: T.muted, textAlign: 'right' }}>
-                  {filteredPayments.length} unmapped advance{filteredPayments.length !== 1 ? 's' : ''}
+                  {globalSearch ? `${filteredPayments.length} matching payment${filteredPayments.length !== 1 ? 's' : ''}` : `${filteredPayments.length} unmapped advance${filteredPayments.length !== 1 ? 's' : ''}`}
                 </div>
               </>
             )}
@@ -3818,33 +629,22 @@ export default function PaymentTracker() {
               <InvoiceVaultTab
                 invoices={data.invoices}
                 payments={data.payments}
-                proformaInvoices={data.pi}
-                vendors={vendors}
+                proformaInvoices={data.pis}
                 externalSearch={globalSearch}
                 externalVendorFilter={globalVendorFilter}
                 onDelete={async (id) => {
-                  const ok = await confirm({ title: 'Delete Invoice?', message: 'This invoice will be permanently removed from the vault.', confirmLabel: 'Delete', variant: 'danger' });
+                  const ok = await confirm({ title: 'Delete Invoice?', message: 'This invoice will be permanently removed from the vault. Linked PIs are re-opened.', confirmLabel: 'Delete', variant: 'danger' });
                   if (!ok) return;
-                  await api.delete(`/payment-tracker/invoices/${id}`);
-                  load();
-                  showToast('Invoice deleted');
+                  try {
+                    await trackerApi.deleteInvoice(id);
+                    showToast('Invoice deleted');
+                    reload({ silent: true });
+                  } catch (err) {
+                    showToast(friendlyError(err), 'error');
+                  }
                 }}
-                onViewInvoice={(inv) => {
-                  const linkedPI = data.pi.find((pi) =>
-                    pi.invoices?.includes(inv._id) ||
-                    (inv.vendor_name && pi.vendor?.companyName &&
-                      (inv.vendor_name.toLowerCase().includes(pi.vendor.companyName.toLowerCase()) ||
-                        pi.vendor.companyName.toLowerCase().includes(inv.vendor_name.toLowerCase())) &&
-                      Math.abs((inv.total_amount || 0) - (pi.totalAmount || 0)) < (pi.totalAmount || 1) * 0.5),
-                  );
-                  const linkedPayments = [
-                    ...data.payments.filter((p) => p.invoiceId === inv._id || p.mappedTo === inv._id),
-                    ...(linkedPI ? data.payments.filter((p) => p.proformaId === linkedPI._id || p.mappedTo === linkedPI._id) : []),
-                  ].filter((p, i, a) => a.findIndex((x) => x._id === p._id) === i);
-                  setSelected({ ...inv, _linkedPI: linkedPI || null, _linkedPayments: linkedPayments });
-                  setModal('invoice_view');
-                }}
-                onUpload={() => { setLinkedPiId(null); setModal('upload_invoice'); }}
+                onViewInvoice={(inv) => openModal('invoice_view', { id: inv._id })}
+                onUpload={() => openModal('invoice')}
                 onToast={showToast}
               />
             )}
@@ -3852,68 +652,46 @@ export default function PaymentTracker() {
         )}
       </div>
 
+      {error && !loading && (
+        <div role="alert" style={{ marginTop: 16, padding: '12px 16px', background: '#fef2f2', borderLeft: `3px solid ${T.red}`, color: T.red, fontSize: 12, fontFamily: jost }}>
+          {error} <button onClick={() => reload()} style={{ marginLeft: 8, background: 'none', border: 'none', color: T.red, textDecoration: 'underline', cursor: 'pointer' }}>Retry</button>
+        </div>
+      )}
+
       {/* ── Modals ─────────────────────────────────────────────────── */}
-      {modal === 'upload_pi' && (
-        <UploadPIModal
-          vendors={vendors}
-          onSave={() => { setModal(null); showToast('PI saved!'); load(); }}
-          onClose={() => setModal(null)}
-        />
+      {modal?.type === 'pi' && <PiForm vendors={data.vendors} onSaved={onSaved} onClose={closeModal} onBulk={toBulk('pi')} />}
+      {modal?.type === 'invoice' && (
+        <InvoiceForm vendors={data.vendors} pis={data.pis} linkedPiId={modal.linkedPiId} onSaved={onSaved}
+          onBulk={modal.linkedPiId ? undefined : toBulk('invoice')}
+          onVendorsChanged={() => reload({ silent: true })}
+          onClose={() => setModal(modal.returnTo ? { type: 'pi_flow', id: modal.returnTo } : null)} />
       )}
-
-      {modal === 'upload_invoice' && (
-        <UploadInvoiceModal
-          vendors={vendors}
-          proformaInvoices={data.pi}
-          linkedPiId={linkedPiId}
-          refreshVendors={loadVendors}
-          onSave={() => {
-            setModal(null);
-            setLinkedPiId(null);
-            showToast('Invoice saved!');
-            load();
-          }}
-          onClose={() => { setModal(null); setLinkedPiId(null); setPendingPiFlowId(null); }}
-        />
+      {modal?.type === 'payment' && (
+        <PaymentForm vendors={data.vendors} pis={data.pis} invoices={data.invoices} payments={data.payments} onSaved={onSaved} onClose={closeModal} onBulk={toBulk('payment')} />
       )}
-
-      {modal === 'pay' && (
-        <RecordPaymentModal
-          vendors={vendors}
-          proformaInvoices={data.pi}
-          vendorInvoices={data.invoices}
-          payments={data.payments}
-          onSave={() => { setModal(null); showToast('Payment recorded!'); load(); }}
-          onClose={() => setModal(null)}
-        />
-      )}
-
-      {modal === 'pi_flow' && selected && (
+      {modalPi && (
         <PIFlowModal
-          pi={data.pi.find((p) => p._id === selected._id) || selected}
+          pi={modalPi}
+          piPayments={payByPi.get(String(modalPi._id)) || []}
           payments={data.payments}
           invoices={data.invoices}
-          onMapPayment={(pay) => { setSelected(pay); setModal('map_advance'); }}
-          onUploadInvoice={(piId) => { setLinkedPiId(piId); setPendingPiFlowId(piId); setModal('upload_invoice'); }}
-          onRefresh={() => load()}
-          onClose={() => { setModal(null); setSelected(null); setPendingPiFlowId(null); }}
+          onMapPayment={(pay) => openModal('map', { id: pay._id, returnTo: modalPi._id })}
+          onUploadInvoice={(piId) => openModal('invoice', { linkedPiId: piId, returnTo: piId })}
+          onLinked={() => { showToast('PI linked to invoice'); reload({ silent: true }); }}
+          onClose={closeModal}
         />
       )}
-      {modal === 'map_advance' && selected && (
-        <MapAdvanceModal
-          payment={selected}
-          proformaInvoices={data.pi}
-          vendorInvoices={data.invoices}
-          payments={data.payments} // <-- NEW PROP ADDED HERE
-          onSave={() => { setModal(null); setSelected(null); showToast('Payment mapped!'); load(); }}
-          onClose={() => { setModal(null); setSelected(null); }}
-        />
+      {modalPayment && (
+        <MapAdvanceModal payment={modalPayment} pis={data.pis} invoices={data.invoices} onSaved={onSaved}
+          onClose={() => setModal(modal.returnTo ? { type: 'pi_flow', id: modal.returnTo } : null)} />
       )}
-      {modal === 'invoice_view' && selected && (
-        <InvoiceViewerModal
-          invoice={selected}
-          onClose={() => { setModal(null); setSelected(null); }}
-        />
+      {modal?.type === 'bulk' && (
+        <BulkUpload kind={modal.kind} initialFiles={modal.files} data={data}
+          onSavedSome={(n) => { showToast(`${n} saved`); reload({ silent: true }); }}
+          onClose={() => { closeModal(); reload({ silent: true }); }} />
+      )}
+      {modalInvoice && (
+        <InvoiceViewerModal invoice={modalInvoice} trail={invoiceTrail(modalInvoice, { pis: data.pis, payments: data.payments })} onClose={closeModal} />
       )}
     </div>
   );
