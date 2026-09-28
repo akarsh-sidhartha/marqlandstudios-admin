@@ -60,7 +60,7 @@ export function PiForm({ vendors, onSaved, onClose, onBulk, fullScreen }) {
   };
 
   return (
-    <FormShell title="Upload Multiple Proforma Invoices At Once" fullScreen={fullScreen} onClose={onClose}
+    <FormShell title="Upload Proforma Invoice" fullScreen={fullScreen} onClose={onClose}
       footer={<FormActions onCancel={onClose} onSubmit={submit} disabled={disabled} saving={saving} label="Save PI" missing={missing} />}>
       <DuplicateOverlay
         info={dup && { title: 'Duplicate PI', body: `PI number ${dup.piNumber} already exists.`, sub: 'If this is a revised PI, change the number before saving.', retryLabel: 'Change PI number' }}
@@ -152,7 +152,7 @@ export function InvoiceForm({ vendors, pis, linkedPiId, onSaved, onClose, onBulk
   // Tax split: CGST + SGST (same-state supply) or IGST (inter-state). The
   // supplier's state code only *suggests* which — place of supply decides — so
   // both are editable and either complete split is accepted.
-  const gst = form.vendor_gst.trim().toUpperCase();
+  const gst = String(form.vendor_gst || '').trim().toUpperCase();
   const gstValid = GSTIN_RE.test(gst);
   const n = (k) => parseFloat(form[k]) || 0;
   const { intra: hasIntra, inter: hasInter } = K.invoice.taxState(form);
@@ -191,7 +191,7 @@ export function InvoiceForm({ vendors, pis, linkedPiId, onSaved, onClose, onBulk
   );
 
   return (
-    <FormShell title="Upload Multiple Vendor Invoices At Once" fullScreen={fullScreen} onClose={onClose}
+    <FormShell title="Upload Vendor Invoice" fullScreen={fullScreen} onClose={onClose}
       footer={<FormActions onCancel={onClose} onSubmit={submit} disabled={disabled} saving={saving} label="Save Invoice" color={T.cyan} missing={missing} />}>
       <DuplicateOverlay
         info={dup && { title: 'Duplicate Invoice', body: `Invoice #${dup.invoice_number} from ${dup.vendor_name} is already in the vault.`, sub: 'Nothing was saved.', retryLabel: 'Edit' }}
@@ -313,7 +313,7 @@ export function PaymentForm({ vendors, pis, invoices, payments, onSaved, onClose
   };
 
   return (
-    <FormShell title="Upload Multiple Record Payment at Once" fullScreen={fullScreen} onClose={onClose}
+    <FormShell title="Record Payment" fullScreen={fullScreen} onClose={onClose}
       footer={<FormActions onCancel={onClose} onSubmit={submit} disabled={disabled} saving={saving} color={T.blue}
         label={form.mappedTo === 'advance' ? 'Save as Advance' : 'Record Payment'} missing={missing} />}>
       <UploadZone label="Payment proof" hint="— screenshot or bank advice, read automatically" compact={fullScreen}

@@ -9,7 +9,13 @@ import trackerApi, { friendlyError, docUrl } from './trackerApi';
 import { Modal, Field, ErrBox, SearchableList, SummaryRow, DueRow, Badge, ProgressBar, DocLink, BlobPreview } from './components';
 import { T, fmt, fmtDate, idOf } from './shared';
 
-const sameName = (a = '', b = '') => { const x = a.toLowerCase(); const y = b.toLowerCase(); return !!x && !!y && (x.includes(y) || y.includes(x)); };
+// Loose vendor-name match. Server records can carry null names (an invoice
+// saved without a vendor, a PI whose vendor was deleted), so never assume a string.
+const sameName = (a, b) => {
+  const x = String(a || '').trim().toLowerCase();
+  const y = String(b || '').trim().toLowerCase();
+  return !!x && !!y && (x.includes(y) || y.includes(x));
+};
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // MAP ADVANCE
