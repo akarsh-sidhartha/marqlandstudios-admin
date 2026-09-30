@@ -1,482 +1,71 @@
 /**
- * src/components/OrderTracker.js
+ * src/pages/OrderTracker.js
  * ─────────────────────────────────────────────────────────────────────────────
  * Order Management — full lifecycle tracker.
  *
  * Tabs:   Inquiries  →  Ongoing  →  Completed (grouped by FY / Month)
- * Portals: auto-created on inquiry save; client portal email dispatched
- *          after client/contact DB lookup (create | add-contact flows).
+ * Popups: order details + screenshots/files + procurement (orders/OrderDetailModal),
+ *         Start Project with optional quote upload (orders/StartProjectModal),
+ *         timeline, linked shipments, portal chat.
+ * Portals: auto-created server-side on inquiry save; the client portal e-mail
+ *          is dispatched after a client/contact lookup (create | add-contact).
  * Notifications: browser push via portalNotifications; unread badge polling
- *                every 15 s.
+ *                every 15 s while the tab is visible.
  *
- * Visual language: mirrors ClientList.js — navy/gold/offwhite palette,
- *                  Jost + Cormorant Garamond typography, razor-thin borders.
+ * Data flow: one GET /v2/orders on load (portal slug and shipment counts are
+ * joined in server-side). Every mutation returns the updated order, which is
+ * merged into local state — the full list is never re-fetched after a save.
+ * All order calls go through orders/ordersApi.js.
  * ─────────────────────────────────────────────────────────────────────────────
  */
 
-import React, { useState, useEffect, useMemo, useRef } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import Select from 'react-select';
+import CreatableSelect from 'react-select/creatable';
+import {
+  ArrowRight, Calendar, CheckCircle, ChevronDown, ChevronRight, ClipboardList, Clock, Copy, FolderOpen,
+  Hash, History, ImagePlus, Link2, MapPin, Package, Paperclip, Plus, Receipt, Search, Send, Settings,
+  Trash2, Truck, UserPlus, X,
+} from 'lucide-react';
 import api from '../api';
 import ClientPortalEditor from './ClientPortalEditor';
 import OrderTimeline from './OrderTimeline';
 import MessageTemplateManager from './MessageTemplateManager';
 import { initNotifications, requestNotifPermission, pushNotif } from '../utils/portalNotifications';
 import { createLogger } from '../utils/logger';
-import CreatableSelect from 'react-select/creatable';
-import {
-  Plus, ArrowRight, CheckCircle, Clock, FileText, Image as ImageIcon,
-  Trash2, ChevronRight, ChevronDown, X, FileSpreadsheet, Download,
-  AlertTriangle, FolderOpen, Calendar, Hash, Receipt, Table as TableIcon,
-  Search, Loader2, Link2, Copy, Send, Package, MapPin, UserPlus, Settings, History, Truck,
-} from 'lucide-react';
 import { usePopup } from '../components/AppPopups';
+import ordersApi from './orders/ordersApi';
+import OrderDetailModal from './orders/OrderDetailModal';
+import StartProjectModal from './orders/StartProjectModal';
+import LinkedShipmentsPanel from './orders/LinkedShipmentsPanel';
+import { ClientCreateInlineForm, ContactAddInlineForm } from './orders/ClientContactForms';
+import { FileChip, FileLightbox, usePastedImages } from './orders/OrderFiles';
+import {
+  T, jost, serif, GoldRule, FieldLabel, FocusInput, GoldBtn, GhostBtn, IconBtn, Modal, Spinner,
+} from './orders/ui';
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Logger
-// ─────────────────────────────────────────────────────────────────────────────
 const log = createLogger('OrderTracker');
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Constants
 // ─────────────────────────────────────────────────────────────────────────────
-const CC_EMAIL              = 'info@marqland.com';
-const UNREAD_POLL_INTERVAL  = 15_000; // ms
+const CC_EMAIL             = 'info@marqland.com';
+const UNREAD_POLL_INTERVAL = 15_000; // ms
+const ROW_FILE_CHIPS       = 3;      // files shown inline in a row before "+N"
 
-// ── Public client-facing domain ───────────────────────────────────────────────
-// Portal links sent to clients must always point to the public website, not to
-// whatever domain this admin panel happens to be running on.
-// Matches CLIENT_URL in backend .env and VITE_CLIENT_URL in the admin .env.
-const CLIENT_BASE_URL = import.meta.env.VITE_CLIENT_URL?.replace(/\/$/, '') || 'https://www.marqlandstudios.com';
+// Portal links sent to clients always point to the public website, not to
+// whatever domain this admin panel runs on. Matches CLIENT_URL in the backend.
+// (CRA exposes REACT_APP_* via process.env — import.meta.env doesn't exist here.)
+const CLIENT_BASE_URL = process.env.REACT_APP_CLIENT_URL?.replace(/\/$/, '') || 'https://www.marqlandstudios.com';
+const portalUrlFor = (slug) => (slug ? `${CLIENT_BASE_URL}/p/${slug}` : null);
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Design tokens — mirrors ClientList.js
-// ─────────────────────────────────────────────────────────────────────────────
-const T = {
-  navy:    '#0e1520',
-  gold:    '#b8975a',
-  gold2:   '#d4b06a',
-  offwhite:'#faf8f5',
-  text:    '#1a1a1a',
-  muted:   '#888',
-  border:  'rgba(0,0,0,0.07)',
-  borderG: 'rgba(184,151,90,0.18)',
-  dimBg:   'rgba(184,151,90,0.04)',
-  danger:  '#dc2626',
-  indigo:  '#4f46e5',
-  emerald: '#059669',
-};
+const EMPTY_FORM = { title: '', clientName: '', orderPlacedBy: '', orderType: 'product' };
 
-const jost  = '"Jost", sans-serif';
-const serif = '"Cormorant Garamond", Georgia, serif';
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Shipment status colour map
-// ─────────────────────────────────────────────────────────────────────────────
-const SHIPMENT_STATUS_STYLES = {
-  'Pending':          { bg: '#f1f5f9', color: '#64748b' },
-  'Booked':           { bg: '#eff6ff', color: '#2563eb' },
-  'In Transit':       { bg: '#fffbeb', color: '#b45309' },
-  'Out for Delivery': { bg: '#fff7ed', color: '#ea580c' },
-  'Delivered':        { bg: '#ecfdf5', color: '#059669' },
-  'Completed':        { bg: '#ecfdf5', color: '#059669' },
-  'Returned':         { bg: '#fef2f2', color: '#ef4444' },
-  'Exception':        { bg: '#fef2f2', color: '#ef4444' },
-};
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Shared micro-components
-// ─────────────────────────────────────────────────────────────────────────────
-
-/** Hairline gold accent used in section headers (mirrors ClientList) */
-const GoldRule = () => (
-  <div style={{ width: 32, height: 1, background: T.gold, marginBottom: 20 }} />
-);
-
-/** Label above a form field */
-const FieldLabel = ({ children }) => (
-  <p style={{
-    fontFamily: jost, fontSize: 9, fontWeight: 400,
-    letterSpacing: '0.25em', textTransform: 'uppercase',
-    color: T.muted, marginBottom: 6, margin: '0 0 6px',
-  }}>
-    {children}
-  </p>
-);
-
-/** Focused-border input — exactly as in ClientList */
-const FocusInput = ({ value, onChange, placeholder, readOnly = false, style: extra = {}, inputRef }) => {
-  const [focused, setFocused] = useState(false);
-  // Uncontrolled mode: when inputRef is provided and no value/onChange are given,
-  // render without value/onChange so the user can type freely. The caller reads
-  // the value via inputRef.current.value on submit.
-  const isUncontrolled = inputRef && value === undefined;
-  return (
-    <input
-      ref={inputRef}
-      {...(isUncontrolled ? {} : { value, onChange })}
-      placeholder={placeholder}
-      readOnly={readOnly}
-      onFocus={() => setFocused(true)}
-      onBlur={() => setFocused(false)}
-      style={{
-        width: '100%', padding: '10px 14px',
-        background: readOnly ? T.offwhite : 'white',
-        border: `1px solid ${focused ? T.gold : T.border}`,
-        borderRadius: 3,
-        fontFamily: jost, fontSize: 13, fontWeight: 300,
-        color: T.text, outline: 'none',
-        boxSizing: 'border-box',
-        transition: 'border-color 0.2s',
-        ...extra,
-      }}
-    />
-  );
-};
-
-/** Gold CTA button */
-const GoldBtn = ({ onClick, disabled, children, style: extra = {} }) => (
-  <button
-    onClick={onClick}
-    disabled={disabled}
-    style={{
-      background: disabled ? '#e2e8f0' : T.gold,
-      color: disabled ? '#94a3b8' : T.navy,
-      border: 'none', cursor: disabled ? 'not-allowed' : 'pointer',
-      padding: '12px 32px',
-      fontFamily: jost, fontSize: 10, fontWeight: 500,
-      letterSpacing: '0.22em', textTransform: 'uppercase',
-      transition: 'background 0.25s',
-      ...extra,
-    }}
-    onMouseEnter={e => { if (!disabled) e.currentTarget.style.background = T.gold2; }}
-    onMouseLeave={e => { if (!disabled) e.currentTarget.style.background = T.gold; }}
-  >
-    {children}
-  </button>
-);
-
-/** Ghost / muted text button */
-const GhostBtn = ({ onClick, children, style: extra = {} }) => (
-  <button
-    onClick={onClick}
-    style={{
-      background: 'none', border: 'none', cursor: 'pointer',
-      fontFamily: jost, fontSize: 10, fontWeight: 400,
-      letterSpacing: '0.2em', textTransform: 'uppercase',
-      color: T.muted, transition: 'color 0.2s',
-      padding: '10px 20px',
-      ...extra,
-    }}
-    onMouseEnter={e => e.currentTarget.style.color = T.text}
-    onMouseLeave={e => e.currentTarget.style.color = T.muted}
-  >
-    {children}
-  </button>
-);
-
-/** Inline spinning loader */
-const Spinner = ({ size = 16 }) => (
-  <Loader2 size={size} style={{ animation: 'spin 1s linear infinite' }} />
-);
-
-// ─────────────────────────────────────────────────────────────────────────────
-// ClientCreateInlineForm
-// Pre-fills company + contact from the order so the user only needs
-// phone + email before saving.
-// ─────────────────────────────────────────────────────────────────────────────
-function ClientCreateInlineForm({ clientName, contactName, onCreated, onSkip, showToast }) {
-  const [saving, setSaving] = useState(false);
-  const [form, setForm] = useState({
-    companyName: clientName || '',
-    contacts: [{ name: contactName || '', phone: '', email: '' }],
-  });
-
-  const setContact = (field, value) => {
-    setForm(prev => ({
-      ...prev,
-      contacts: [{ ...prev.contacts[0], [field]: value }],
-    }));
-  };
-
-  const handleSave = async () => {
-    if (!form.companyName.trim()) { showToast('error', 'Company name is required'); return; }
-    log.info('Creating new client inline', { companyName: form.companyName });
-    setSaving(true);
-    try {
-      const res = await api.post('/clients', form);
-      log.info('Client created', { id: res.data._id });
-      onCreated(res.data);
-    } catch (err) {
-      log.error('Client create failed', err.message);
-      showToast('error', 'Failed: ' + (err.response?.data?.message || err.message));
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  return (
-    <div style={{ padding: '28px 32px' }}>
-      <p style={{ fontFamily: jost, fontSize: 12, fontWeight: 300, color: T.muted, marginBottom: 20 }}>
-        Fill in contact details so we can send the portal link by email.
-      </p>
-
-      {/* Company name */}
-      <div style={{ marginBottom: 16 }}>
-        <FieldLabel>Company Name</FieldLabel>
-        <FocusInput
-          value={form.companyName}
-          onChange={e => setForm(prev => ({ ...prev, companyName: e.target.value }))}
-          placeholder="Company name"
-        />
-      </div>
-
-      {/* Primary contact */}
-      <div style={{ marginBottom: 24 }}>
-        <FieldLabel>Primary Contact</FieldLabel>
-        <div style={{
-          background: T.offwhite, border: `1px solid ${T.border}`,
-          padding: '14px 16px', display: 'flex', flexDirection: 'column', gap: 10,
-        }}>
-          <FocusInput
-            value={form.contacts[0].name}
-            onChange={e => setContact('name', e.target.value)}
-            placeholder="Contact name"
-          />
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
-            <FocusInput
-              value={form.contacts[0].phone}
-              onChange={e => setContact('phone', e.target.value)}
-              placeholder="Phone"
-              style={{ fontSize: 12 }}
-            />
-            <FocusInput
-              value={form.contacts[0].email}
-              onChange={e => setContact('email', e.target.value)}
-              placeholder="Email (for portal link)"
-              style={{ fontSize: 12 }}
-            />
-          </div>
-        </div>
-      </div>
-
-      <div style={{
-        display: 'flex', justifyContent: 'space-between', alignItems: 'center',
-        borderTop: `1px solid ${T.border}`, paddingTop: 20,
-      }}>
-        <GhostBtn onClick={onSkip}>Skip — save without email</GhostBtn>
-        <GoldBtn onClick={handleSave} disabled={saving || !form.companyName.trim()}>
-          {saving ? 'Saving…' : 'Create Client & Send Email'}
-        </GoldBtn>
-      </div>
-    </div>
-  );
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// ContactAddInlineForm
-// Adds a new contact to an existing client record.
-// ─────────────────────────────────────────────────────────────────────────────
-function ContactAddInlineForm({ clientId, companyName, contactName, onAdded, onSkip, showToast }) {
-  const [saving, setSaving] = useState(false);
-  const [form, setForm] = useState({ name: contactName || '', phone: '', email: '' });
-
-  const handleSave = async () => {
-    if (!form.name.trim()) { showToast('error', 'Contact name is required'); return; }
-    log.info('Adding contact to existing client', { clientId, contactName: form.name });
-    setSaving(true);
-    try {
-      const res = await api.patch(`/clients/${clientId}/add-contact`, form);
-      log.info('Contact added', { clientId });
-      onAdded(res.data);
-    } catch (err) {
-      log.error('Contact add failed', err.message);
-      showToast('error', 'Failed: ' + (err.response?.data?.message || err.message));
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  return (
-    <div style={{ padding: '28px 32px' }}>
-      <p style={{ fontFamily: jost, fontSize: 12, fontWeight: 300, color: T.muted, marginBottom: 20 }}>
-        <strong>{companyName}</strong> is in the database but <strong>"{contactName}"</strong> is not
-        listed as a contact yet. Add their details to send the portal link.
-      </p>
-
-      <div style={{
-        background: T.offwhite, border: `1px solid ${T.border}`,
-        padding: '14px 16px', display: 'flex', flexDirection: 'column', gap: 10,
-        marginBottom: 24,
-      }}>
-        <FocusInput
-          value={form.name}
-          onChange={e => setForm(prev => ({ ...prev, name: e.target.value }))}
-          placeholder="Contact name"
-        />
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
-          <FocusInput
-            value={form.phone}
-            onChange={e => setForm(prev => ({ ...prev, phone: e.target.value }))}
-            placeholder="Phone"
-            style={{ fontSize: 12 }}
-          />
-          <FocusInput
-            value={form.email}
-            onChange={e => setForm(prev => ({ ...prev, email: e.target.value }))}
-            placeholder="Email (for portal link)"
-            style={{ fontSize: 12 }}
-          />
-        </div>
-      </div>
-
-      <div style={{
-        display: 'flex', justifyContent: 'space-between', alignItems: 'center',
-        borderTop: `1px solid ${T.border}`, paddingTop: 20,
-      }}>
-        <GhostBtn onClick={onSkip}>Skip — save without email</GhostBtn>
-        <GoldBtn onClick={handleSave} disabled={saving || !form.name.trim()}>
-          {saving ? 'Saving…' : 'Add Contact & Send Email'}
-        </GoldBtn>
-      </div>
-    </div>
-  );
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// LinkedShipmentsPanel
-// Read-only shipments list shown inside the Edit Order drawer.
-// Full management lives in Courier Tracking.
-// ─────────────────────────────────────────────────────────────────────────────
-const LinkedShipmentsPanel = ({ orderId }) => {
-  const [shipments, setShipments] = useState([]);
-  const [loading, setLoading]     = useState(true);
-
-  useEffect(() => {
-    if (!orderId) return;
-    log.debug('Fetching linked shipments', { orderId });
-    api.get(`/shipments?orderId=${orderId}`)
-      .then(res => {
-        const data = Array.isArray(res.data) ? res.data : [];
-        log.info('Shipments loaded', { orderId, count: data.length });
-        setShipments(data);
-      })
-      .catch(err => {
-        log.warn('Failed to load shipments', err.message);
-        setShipments([]);
-      })
-      .finally(() => setLoading(false));
-  }, [orderId]);
-
-  const thStyle = {
-    padding: '10px 14px', textAlign: 'left',
-    fontFamily: jost, fontSize: 9, fontWeight: 400,
-    letterSpacing: '0.22em', textTransform: 'uppercase', color: T.muted,
-    borderBottom: `1px solid ${T.border}`,
-  };
-
-  return (
-    <div style={{ marginTop: 8 }}>
-      {/* Sub-section header */}
-      <div style={{
-        display: 'flex', justifyContent: 'space-between', alignItems: 'center',
-        marginBottom: 10,
-      }}>
-        <p style={{
-          fontFamily: jost, fontSize: 9, fontWeight: 400,
-          letterSpacing: '0.28em', textTransform: 'uppercase',
-          color: 'rgba(184,151,90,0.65)', margin: 0,
-        }}>
-          Linked Shipments
-        </p>
-        {shipments.length > 0 && (
-          <span style={{
-            fontFamily: jost, fontSize: 9, fontWeight: 400,
-            letterSpacing: '0.15em', textTransform: 'uppercase', color: T.muted,
-          }}>
-            {shipments.length} shipment{shipments.length !== 1 ? 's' : ''}
-          </span>
-        )}
-      </div>
-
-      {loading ? (
-        <div style={{
-          display: 'flex', alignItems: 'center', gap: 10,
-          padding: '14px 16px', background: T.offwhite, border: `1px solid ${T.border}`,
-          fontFamily: jost, fontSize: 12, fontWeight: 300, color: T.muted,
-        }}>
-          <Spinner size={13} /> Loading shipments…
-        </div>
-      ) : shipments.length === 0 ? (
-        <div style={{
-          padding: '14px 16px', background: T.offwhite, border: `1px solid ${T.border}`,
-          fontFamily: jost, fontSize: 12, fontWeight: 300, color: T.muted,
-        }}>
-          No shipments linked to this order yet.
-        </div>
-      ) : (
-        <div style={{ border: `1px solid ${T.border}`, overflow: 'hidden' }}>
-          <table style={{ width: '100%', borderCollapse: 'collapse' }}>
-            <thead>
-              <tr style={{ background: T.offwhite }}>
-                {['Recipient', 'City', 'Tracking ID', 'Partner', 'Status'].map(h => (
-                  <th key={h} style={thStyle}>{h}</th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {shipments.map((s) => {
-                const statusStyle = SHIPMENT_STATUS_STYLES[s.status] || { bg: '#f1f5f9', color: '#64748b' };
-                return (
-                  <tr key={s._id} style={{ borderBottom: `1px solid ${T.border}` }}>
-                    <td style={{ padding: '12px 14px' }}>
-                      <p style={{ fontFamily: jost, fontSize: 12, fontWeight: 500, color: T.text, margin: '0 0 2px' }}>
-                        {s.recipientName}
-                      </p>
-                      {s.phone && (
-                        <p style={{ fontFamily: jost, fontSize: 11, fontWeight: 300, color: T.muted, margin: 0 }}>
-                          {s.phone}
-                        </p>
-                      )}
-                    </td>
-                    <td style={{ padding: '12px 14px', fontFamily: jost, fontSize: 12, fontWeight: 300, color: T.muted }}>
-                      {s.city || '—'}
-                    </td>
-                    <td style={{ padding: '12px 14px' }}>
-                      {s.trackingId ? (
-                        <span style={{
-                          fontFamily: 'monospace', fontSize: 11, fontWeight: 700,
-                          color: T.indigo, background: 'rgba(79,70,229,0.06)',
-                          padding: '3px 8px', letterSpacing: '0.05em',
-                        }}>
-                          {s.trackingId}
-                        </span>
-                      ) : (
-                        <span style={{ color: T.muted, fontFamily: jost, fontSize: 12 }}>—</span>
-                      )}
-                    </td>
-                    <td style={{ padding: '12px 14px', fontFamily: jost, fontSize: 12, fontWeight: 300, color: T.muted }}>
-                      {s.shippingPartner || '—'}
-                    </td>
-                    <td style={{ padding: '12px 14px' }}>
-                      <span style={{
-                        fontFamily: jost, fontSize: 9, fontWeight: 500,
-                        letterSpacing: '0.18em', textTransform: 'uppercase',
-                        padding: '4px 10px',
-                        background: statusStyle.bg,
-                        color: statusStyle.color,
-                      }}>
-                        {s.status}
-                      </span>
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        </div>
-      )}
-    </div>
-  );
-};
+const TABS = [
+  { id: 'inquiry',   label: 'Inquiries',        icon: Clock },
+  { id: 'ongoing',   label: 'Ongoing',          icon: ArrowRight },
+  { id: 'completed', label: 'Completed Orders', icon: Calendar },
+];
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Helpers
@@ -484,2186 +73,1130 @@ const LinkedShipmentsPanel = ({ orderId }) => {
 
 /** Returns the Indian FY string, e.g. "24-25" */
 const getFinancialYear = (dateStr) => {
-  const date   = new Date(dateStr);
-  const year   = date.getFullYear();
-  const month  = date.getMonth(); // 0-indexed; April = 3
-  const fyStart = month >= 3 ? year : year - 1;
+  const date = new Date(dateStr);
+  const fyStart = date.getMonth() >= 3 ? date.getFullYear() : date.getFullYear() - 1;
   return `${String(fyStart).slice(-2)}-${String(fyStart + 1).slice(-2)}`;
 };
 
-const getMonthName = (dateStr) =>
-  new Date(dateStr).toLocaleString('default', { month: 'long' });
+const getMonthName = (dateStr) => new Date(dateStr).toLocaleString('default', { month: 'long' });
 
 /** localStorage helpers for unread-message tracking */
-const getSeenCount = (orderId) =>
-  parseInt(localStorage.getItem(`seen_${orderId}`) || '0', 10);
-const setSeenCount = (orderId, n) =>
-  localStorage.setItem(`seen_${orderId}`, String(n));
+const getSeenCount = (orderId) => {
+  try { return parseInt(localStorage.getItem(`seen_${orderId}`) || '0', 10); } catch { return 0; }
+};
+const setSeenCount = (orderId, n) => {
+  try { localStorage.setItem(`seen_${orderId}`, String(n)); } catch { /* storage unavailable */ }
+};
 
-const getFileIcon = (type) => {
-  if (type?.includes('image'))                          return <FileSpreadsheet size={13} style={{ color: T.gold }} />;
-  if (type?.includes('sheet') || type?.includes('excel')) return <FileSpreadsheet size={13} style={{ color: T.emerald }} />;
-  return <FileText size={13} style={{ color: T.muted }} />;
+/** Text-only preview of a description (notes may carry basic formatting). */
+const plainText = (html) => (html || '').replace(/<\/?(br|div|p)\b[^>]*>/gi, ' ').replace(/<[^>]+>/g, '').replace(/&nbsp;/g, ' ').trim();
+
+const matchesFilters = (order, { term, client, contact }) => {
+  if (client && order.clientName !== client) return false;
+  if (contact && order.orderPlacedBy !== contact) return false;
+  if (!term) return true;
+  return [order.clientName, order.title, order.refNumber, order.quoteNumber, order.invoiceNumber, order.orderPlacedBy, plainText(order.description)]
+    .join(' ').toLowerCase().includes(term);
+};
+
+const selectStyle = {
+  padding: '10px 14px', background: 'white', border: `1px solid ${T.border}`, borderRadius: 3,
+  fontFamily: jost, fontSize: 12, fontWeight: 300, color: T.text, outline: 'none', cursor: 'pointer',
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Authenticated OneDrive media helpers
-// The /api/orders/proxy-attachment endpoint is public (whitelisted in
-// authMiddleware) — Graph bearer token is the auth layer server-side.
+// FilterSelect — searchable dropdown with a search icon, for the toolbar's
+// client / contact filters. `options` is [{ value, count }].
 // ─────────────────────────────────────────────────────────────────────────────
-
-/**
- * Returns the best URL to fetch an order attachment through.
- *
- * Priority:
- *  1. Backend proxy  — when itemId is set (available after /:id/attachments refresh)
- *  2. downloadUrl    — pre-authenticated Graph direct URL (~1h TTL), set on most
- *                      stored attachments. Works without a SharePoint session.
- *  3. null           — brand-new unsaved files (base64 in memory only)
- */
-const orderProxyUrl = (file, download = false) => {
-  if (!file) return null;
-  if (file.isNew || file.base64) return null;   // not yet uploaded
-
-  // Prefer backend proxy (itemId available after opening order detail)
-  if (file.itemId) {
-    const apiBase = (typeof api !== 'undefined' && api.defaults?.baseURL?.replace(/\/$/, '')) || '';
-    return `${apiBase}/orders/proxy-attachment?itemId=${file.itemId}${download ? '&download=1' : ''}`;
-  }
-
-  // Fall back to the pre-authenticated Graph downloadUrl stored in MongoDB.
-  // This URL does NOT require a SharePoint/Microsoft browser session.
-  // It expires ~1h after the order was last fetched from OneDrive, but is
-  // refreshed every time /:id/attachments is called.
-  if (file.downloadUrl) return file.downloadUrl;
-
-  return null;
-};
-
-/** Detect image from mimeType, type field, or filename extension */
-const isImageFile = (file) => {
-  if (file.mimeType?.startsWith('image/')) return true;
-  if (file.type?.startsWith('image/'))     return true;
-  return /\.(jpe?g|png|gif|webp|heic|bmp|svg)$/i.test(file.name || '');
-};
-
-/** Detect video from mimeType, type field, or filename extension */
-const isVideoFile = (file) => {
-  if (file.mimeType?.startsWith('video/')) return true;
-  if (file.type?.startsWith('video/'))     return true;
-  return /\.(mp4|mov|webm|mpeg|3gp|avi|mkv)$/i.test(file.name || '');
-};
-
-/**
- * useAuthBlob — fetches a URL (plain fetch, proxy is public) and returns
- * a blob object URL. Cleans up on unmount.
- */
-const useAuthBlob = (url) => {
-  const [src,     setSrc]     = useState(null);
-  const [loading, setLoading] = useState(true);
-  const [error,   setError]   = useState(false);
-
-  useEffect(() => {
-    if (!url) { setLoading(false); return; }
-    let objectUrl = null;
-    let cancelled = false;
-    setLoading(true); setError(false); setSrc(null);
-
-    fetch(url)
-      .then(r => { if (!r.ok) throw new Error(r.status); return r.blob(); })
-      .then(blob => { if (cancelled) return; objectUrl = URL.createObjectURL(blob); setSrc(objectUrl); })
-      .catch(() => { if (!cancelled) setError(true); })
-      .finally(() => { if (!cancelled) setLoading(false); });
-
-    return () => { cancelled = true; if (objectUrl) URL.revokeObjectURL(objectUrl); };
-  }, [url]);
-
-  return { src, loading, error };
-};
-
-/** Thumbnail tile — shimmer while loading, file-type icon on error/non-image */
-const AttachmentThumb = ({ file, onClick }) => {
-  const proxyUrl = orderProxyUrl(file);
-  const isImage  = isImageFile(file);
-  const { src, loading } = useAuthBlob(isImage && proxyUrl ? proxyUrl : null);
-
-  return (
-    <div
-      style={{ display: 'inline-flex', alignItems: 'center', gap: 0, flexShrink: 0 }}
-      onClick={e => e.stopPropagation()}
-    >
-      <div
-        onClick={() => onClick(file)}
-        title={`Open ${file.name}`}
-        style={{
-          display: 'inline-flex', alignItems: 'center', gap: 6,
-          padding: '4px 10px', cursor: 'pointer',
-          background: 'rgba(79,70,229,0.05)',
-          border: `1px solid rgba(79,70,229,0.12)`,
-          fontFamily: jost, fontSize: 10, fontWeight: 400,
-          letterSpacing: '0.08em',
-          maxWidth: 160, overflow: 'hidden',
-          transition: 'background 0.15s',
-        }}
-        onMouseEnter={e => e.currentTarget.style.background = 'rgba(79,70,229,0.1)'}
-        onMouseLeave={e => e.currentTarget.style.background = 'rgba(79,70,229,0.05)'}
-      >
-        {isImage ? (
-          loading ? (
-            <div style={{
-              width: 28, height: 28, flexShrink: 0,
-              background: 'linear-gradient(90deg,#eee 25%,#f5f5f5 50%,#eee 75%)',
-              backgroundSize: '200% 100%', animation: 'shimmer 1.2s infinite',
-            }} />
-          ) : src ? (
-            <img src={src} alt={file.name}
-              style={{ width: 28, height: 28, objectFit: 'cover', flexShrink: 0, display: 'block' }} />
-          ) : (
-            <div style={{ flexShrink: 0 }}>{getFileIcon(file.type || file.mimeType)}</div>
-          )
-        ) : (
-          <div style={{ flexShrink: 0 }}>{getFileIcon(file.type || file.mimeType)}</div>
-        )}
-        <span style={{
-          overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
-          color: T.indigo, maxWidth: 110,
-        }}>
-          {file.name}
-        </span>
-      </div>
-    </div>
-  );
-};
-
-/** Full-screen lightbox for any attachment type */
-const AttachmentLightbox = ({ file, onClose }) => {
-  const proxyUrl = orderProxyUrl(file);
-  const dlUrl    = orderProxyUrl(file, true);
-  const isImage  = isImageFile(file);
-  const isVideo  = isVideoFile(file);
-  const { src, loading } = useAuthBlob(proxyUrl);
-
-  const handleDownload = async () => {
-    const url = dlUrl || proxyUrl;
-    if (!url) return;
-    const res = await fetch(url).catch(() => null);
-    if (!res?.ok) { alert('Download failed.'); return; }
-    const blob    = await res.blob();
-    const blobUrl = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = blobUrl; a.download = file.name;
-    document.body.appendChild(a); a.click();
-    document.body.removeChild(a);
-    setTimeout(() => URL.revokeObjectURL(blobUrl), 10000);
-  };
-
-  return (
-    <div
-      style={{
-        position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.92)',
-        zIndex: 500, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 16,
-      }}
-      onClick={onClose}
-    >
-      <button
-        onClick={onClose}
-        style={{
-          position: 'absolute', top: 24, right: 24,
-          background: 'none', border: 'none', cursor: 'pointer',
-          color: 'rgba(255,255,255,0.5)',
-        }}
-        onMouseEnter={e => e.currentTarget.style.color = 'white'}
-        onMouseLeave={e => e.currentTarget.style.color = 'rgba(255,255,255,0.5)'}
-      >
-        <X size={28} />
-      </button>
-
-      <div
-        style={{ maxWidth: 900, width: '100%', maxHeight: '90vh', display: 'flex', flexDirection: 'column', alignItems: 'center' }}
-        onClick={e => e.stopPropagation()}
-      >
-        {loading ? (
-          <div style={{ color: 'rgba(255,255,255,0.4)', fontFamily: jost, fontSize: 12, letterSpacing: '0.1em' }}>
-            Loading…
-          </div>
-        ) : !src ? (
-          <div style={{ color: 'rgba(255,255,255,0.4)', fontFamily: jost, fontSize: 12 }}>
-            Could not load preview. Use the download button below.
-          </div>
-        ) : isImage ? (
-          <img src={src} alt={file.name} style={{ maxHeight: '80vh', maxWidth: '100%', objectFit: 'contain', borderRadius: 2 }} />
-        ) : isVideo ? (
-          <video src={src} controls autoPlay style={{ maxHeight: '80vh', maxWidth: '100%', borderRadius: 2 }} />
-        ) : (
-          <iframe src={src} title={file.name} style={{ width: '100%', height: '80vh', borderRadius: 2, background: 'white', border: 'none' }} />
-        )}
-
-        <div style={{ marginTop: 16, display: 'flex', alignItems: 'center', gap: 20 }}>
-          <span style={{ fontFamily: jost, fontSize: 12, fontWeight: 300, color: 'rgba(255,255,255,0.6)' }}>
-            {file.name}
-          </span>
-          <button
-            onClick={handleDownload}
-            style={{
-              display: 'inline-flex', alignItems: 'center', gap: 6,
-              padding: '8px 20px', background: 'rgba(255,255,255,0.1)',
-              color: 'white', border: 'none', cursor: 'pointer',
-              fontFamily: jost, fontSize: 10, fontWeight: 400,
-              letterSpacing: '0.2em', textTransform: 'uppercase',
-              transition: 'background 0.2s',
-            }}
-            onMouseEnter={e => e.currentTarget.style.background = 'rgba(255,255,255,0.2)'}
-            onMouseLeave={e => e.currentTarget.style.background = 'rgba(255,255,255,0.1)'}
-          >
-            <Download size={13} /> Download
-          </button>
+const FilterSelect = ({ placeholder, options, value, onChange, width = 230 }) => (
+  <div style={{ position: 'relative', width }}>
+    <Search size={13} style={{ position: 'absolute', left: 12, top: '50%', transform: 'translateY(-50%)', color: T.muted, zIndex: 1, pointerEvents: 'none' }} />
+    <Select
+      isClearable
+      placeholder={placeholder}
+      noOptionsMessage={() => 'No matches in this tab'}
+      options={options.map((o) => ({ value: o.value, label: o.value, count: o.count }))}
+      value={value ? { value, label: value } : null}
+      onChange={(opt) => onChange(opt?.value || '')}
+      formatOptionLabel={(opt, { context }) => (
+        <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8 }}>
+          <span>{opt.label}</span>
+          {context === 'menu' && opt.count != null && <span style={{ color: T.muted }}>{opt.count}</span>}
         </div>
-      </div>
-    </div>
-  );
+      )}
+      styles={{
+        control: (base, { isFocused }) => ({
+          ...base, minHeight: 40, paddingLeft: 26, borderRadius: 3, boxShadow: 'none', background: 'white',
+          border: `1px solid ${isFocused ? T.gold : T.border}`, fontFamily: jost, fontSize: 12, '&:hover': { borderColor: T.gold },
+        }),
+        placeholder: (base) => ({ ...base, color: T.text, fontWeight: 300 }),
+        menu: (base) => ({ ...base, zIndex: 20 }),
+        option: (base, { isFocused, isSelected }) => ({
+          ...base, fontFamily: jost, fontSize: 12, color: T.text,
+          background: isSelected ? 'rgba(184,151,90,0.14)' : isFocused ? T.dimBg : 'white',
+        }),
+      }}
+    />
+  </div>
+);
+
+/** [{ value, count }] of the distinct non-empty values of `key`, alphabetical. */
+const countBy = (orders, key) => {
+  const counts = new Map();
+  orders.forEach((o) => { const v = (o[key] || '').trim(); if (v) counts.set(v, (counts.get(v) || 0) + 1); });
+  return [...counts].map(([value, count]) => ({ value, count })).sort((a, b) => a.value.localeCompare(b.value));
 };
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CustomCreatableSelect — defined at module level so it isn't re-created (and
+// its menu/focus state reset) on every render of the tracker.
+// ─────────────────────────────────────────────────────────────────────────────
+const CustomCreatableSelect = ({ label, options, value, onChange, onDelete, isDisabled }) => (
+  <div style={{ display: 'flex', flexDirection: 'column' }}>
+    <FieldLabel>{label}</FieldLabel>
+    <CreatableSelect
+      isClearable
+      isDisabled={isDisabled}
+      options={options}
+      value={value}
+      onChange={onChange}
+      formatOptionLabel={(option, { context }) => (
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <span>{option.label}</span>
+          {context === 'menu' && onDelete && (
+            <button
+              type="button"
+              onMouseDown={(e) => { e.preventDefault(); e.stopPropagation(); onDelete(option.value); }}
+              style={{ background: 'none', border: 'none', cursor: 'pointer', color: T.muted, padding: 2 }}
+              title="Hide from this list"
+            >
+              <X size={11} />
+            </button>
+          )}
+        </div>
+      )}
+      styles={{
+        control: (base) => ({
+          ...base, border: `1px solid ${T.border}`, borderRadius: 3, padding: '2px 4px', background: 'white',
+          fontSize: 13, fontFamily: jost, boxShadow: 'none', '&:hover': { borderColor: T.gold },
+        }),
+        option: (base, { isFocused }) => ({ ...base, fontFamily: jost, fontSize: 12, background: isFocused ? T.dimBg : 'white', color: T.text }),
+      }}
+    />
+  </div>
+);
 
 // ─────────────────────────────────────────────────────────────────────────────
 // OrderRow
 // ─────────────────────────────────────────────────────────────────────────────
-const OrderRow = ({
-  order, loading, unreadCounts, sentLinks, copiedId, shipmentCounts,
-  onRowClick, onStartProject, onMarkComplete, onOpenTimeline, onOpenShipments,
-  onOpenPortalChat, onCopyLink, onDelete, onOpenFile,
-}) => {
-  const isCompleted = order.status === 'completed';
+const IdBadge = ({ color, icon: Icon, children }) => (
+  <span style={{
+    fontFamily: jost, fontSize: 9, fontWeight: 500, letterSpacing: '0.15em', textTransform: 'uppercase',
+    background: color, color: 'white', padding: '4px 8px', display: 'inline-flex', alignItems: 'center', gap: 4,
+  }}>
+    {Icon && <Icon size={9} />} {children}
+  </span>
+);
 
-  const ordData   = unreadCounts[order._id];
-  const unread    = ordData?.unread || 0;
+const OrderRow = React.memo(({ order, busy, unread, linkSent, justCopied, handlers }) => {
+  const { procurement = {}, attachments = [] } = order;
   const hasUnread = unread > 0;
-
-  const slug      = order.refNumber?.toLowerCase().replace(/[^a-z0-9]+/g, '-');
-  const portalUrl = `${CLIENT_BASE_URL}/p/${slug}`;
-  const alreadySent = sentLinks[order._id];
-  const justCopied  = copiedId === order._id;
-
-  const rowHoverStyle = { transition: 'background 0.2s', cursor: 'pointer' };
+  const cellStyle = { padding: '16px 20px', borderBottom: `1px solid ${T.border}` };
 
   return (
     <tr
-      onClick={() => onRowClick(order)}
-      style={rowHoverStyle}
-      onMouseEnter={e => e.currentTarget.style.background = 'rgba(0,0,0,0.015)'}
-      onMouseLeave={e => e.currentTarget.style.background = 'transparent'}
+      onClick={() => handlers.open(order)}
+      style={{ transition: 'background 0.2s', cursor: 'pointer' }}
+      onMouseEnter={(e) => { e.currentTarget.style.background = 'rgba(0,0,0,0.015)'; }}
+      onMouseLeave={(e) => { e.currentTarget.style.background = 'transparent'; }}
     >
-      {/* ── Identifiers ── */}
-      <td style={{ padding: '16px 20px', borderBottom: `1px solid ${T.border}` }}>
+      {/* Identifiers */}
+      <td style={cellStyle}>
         <div style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: 4 }}>
-          {order.refNumber && (
-            <span style={{
-              fontFamily: jost, fontSize: 9, fontWeight: 500,
-              letterSpacing: '0.15em', textTransform: 'uppercase',
-              background: T.gold, color: 'white',
-              padding: '4px 8px', display: 'inline-flex', alignItems: 'center', gap: 4,
-            }}>
-              {order.refNumber}
-            </span>
-          )}
-
-          {order.quoteNumber && (
-            <>
-              {order.refNumber && <ChevronRight size={10} style={{ color: T.muted, flexShrink: 0 }} />}
-              <span style={{
-                fontFamily: jost, fontSize: 9, fontWeight: 500,
-                letterSpacing: '0.15em', textTransform: 'uppercase',
-                background: T.indigo, color: 'white',
-                padding: '4px 8px', display: 'inline-flex', alignItems: 'center', gap: 4,
-              }}>
-                <Hash size={9} /> {order.quoteNumber}
-              </span>
-            </>
-          )}
-
-          {order.invoiceNumber && (
-            <>
-              {(order.refNumber || order.quoteNumber) && <ChevronRight size={10} style={{ color: T.muted, flexShrink: 0 }} />}
-              <span style={{
-                fontFamily: jost, fontSize: 9, fontWeight: 500,
-                letterSpacing: '0.15em', textTransform: 'uppercase',
-                background: T.emerald, color: 'white',
-                padding: '4px 8px', display: 'inline-flex', alignItems: 'center', gap: 4,
-              }}>
-                <Receipt size={9} /> {order.invoiceNumber}
-              </span>
-            </>
-          )}
-
+          {order.refNumber && <IdBadge color={T.gold}>{order.refNumber}</IdBadge>}
+          {order.quoteNumber && <><ChevronRight size={10} style={{ color: T.muted }} /><IdBadge color={T.indigo} icon={Hash}>{order.quoteNumber}</IdBadge></>}
+          {order.invoiceNumber && <><ChevronRight size={10} style={{ color: T.muted }} /><IdBadge color={T.emerald} icon={Receipt}>{order.invoiceNumber}</IdBadge></>}
           {!order.refNumber && !order.quoteNumber && !order.invoiceNumber && (
-            <span style={{
-              fontFamily: jost, fontSize: 9, fontWeight: 400,
-              letterSpacing: '0.15em', color: T.muted,
-              background: T.offwhite, border: `1px solid ${T.border}`,
-              padding: '4px 10px',
-            }}>
+            <span style={{ fontFamily: jost, fontSize: 9, color: T.muted, background: T.offwhite, border: `1px solid ${T.border}`, padding: '4px 10px' }}>
               #{order._id.slice(-6)}
             </span>
           )}
         </div>
       </td>
 
-      {/* ── Project ── */}
-      <td style={{ padding: '16px 20px', borderBottom: `1px solid ${T.border}` }}>
+      {/* Project */}
+      <td style={cellStyle}>
         <div style={{ display: 'flex', alignItems: 'flex-start', gap: 10 }}>
           <div style={{
-            marginTop: 2, padding: 6,
+            marginTop: 2, padding: 6, flexShrink: 0,
             background: order.orderType === 'offsite' ? 'rgba(249,115,22,0.08)' : 'rgba(79,70,229,0.08)',
             color: order.orderType === 'offsite' ? '#f97316' : T.indigo,
-            flexShrink: 0,
           }}>
             {order.orderType === 'offsite' ? <MapPin size={12} /> : <Package size={12} />}
           </div>
           <div>
-            <p style={{ fontFamily: jost, fontSize: 13, fontWeight: 500, color: T.text, margin: '0 0 3px' }}>
-              {order.title}
-            </p>
-            <p style={{ fontFamily: jost, fontSize: 13, fontWeight: 400, color: T.muted, margin: '0 0 1px' }}>
-              {order.clientName}
-            </p>
-            <p style={{ fontFamily: jost, fontSize: 13, fontWeight: 300, color: T.muted, margin: 0 }}>
-              Attn: {order.orderPlacedBy || 'N/A'}
-            </p>
+            <p style={{ fontFamily: jost, fontSize: 13, fontWeight: 500, color: T.text, margin: '0 0 3px' }}>{order.title}</p>
+            <p style={{ fontFamily: jost, fontSize: 13, color: T.muted, margin: '0 0 1px' }}>{order.clientName}</p>
+            <p style={{ fontFamily: jost, fontSize: 13, fontWeight: 300, color: T.muted, margin: 0 }}>Attn: {order.orderPlacedBy || 'N/A'}</p>
           </div>
         </div>
       </td>
 
-      {/* ── Description ── */}
-      <td style={{ padding: '16px 20px', maxWidth: 260, borderBottom: `1px solid ${T.border}` }}>
-        <div
-          style={{
-            fontFamily: jost, fontSize: 15, fontWeight: 300, color: T.muted,
-            overflow: 'hidden', display: '-webkit-box', WebkitLineClamp: 2,
-            WebkitBoxOrient: 'vertical', fontStyle: 'italic',
-            pointerEvents: 'none',
-          }}
-          dangerouslySetInnerHTML={{
-            __html: order.description?.replace(/<img[^>]*>/g, '[Image]') || '—',
-          }}
-        />
+      {/* Description + procurement progress */}
+      <td style={{ ...cellStyle, maxWidth: 280 }}>
+        <div style={{
+          fontFamily: jost, fontSize: 14, fontWeight: 300, color: T.muted, fontStyle: 'italic',
+          overflow: 'hidden', display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical',
+        }}>
+          {plainText(order.description) || '—'}
+        </div>
+        {procurement.total > 0 && (
+          <button
+            type="button"
+            onClick={(e) => { e.stopPropagation(); handlers.open(order, 'procurement'); }}
+            title="Open procurement tracking"
+            style={{
+              marginTop: 8, display: 'inline-flex', alignItems: 'center', gap: 6, padding: '3px 8px', cursor: 'pointer',
+              border: `1px solid ${procurement.ready === procurement.total ? 'rgba(5,150,105,0.3)' : T.borderG}`,
+              background: procurement.ready === procurement.total ? '#ecfdf5' : T.dimBg,
+              color: procurement.ready === procurement.total ? T.emerald : T.gold,
+              fontFamily: jost, fontSize: 10, fontStyle: 'normal',
+            }}
+          >
+            <ClipboardList size={11} /> {procurement.ready}/{procurement.total} ready
+          </button>
+        )}
       </td>
 
-      {/* ── Files ── */}
-      <td style={{ padding: '16px 20px', borderBottom: `1px solid ${T.border}` }}>
-        {order.attachments?.length > 0 && (
+      {/* Files — names only; previews download on demand, not on list load */}
+      <td style={cellStyle} onClick={(e) => e.stopPropagation()}>
+        {attachments.length > 0 && (
           <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
-            {order.attachments.map((file, idx) => (
-              <AttachmentThumb
-                key={idx}
-                file={file}
-                onClick={f => { onOpenFile(f); }}
-              />
+            {attachments.slice(0, ROW_FILE_CHIPS).map((file, idx) => (
+              <FileChip key={file.itemId || `${file.name}-${idx}`} file={file} onOpen={file.itemId ? (f) => handlers.openFile(order, f) : () => handlers.open(order)} />
             ))}
+            {attachments.length > ROW_FILE_CHIPS && (
+              <button type="button" onClick={() => handlers.open(order)} style={{ background: 'none', border: 'none', cursor: 'pointer', fontFamily: jost, fontSize: 10, color: T.muted }}>
+                +{attachments.length - ROW_FILE_CHIPS} more
+              </button>
+            )}
           </div>
         )}
       </td>
 
-      {/* ── Actions ── */}
-      <td style={{ padding: '16px 20px', textAlign: 'right', borderBottom: `1px solid ${T.border}` }}>
+      {/* Actions */}
+      <td style={{ ...cellStyle, textAlign: 'right' }}>
         <div style={{ display: 'flex', justifyContent: 'flex-end', alignItems: 'center', gap: 4 }}>
-
-          {/* Timeline — jump straight to posting/viewing updates, no detour through Update Record */}
-          <button
-            onClick={e => { e.stopPropagation(); onOpenTimeline(order); }}
-            title={order.timeline?.length ? `Timeline (${order.timeline.length})` : 'Timeline'}
-            style={{
-              background: 'none', border: 'none', cursor: 'pointer',
-              color: T.muted, padding: 6, display: 'flex', transition: 'color 0.2s',
-            }}
-            onMouseEnter={e => e.currentTarget.style.color = T.gold}
-            onMouseLeave={e => e.currentTarget.style.color = T.muted}
-          >
+          <IconBtn title={order.timelineCount ? `Timeline (${order.timelineCount})` : 'Timeline'} onClick={() => handlers.openTimeline(order)}>
             <History size={15} />
-          </button>
+          </IconBtn>
 
-          {/* Linked shipments — only shown when the order actually has any */}
-          {shipmentCounts[order._id] > 0 && (
-            <button
-              onClick={e => { e.stopPropagation(); onOpenShipments(order); }}
-              title={`Linked shipments (${shipmentCounts[order._id]})`}
-              style={{
-                background: 'none', border: 'none', cursor: 'pointer',
-                color: T.muted, padding: 6, display: 'flex', transition: 'color 0.2s',
-              }}
-              onMouseEnter={e => e.currentTarget.style.color = T.gold}
-              onMouseLeave={e => e.currentTarget.style.color = T.muted}
-            >
+          {order.shipmentCount > 0 && (
+            <IconBtn title={`Linked shipments (${order.shipmentCount})`} onClick={() => handlers.openShipments(order)}>
               <Truck size={15} />
-            </button>
+            </IconBtn>
           )}
 
-          {/* Start Project */}
           {order.status === 'inquiry' && (
             <button
-              disabled={loading}
-              onClick={e => { e.stopPropagation(); onStartProject(order); }}
+              type="button"
+              disabled={busy}
+              onClick={(e) => { e.stopPropagation(); handlers.startProject(order); }}
               style={{
-                fontFamily: jost, fontSize: 9, fontWeight: 500,
-                letterSpacing: '0.18em', textTransform: 'uppercase',
-                padding: '6px 14px',
-                background: loading ? T.offwhite : 'rgba(184,151,90,0.1)',
-                border: `1px solid ${loading ? T.border : T.borderG}`,
-                color: loading ? T.muted : T.gold,
-                cursor: loading ? 'not-allowed' : 'pointer',
-                transition: 'all 0.2s',
+                fontFamily: jost, fontSize: 9, fontWeight: 500, letterSpacing: '0.18em', textTransform: 'uppercase',
+                padding: '6px 14px', background: busy ? T.offwhite : 'rgba(184,151,90,0.1)',
+                border: `1px solid ${busy ? T.border : T.borderG}`, color: busy ? T.muted : T.gold,
+                cursor: busy ? 'not-allowed' : 'pointer',
               }}
             >
-              {loading ? '…' : 'Start Project'}
+              {busy ? '…' : 'Start Project'}
             </button>
           )}
 
-          {/* Mark Complete */}
           {order.status === 'ongoing' && (
-            <button
-              disabled={loading}
-              onClick={e => { e.stopPropagation(); onMarkComplete(order); }}
-              title="Mark complete"
-              style={{
-                background: 'none', border: 'none', cursor: loading ? 'not-allowed' : 'pointer',
-                color: loading ? '#d1d5db' : T.emerald, padding: 6, display: 'flex',
-              }}
-            >
+            <IconBtn title="Mark complete" onClick={() => handlers.complete(order)} disabled={busy} color={T.emerald} hover={T.emerald}>
               <CheckCircle size={17} />
-            </button>
+            </IconBtn>
           )}
 
-          {/* Portal chat — available at every stage, including completed */}
           <button
-            onClick={e => { e.stopPropagation(); onOpenPortalChat(order, ordData); }}
+            type="button"
+            onClick={(e) => { e.stopPropagation(); handlers.openChat(order); }}
             title={hasUnread ? `${unread} new client message${unread !== 1 ? 's' : ''}` : 'Open portal chat'}
             style={{
-              position: 'relative', background: 'none', border: 'none',
-              cursor: 'pointer', padding: 6, display: 'flex',
+              position: 'relative', background: 'none', border: 'none', cursor: 'pointer', padding: 6, display: 'flex',
               color: hasUnread ? '#7c3aed' : T.muted,
-              transition: 'color 0.2s',
             }}
           >
             <Link2 size={15} />
             {hasUnread && (
               <span style={{
-                position: 'absolute', top: -2, right: -2,
-                minWidth: 15, height: 15,
-                background: '#ef4444', color: 'white',
-                fontSize: 8, fontFamily: jost, fontWeight: 700,
-                borderRadius: '50%', display: 'flex', alignItems: 'center',
-                justifyContent: 'center', padding: '0 3px',
+                position: 'absolute', top: -2, right: -2, minWidth: 15, height: 15, background: '#ef4444', color: 'white',
+                fontSize: 8, fontFamily: jost, fontWeight: 700, borderRadius: '50%',
+                display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '0 3px',
               }}>
                 {unread > 9 ? '9+' : unread}
               </span>
             )}
           </button>
 
-          {/* Copy/Send portal link — available at every stage, including completed */}
-          {alreadySent ? (
-            <div style={{ position: 'relative' }} className="group">
-              <button
-                disabled
-                style={{
-                  background: 'none', border: 'none', padding: 6,
-                  color: '#d1d5db', cursor: 'not-allowed', display: 'flex',
-                }}
-                title="Link already sent"
-              >
-                <Send size={15} />
-              </button>
-              {/* Hover tooltip */}
-              <div style={{
-                position: 'absolute', right: 0, top: 32,
-                background: T.navy, color: 'white',
-                padding: '10px 14px', zIndex: 50,
-                minWidth: 160, display: 'none',
-              }}
-                className="group-hover:!block"
-              >
-                <p style={{ fontFamily: jost, fontSize: 9, letterSpacing: '0.2em', color: '#94a3b8', margin: '0 0 8px', textTransform: 'uppercase' }}>
-                  Link sent
-                </p>
-                <button
-                  onClick={e => { e.stopPropagation(); onCopyLink(order, portalUrl); }}
-                  style={{
-                    background: 'none', border: 'none', cursor: 'pointer',
-                    fontFamily: jost, fontSize: 10, color: '#a5b4fc',
-                    display: 'flex', alignItems: 'center', gap: 6,
-                  }}
-                >
-                  {justCopied ? <CheckCircle size={11} /> : <Copy size={11} />}
-                  {justCopied ? 'Copied!' : 'Copy link again'}
-                </button>
-              </div>
-            </div>
-          ) : (
-            <button
-              onClick={e => { e.stopPropagation(); onCopyLink(order, portalUrl); }}
-              title="Copy & send client link"
-              style={{
-                background: 'none', border: 'none', cursor: 'pointer',
-                padding: 6, display: 'flex', color: justCopied ? T.emerald : T.muted,
-                transition: 'color 0.2s',
-              }}
-            >
-              {justCopied ? <CheckCircle size={15} /> : <Send size={15} />}
-            </button>
-          )}
+          <IconBtn
+            title={!order.portalSlug ? 'No client portal for this order' : 'Copy & open client portal link'}
+            onClick={() => handlers.copyLink(order)}
+            disabled={!order.portalSlug}
+            color={justCopied ? T.emerald : linkSent ? '#c4b5fd' : T.muted}
+          >
+            {justCopied ? <CheckCircle size={15} /> : linkSent ? <Copy size={15} /> : <Send size={15} />}
+          </IconBtn>
 
-          {/* Delete */}
-          {!isCompleted && (
-            <button
-              disabled={loading}
-              onClick={e => { e.stopPropagation(); onDelete(order); }}
-              style={{
-                background: 'none', border: 'none', padding: 6, display: 'flex',
-                cursor: loading ? 'not-allowed' : 'pointer',
-                color: loading ? '#e2e8f0' : 'rgba(220,38,38,0.5)',
-                transition: 'color 0.2s',
-              }}
-              onMouseEnter={e => { if (!loading) e.currentTarget.style.color = '#dc2626'; }}
-              onMouseLeave={e => { if (!loading) e.currentTarget.style.color = 'rgba(220,38,38,0.5)'; }}
-            >
+          {order.status !== 'completed' && (
+            <IconBtn title="Delete order" onClick={() => handlers.remove(order)} disabled={busy} color="rgba(220,38,38,0.5)" hover="#dc2626">
               <Trash2 size={17} />
-            </button>
+            </IconBtn>
           )}
         </div>
       </td>
     </tr>
   );
-};
+});
 
 // ─────────────────────────────────────────────────────────────────────────────
 // MAIN COMPONENT — OrderTracker
 // ─────────────────────────────────────────────────────────────────────────────
 export default function OrderTracker() {
+  const { showToast, confirm, Toast, ConfirmDialog } = usePopup();
 
   // ── State ─────────────────────────────────────────────────────────────────
   const [orders,           setOrders]           = useState([]);
-  const [activeTab,        setActiveTab]        = useState('inquiry');
-  const [isModalOpen,      setIsModalOpen]      = useState(false);
-  const [editOrder,        setEditOrder]        = useState(null);
-  const [timelineOrder,    setTimelineOrder]    = useState(null);   // order whose Timeline modal is open
-  const [templateMgrOpen,  setTemplateMgrOpen]  = useState(false);
-  const [loading,          setLoading]          = useState(false);
   const [fetchLoading,     setFetchLoading]     = useState(true);
+  const [fetchError,       setFetchError]       = useState(null);
+  const [statuses,         setStatuses]         = useState([]);   // procurement stages
+  const [busyIds,          setBusyIds]          = useState({});   // orderId -> true while a row action runs
+  const [activeTab,        setActiveTab]        = useState('inquiry');
   const [expandedFolders,  setExpandedFolders]  = useState({});
-  const [quotePrompt,      setQuotePrompt]      = useState(null);
-  const [completionPrompt, setCompletionPrompt] = useState(null);
   const [searchTerm,       setSearchTerm]       = useState('');
   const [selectedClient,   setSelectedClient]   = useState('');
   const [selectedContact,  setSelectedContact]  = useState('');
   const [searchFocused,    setSearchFocused]    = useState(false);
   const [sentLinks,        setSentLinks]        = useState({});
   const [copiedId,         setCopiedId]         = useState(null);
-  const [chatOrder,        setChatOrder]        = useState(null);
-  const [clientCheckModal, setClientCheckModal] = useState(null);
   const [unreadCounts,     setUnreadCounts]     = useState({});
-  const [shipmentCounts,   setShipmentCounts]   = useState({});   // orderId -> linked shipment count
-  const [shipmentsOrder,   setShipmentsOrder]   = useState(null); // order whose Linked Shipments modal is open
-  const [lightboxFile,     setLightboxFile]     = useState(null);  // attachment lightbox
+  const [meta,             setMeta]             = useState({ clients: [], clientContacts: {} });
 
-  // meta: populated from /clients, not from orders
-  const [meta, setMeta] = useState({ clients: [], clientContacts: {}, clientMap: {} });
+  // Popups — each holds the order it is open for (ids for the detail popup,
+  // so it always reads the latest row from `orders`).
+  const [detail,           setDetail]           = useState(null); // { id, tab }
+  const [startOrder,       setStartOrder]       = useState(null);
+  const [completeOrder,    setCompleteOrder]    = useState(null);
+  const [invoiceNumber,    setInvoiceNumber]    = useState('');
+  const [timelineOrder,    setTimelineOrder]    = useState(null);
+  const [shipmentsOrder,   setShipmentsOrder]   = useState(null);
+  const [chatOrder,        setChatOrder]        = useState(null);
+  const [lightbox,         setLightbox]         = useState(null); // { orderId, file }
+  const [templateMgrOpen,  setTemplateMgrOpen]  = useState(false);
+  const [clientCheckModal, setClientCheckModal] = useState(null);
 
-  const [formData, setFormData] = useState({
-    title: '', clientName: '', orderPlacedBy: '',
-    description: '', attachments: [], orderType: 'product',
-  });
+  // New inquiry form — files are staged locally and uploaded once the order exists.
+  const [isModalOpen,      setIsModalOpen]      = useState(false);
+  const [creating,         setCreating]         = useState(false);
+  const [formData,         setFormData]         = useState(EMPTY_FORM);
+  const [stagedFiles,      setStagedFiles]      = useState({ screenshot: [], attachment: [] });
+  const createEditorRef = useRef(null);
 
-  const createEditorRef  = useRef(null);
-  const editEditorRef    = useRef(null);
-  const unreadPollTimer  = useRef(null);
   const prevClientCounts = useRef({});
-  const quoteInputRef    = useRef(null);
-  const invoiceInputRef  = useRef(null);
-
-  const { showToast, confirm, Toast, ConfirmDialog } = usePopup();
-
-  // ── Data fetching ──────────────────────────────────────────────────────────
-  const fetchOrders = async () => {
-    log.debug('Fetching orders…');
-    setFetchLoading(true);
-    try {
-      const res = await api.get('/orders');
-      if (!Array.isArray(res.data)) throw new Error('Non-array response');
-      log.info('Orders loaded', { count: res.data.length });
-      setOrders(res.data);
-    } catch (err) {
-      log.error('Failed to fetch orders', err.message);
-      setOrders([]);
-    } finally {
-      setFetchLoading(false);
-    }
-  };
-
-  const fetchClients = async () => {
-    log.debug('Fetching client list for dropdowns…');
-    try {
-      const res  = await api.get('/clients');
-      const data = Array.isArray(res.data) ? res.data : [];
-
-      const clientMap = {};
-      data.forEach(c => {
-        clientMap[c.companyName] = { _id: c._id, contacts: c.contacts || [] };
-      });
-
-      const clients = data.map(c => c.companyName).sort();
-      const clientContacts = {};
-      data.forEach(c => {
-        clientContacts[c.companyName] = (c.contacts || [])
-          .map(ct => ct.name)
-          .filter(Boolean)
-          .sort();
-      });
-
-      log.info('Clients loaded for dropdowns', { count: clients.length });
-      setMeta({ clients, clientContacts, clientMap });
-    } catch (err) {
-      log.warn('Could not load clients from API', err.message);
-    }
-  };
-
-  // ── Unread polling ─────────────────────────────────────────────────────────
-  // Keep a ref to orders so the poller always reads the latest list
-  // without needing orders in its dependency array.
   const ordersRef = useRef(orders);
   useEffect(() => { ordersRef.current = orders; }, [orders]);
 
-  const pollUnreadMessages = async () => {
-    try {
-      const { data: counts = {} } = await api.get('/portal/unread-counts').catch(() => ({ data: {} }));
+  // ── Local state helpers ────────────────────────────────────────────────────
+  const patchOrder = useCallback((id, patch) => {
+    setOrders((prev) => prev.map((o) => (o._id === id ? { ...o, ...patch } : o)));
+  }, []);
+  const setBusy = (id, on) => setBusyIds((prev) => {
+    const { [id]: _, ...rest } = prev;
+    return on ? { ...rest, [id]: true } : rest;
+  });
 
+  // ── Data fetching ──────────────────────────────────────────────────────────
+  const fetchOrders = useCallback(async () => {
+    setFetchLoading(true);
+    setFetchError(null);
+    try {
+      const list = await ordersApi.list();
+      log.info('Orders loaded', { count: list.length });
+      setOrders(list);
+    } catch (err) {
+      log.error('Failed to fetch orders', err.message);
+      setFetchError(err.message);
+    } finally {
+      setFetchLoading(false);
+    }
+  }, []);
+
+  const fetchClients = useCallback(async () => {
+    try {
+      const res = await api.get('/clients');
+      const data = Array.isArray(res.data) ? res.data : [];
+      const clientContacts = {};
+      data.forEach((c) => {
+        clientContacts[c.companyName] = (c.contacts || []).map((ct) => ct.name).filter(Boolean).sort();
+      });
+      setMeta({ clients: data.map((c) => c.companyName).sort(), clientContacts });
+    } catch (err) {
+      log.warn('Could not load clients from API', err.message);
+    }
+  }, []);
+
+  const pollUnreadMessages = useCallback(async () => {
+    try {
+      const { data: counts = {} } = await api.get('/portal/unread-counts');
       const badges = {};
       Object.entries(counts).forEach(([orderId, data]) => {
-        const total  = data.clientCount || 0;
-        const seen   = getSeenCount(orderId);
-        const unread = Math.max(0, total - seen);
-        badges[orderId] = { ...data, unread };
+        const total = data.clientCount || 0;
+        badges[orderId] = Math.max(0, total - getSeenCount(orderId));
 
         const prev = prevClientCounts.current[orderId] || 0;
         if (total > prev && prev > 0) {
-          const order = ordersRef.current.find(o => o._id === orderId);
-          const label = order?.clientName || 'A client';
-          pushNotif(
-            `${label} sent a message`,
-            data.lastClientMessage || 'New message in portal',
-            '/orders',
-            `portal-client-${orderId}`
-          );
+          const order = ordersRef.current.find((o) => o._id === orderId);
+          pushNotif(`${order?.clientName || 'A client'} sent a message`, data.lastClientMessage || 'New message in portal', '/orders', `portal-client-${orderId}`);
         }
         prevClientCounts.current[orderId] = total;
       });
-
       setUnreadCounts(badges);
     } catch (err) {
       log.warn('Unread poll failed', err.message);
     }
-  };
+  }, []);
 
-  // ── Shipment counts — powers the row-level Linked Shipments icon ──────────
-  // One-time fetch (shipments change far less often than portal messages),
-  // refreshed after closing the Linked Shipments modal in case anything
-  // changed in Courier Tracking meanwhile.
-  const fetchShipmentCounts = async () => {
-    try {
-      const { data } = await api.get('/orders/shipment-counts');
-      setShipmentCounts(data || {});
-    } catch (err) {
-      log.warn('Shipment counts fetch failed', err.message);
-    }
-  };
-
-  // ── Bootstrap — runs once on mount ────────────────────────────────────────
-  // All three functions are plain declarations above this effect,
-  // so there is no TDZ issue. The empty dep array is intentional:
-  // we want mount-only behaviour; the functions are stable references
-  // within this render scope.
+  // ── Bootstrap ──────────────────────────────────────────────────────────────
   useEffect(() => {
     initNotifications();
     fetchOrders();
     fetchClients();
-    fetchShipmentCounts();
-    pollUnreadMessages();
-    unreadPollTimer.current = setInterval(pollUnreadMessages, UNREAD_POLL_INTERVAL);
-    return () => clearInterval(unreadPollTimer.current);
-  }, []);
+    ordersApi.meta().then((m) => setStatuses(m.procurementStatuses)).catch((err) => log.warn('Meta load failed', err.message));
+  }, [fetchOrders, fetchClients]);
+
+  // Unread polling runs only while the tab is visible — no background traffic
+  // from a forgotten tab — and catches up immediately when it's shown again.
+  useEffect(() => {
+    let timer = null;
+    const start = () => { if (!timer) { pollUnreadMessages(); timer = setInterval(pollUnreadMessages, UNREAD_POLL_INTERVAL); } };
+    const stop = () => { clearInterval(timer); timer = null; };
+    const onVisibility = () => (document.hidden ? stop() : start());
+    if (!document.hidden) start();
+    document.addEventListener('visibilitychange', onVisibility);
+    return () => { stop(); document.removeEventListener('visibilitychange', onVisibility); };
+  }, [pollUnreadMessages]);
 
   // ── Derived data ───────────────────────────────────────────────────────────
-  const filteredOrders = useMemo(() => {
-    const term = searchTerm.toLowerCase();
-    return (orders || []).filter(order => {
-      if (order.status !== activeTab) return false;
-      if (selectedClient  && order.clientName    !== selectedClient)  return false;
-      if (selectedContact && order.orderPlacedBy !== selectedContact) return false;
-      if (!searchTerm) return true;
-      const haystack = [
-        order.clientName, order.title, order.refNumber, order._id,
-        order.orderPlacedBy, order.invoiceNumber, order.description,
-      ].join(' ').toLowerCase();
-      return haystack.includes(term);
-    });
-  }, [orders, activeTab, searchTerm, selectedClient, selectedContact]);
+  const filters = useMemo(() => ({ term: searchTerm.trim().toLowerCase(), client: selectedClient, contact: selectedContact }), [searchTerm, selectedClient, selectedContact]);
+
+  const tabCounts = useMemo(() => orders.reduce((acc, o) => ({ ...acc, [o.status]: (acc[o.status] || 0) + 1 }), {}), [orders]);
+
+  const filteredOrders = useMemo(
+    () => orders.filter((o) => o.status === activeTab && matchesFilters(o, filters)),
+    [orders, activeTab, filters],
+  );
 
   const groupedCompleted = useMemo(() => {
-    const term = searchTerm.toLowerCase();
-    const completed = orders.filter(o => {
-      if (o.status !== 'completed') return false;
-      if (selectedClient  && o.clientName    !== selectedClient)  return false;
-      if (selectedContact && o.orderPlacedBy !== selectedContact) return false;
-      if (!searchTerm) return true;
-      return (
-        o.clientName?.toLowerCase().includes(term) ||
-        o.title?.toLowerCase().includes(term) ||
-        o.invoiceNumber?.toLowerCase().includes(term) ||
-        o.quoteNumber?.toLowerCase().includes(term) ||
-        o.refNumber?.toLowerCase().includes(term) ||
-        o.orderPlacedBy?.toLowerCase().includes(term)
-      );
-    });
     const hierarchy = {};
-    completed.forEach(order => {
-      const date  = order.completedAt || order.updatedAt || new Date().toISOString();
-      const fy    = getFinancialYear(date);
+    orders.filter((o) => o.status === 'completed' && matchesFilters(o, filters)).forEach((order) => {
+      const date = order.completedAt || order.updatedAt || new Date().toISOString();
+      const fy = getFinancialYear(date);
       const month = getMonthName(date);
-      if (!hierarchy[fy])        hierarchy[fy] = {};
-      if (!hierarchy[fy][month]) hierarchy[fy][month] = [];
-      hierarchy[fy][month].push(order);
+      ((hierarchy[fy] ||= {})[month] ||= []).push(order);
     });
     return hierarchy;
-  }, [orders, searchTerm, selectedClient, selectedContact]);
+  }, [orders, filters]);
 
-  // ── Mutations ──────────────────────────────────────────────────────────────
-  const sendPortalEmail = async ({ slug, clientEmail, contactName, clientName, orderRef, title, portalUrl }) => {
-    log.debug('Sending portal email', { clientEmail, orderRef });
-    await api.post('/portal/send-email', {
-      slug, clientEmail, contactName, clientName, orderRef, title, cc: CC_EMAIL
-    });
+  // Filter dropdowns list only the clients / contacts that have orders in the
+  // current tab (Inquiries, Ongoing or Completed); contacts narrow to the
+  // selected client. Counts are shown next to each name.
+  const tabOrders = useMemo(() => orders.filter((o) => o.status === activeTab), [orders, activeTab]);
+  const clientOptions = useMemo(() => countBy(tabOrders, 'clientName'), [tabOrders]);
+  const contactOptions = useMemo(
+    () => countBy(selectedClient ? tabOrders.filter((o) => o.clientName === selectedClient) : tabOrders, 'orderPlacedBy'),
+    [tabOrders, selectedClient],
+  );
+
+  // Switching tab drops a client/contact filter that has no orders there.
+  useEffect(() => {
+    if (selectedClient && !clientOptions.some((o) => o.value === selectedClient)) setSelectedClient('');
+  }, [clientOptions, selectedClient]);
+  useEffect(() => {
+    if (selectedContact && !contactOptions.some((o) => o.value === selectedContact)) setSelectedContact('');
+  }, [contactOptions, selectedContact]);
+
+  const detailOrder = detail ? orders.find((o) => o._id === detail.id) : null;
+  const onDetailChange = useCallback((patch) => { if (detail?.id) patchOrder(detail.id, patch); }, [detail?.id, patchOrder]);
+
+  // ── Portal e-mail after create ─────────────────────────────────────────────
+  const sendPortalEmail = ({ slug, clientEmail, contactName, clientName, orderRef, title }) =>
+    api.post('/portal/send-email', { slug, clientEmail, contactName, clientName, orderRef, title, cc: CC_EMAIL });
+
+  const offerPortalEmail = async (order) => {
+    const base = { orderRef: order.refNumber, title: order.title, portalSlug: order.portalSlug };
+    const contactName = order.orderPlacedBy?.trim() || '';
+    if (!order.portalSlug) return;
+    try {
+      const { data } = await api.get('/clients/lookup', { params: { name: order.clientName } });
+      if (!data.found || !data.client) {
+        setClientCheckModal({ ...base, mode: 'create', clientName: order.clientName, contactName });
+        return;
+      }
+      const contact = data.client.contacts?.find((ct) => ct.name?.toLowerCase() === contactName.toLowerCase());
+      if (!contact?.email) {
+        setClientCheckModal({ ...base, mode: 'add-contact', clientId: data.client._id, companyName: data.client.companyName, contactName });
+        return;
+      }
+      await sendPortalEmail({
+        slug: order.portalSlug, clientEmail: contact.email, contactName: contact.name,
+        clientName: data.client.companyName, orderRef: order.refNumber, title: order.title,
+      });
+      setSentLinks((prev) => ({ ...prev, [order._id]: true }));
+      showToast('success', `Portal link sent to ${contact.email}`);
+    } catch (err) {
+      log.warn('Client lookup / portal e-mail failed', err.message);
+      showToast('warning', 'Inquiry saved, but the portal e-mail could not be sent.');
+    }
+  };
+
+  // ── Create ─────────────────────────────────────────────────────────────────
+  const stageFiles = (category, files) => setStagedFiles((prev) => ({ ...prev, [category]: [...prev[category], ...files] }));
+  const unstageFile = (category, idx) => setStagedFiles((prev) => ({ ...prev, [category]: prev[category].filter((_, i) => i !== idx) }));
+  usePastedImages((images) => stageFiles('screenshot', images), isModalOpen && !creating);
+
+  const closeCreate = () => {
+    setIsModalOpen(false);
+    setFormData(EMPTY_FORM);
+    setStagedFiles({ screenshot: [], attachment: [] });
   };
 
   const saveOrder = async (e) => {
     e.preventDefault();
-    log.info('Submitting new inquiry', { title: formData.title, client: formData.clientName });
-    setLoading(true);
-
-    const richDescription = createEditorRef.current
-      ? createEditorRef.current.innerHTML
-      : formData.description;
-
-    const financialYear = getFinancialYear(new Date().toISOString());
-    const fyOrders      = orders.filter(o => o.refNumber?.startsWith('INQ-' + financialYear));
-    const lastNumbers   = fyOrders
-      .map(o => parseInt(o.refNumber.split('-').pop(), 10))
-      .filter(n => !isNaN(n));
-    const nextNumber  = lastNumbers.length > 0 ? Math.max(...lastNumbers) + 1 : 1;
-    const generatedRef = `INQ-${financialYear}-${String(nextNumber).padStart(3, '0')}`;
-
-    const payload = {
-      ...formData,
-      refNumber: generatedRef,
-      description: richDescription,
-      status: 'inquiry',
-      attachments: formData.attachments,
-    };
-
+    if (!formData.clientName || !formData.orderPlacedBy) { showToast('error', 'Pick a client and a contact person.'); return; }
+    setCreating(true);
     try {
-      const res = await api.post('/orders', payload);
-      if (res.status === 201 || res.status === 200) {
-        setIsModalOpen(false);
-        setFormData({ title: '', clientName: '', orderPlacedBy: '', description: '', attachments: [], orderType: 'product' });
-        fetchOrders();
-        log.info('Inquiry created', { ref: generatedRef });
+      const order = await ordersApi.create({ ...formData, description: createEditorRef.current?.innerHTML || '' });
+      setOrders((prev) => [order, ...prev]);
+      setActiveTab('inquiry');
+      const staged = stagedFiles;
+      closeCreate();
+      showToast('success', `Inquiry ${order.refNumber} created`);
+      log.info('Inquiry created', { ref: order.refNumber });
 
-        // Create portal to get the real server-generated slug
-        const savedOrder = res.data;
-        console.log("save order details = "+saveOrder);
-        /*
-        const genRandomSlug = () => Array.from({length: 10}, () => 'abcdefghijklmnopqrstuvwxyz0123456789'[Math.floor(Math.random() * 36)]).join('');
-        //let portalSlug   = generatedRef.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
-        let portalSlug   = genRandomSlug();
-        let portalUrl    = `${CLIENT_BASE_URL}/p/${portalSlug}`;
-
-        try {
-          const portalRes = await api.post('/portal', {
-            orderId:    savedOrder._id,
-            portalSlug,
-            type:       payload.orderType || 'product',
-            orderRef:   generatedRef,
-            clientName: payload.clientName,
-            orderPlacedBy: formData.orderPlacedBy || '',
-            title:      payload.title,
-          });
-          if (portalRes.data?.slug) {
-            portalSlug = portalRes.data.slug;
-            portalUrl  = `${CLIENT_BASE_URL}/p/${portalSlug}`;
-            log.info('Portal created', { slug: portalSlug });
-          }
-        } catch (portalErr) {
-          if (portalErr.response?.status === 409 && portalErr.response.data?.portal?.slug) {
-            portalSlug = portalErr.response.data.portal.slug;
-            portalUrl  = `${CLIENT_BASE_URL}/p/${portalSlug}`;
-            log.info('Portal already existed', { slug: portalSlug });
-          } else {
-            log.warn('Portal creation failed — slug may be wrong', portalErr.message);
-          }
-        }
-        */
-        // Client/contact lookup → determine email-send scenario
-        try {
-          const lookup = await api.get('/clients/lookup', { params: { name: payload.clientName } });
-          let portalSlug = savedOrder.slug
-          let portalUrl = `${CLIENT_BASE_URL}/p/${portalSlug}`;
-
-          if (lookup.data.found && lookup.data.client) {
-            const existingClient = lookup.data.client;
-            const contactName    = payload.orderPlacedBy?.trim() || '';
-            const matchedContact = existingClient.contacts?.find(
-              ct => ct.name?.toLowerCase() === contactName.toLowerCase()
-            );
-
-            if (matchedContact?.email) {
-              // Scenario A: client + contact both exist with email
-              try {
-                await sendPortalEmail({
-                  slug: portalSlug, clientEmail: matchedContact.email,
-                  contactName: matchedContact.name, clientName: existingClient.companyName,
-                  orderRef: generatedRef, title: payload.title
-                });
-                log.info('Portal email sent', { email: matchedContact.email });
-              } catch (emailErr) {
-                log.warn('Email send failed (non-fatal)', emailErr.message);
-              }
-            } else {
-              // Scenarios B & C: contact exists without email OR brand-new contact
-              setClientCheckModal({
-                mode:        'add-contact',
-                clientId:    existingClient._id,
-                companyName: existingClient.companyName,
-                contactName, orderRef: generatedRef,
-                title: payload.title, portalSlug, portalUrl,
-              });
-            }
-          } else {
-            // Scenario D: client not in DB
-            setClientCheckModal({
-              mode: 'create', clientName: payload.clientName,
-              contactName: payload.orderPlacedBy?.trim() || '',
-              orderRef: generatedRef, title: payload.title, portalSlug, portalUrl,
-            });
-          }
-        } catch (lookupErr) {
-          log.warn('Client lookup failed', lookupErr.message);
-          setClientCheckModal({
-            mode: 'create', clientName: payload.clientName,
-            contactName: payload.orderPlacedBy?.trim() || '',
-            orderRef: generatedRef, title: payload.title, portalSlug,
-            portalUrl: `${CLIENT_BASE_URL}/p/${portalSlug}`,
-          });
-        }
+      // Files go straight into the new order's OneDrive folder.
+      const uploads = Object.entries(staged).filter(([, files]) => files.length);
+      if (uploads.length) {
+        setBusy(order._id, true);
+        Promise.allSettled(uploads.map(([category, files]) => ordersApi.uploadFiles(order._id, files, category)))
+          .then((results) => {
+            const saved = results.flatMap((r) => (r.status === 'fulfilled' ? r.value.files : []));
+            if (saved.length) setOrders((prev) => prev.map((o) => (o._id === order._id ? { ...o, attachments: [...(o.attachments || []), ...saved] } : o)));
+            const failed = results.filter((r) => r.status === 'rejected');
+            if (failed.length) showToast('error', `Some files didn't upload: ${failed[0].reason.message}. Open the order to retry.`);
+          })
+          .finally(() => setBusy(order._id, false));
       }
+      offerPortalEmail(order);
     } catch (err) {
       log.error('Save order failed', err.message);
+      showToast('error', err.message);
     } finally {
-      setLoading(false);
+      setCreating(false);
     }
   };
 
-  const updateOrder = async (id, payload) => {
-    log.info('Updating order', { id });
-    setLoading(true);
-    const finalPayload = { ...payload };
-    if (editEditorRef.current && id === editOrder?._id) {
-      finalPayload.description = editEditorRef.current.innerHTML;
-    }
+  // ── Row actions ────────────────────────────────────────────────────────────
+  const submitComplete = async () => {
+    const value = invoiceNumber.trim();
+    if (!value || !completeOrder) return;
+    const order = completeOrder;
+    setCompleteOrder(null);
+    setBusy(order._id, true);
     try {
-      await api.patch(`/orders/${id}`, finalPayload);
-      setEditOrder(null);
-      fetchOrders();
-      log.info('Order updated', { id });
+      const updated = await ordersApi.complete(order._id, value);
+      patchOrder(order._id, updated);
+      showToast('success', `${order.title || order.refNumber} marked complete`);
     } catch (err) {
-      log.error('Update order failed', err.message);
+      showToast('error', err.message);
     } finally {
-      setLoading(false);
+      setBusy(order._id, false);
     }
   };
 
   const deleteOrder = async (order) => {
     const ok = await confirm({
-      title:        'Delete Order',
-      message:      `"${order.title}" and its portal will be permanently removed.`,
-      confirmLabel: 'Delete',
-      variant:      'danger',
+      title: 'Delete Order', message: `"${order.title || order.refNumber}" and its portal will be permanently removed.`,
+      confirmLabel: 'Delete', variant: 'danger',
     });
     if (!ok) return;
-    log.info('Deleting order', { id: order._id, title: order.title });
+    setBusy(order._id, true);
     try {
-      await api.delete(`/orders/${order._id}`);
-      try {
-        const portalRes = await api.get(`/portal/order/${order._id}`);
-        if (portalRes.data?.slug) await api.delete(`/portal/${portalRes.data.slug}`);
-      } catch { /* portal may not exist */ }
-      showToast('success', `"${order.title}" deleted`);
-      fetchOrders();
+      await ordersApi.remove(order._id); // the server also removes the portal and the OneDrive folder
+      setOrders((prev) => prev.filter((o) => o._id !== order._id));
+      showToast('success', `"${order.title || order.refNumber}" deleted`);
     } catch (err) {
       log.error('Delete order failed', err.message);
-      showToast('error', err.response?.data?.message || err.message);
+      showToast('error', err.message);
+      setBusy(order._id, false);
     }
   };
 
-  // ── UI helpers ─────────────────────────────────────────────────────────────
-  const deleteMetaItem = (type, value, parentClient = null) => {
-    setMeta(prev => {
-      if (type === 'clients') {
-        const newContacts = { ...prev.clientContacts };
-        const newMap      = { ...prev.clientMap };
-        delete newContacts[value];
-        delete newMap[value];
-        return { ...prev, clients: prev.clients.filter(i => i !== value), clientContacts: newContacts, clientMap: newMap };
-      }
-      return {
-        ...prev,
-        clientContacts: {
-          ...prev.clientContacts,
-          [parentClient]: prev.clientContacts[parentClient].filter(i => i !== value),
-        },
-      };
-    });
-  };
-
-  const toggleFolder = (path) => setExpandedFolders(prev => ({ ...prev, [path]: !prev[path] }));
-
-  const handleFileUpload = (e, isEdit = false) => {
-    Array.from(e.target.files).forEach(file => {
-      const reader = new FileReader();
-      reader.onload = (ev) => {
-        const attachment = { name: file.name, base64: ev.target.result, isNew: true };
-        if (isEdit) {
-          setEditOrder(prev => ({ ...prev, attachments: [...(prev.attachments || []), attachment] }));
-        } else {
-          setFormData(prev => ({ ...prev, attachments: [...(prev.attachments || []), attachment] }));
-        }
-      };
-      reader.readAsDataURL(file);
-    });
-  };
-
-  // Description is TEXT ONLY. Pasted screenshots used to be embedded as
-  // multi-MB base64 <img> tags, which made the orders list too big to load.
-  // Paste inserts plain text; images must be added as attachments instead.
-  const handlePaste = (e) => {
-    e.preventDefault();
-    const clipboard = e.clipboardData || window.clipboardData;
-    const text      = clipboard?.getData('text/plain') || '';
-    const hasImage  = Array.from(clipboard?.items || []).some(
-      item => item.kind === 'file' && item.type.startsWith('image/')
-    );
-    if (hasImage && !text) {
-      showToast('warning', 'Images can’t be pasted into the description — add them as attachments.');
-      return;
-    }
-    if (text) document.execCommand('insertText', false, text);
-  };
-
-  // Block drag-and-dropped images/files into the description box.
-  const handleDrop = (e) => {
-    if (e.dataTransfer?.files?.length) {
-      e.preventDefault();
-      showToast('warning', 'Drop files into the attachments area, not the description.');
-    }
-  };
-
-  const loadOrderAttachments = async (order) => {
-    setEditOrder(order);
+  const openTimeline = async (order) => {
+    setTimelineOrder({ ...order, timeline: null });
     try {
-      const res = await api.get(`/orders/${order._id}/attachments`);
-      if (Array.isArray(res.data)) {
-        setEditOrder(prev =>
-          prev?._id === order._id ? { ...prev, attachments: res.data } : prev
-        );
-      }
+      const full = await ordersApi.get(order._id);
+      setTimelineOrder((cur) => (cur?._id === order._id ? full : cur));
     } catch (err) {
-      log.warn('Attachment refresh failed (non-fatal)', err.message);
+      showToast('error', err.message);
+      setTimelineOrder(null);
     }
   };
 
-  const handleOpenPortalChat = async (order, ordData) => {
+  const openChat = async (order) => {
     await requestNotifPermission();
-    const total = ordData?.clientCount || 0;
+    const total = (unreadCounts[order._id] || 0) + getSeenCount(order._id);
     setSeenCount(order._id, total);
-    setUnreadCounts(prev => ({
-      ...prev,
-      [order._id]: { ...(prev[order._id] || {}), unread: 0 },
-    }));
+    setUnreadCounts((prev) => ({ ...prev, [order._id]: 0 }));
     setChatOrder(order);
   };
 
-  const handleCopyLink = (order, portalUrl) => {
-    navigator.clipboard.writeText(portalUrl);
-    setSentLinks(prev => ({ ...prev, [order._id]: true }));
-    setCopiedId(order._id);
-    setTimeout(() => setCopiedId(null), 2000);
+  /**
+   * Copies the client portal link AND opens it in a new tab. The clipboard
+   * write is started before window.open (while this page still has focus —
+   * browsers refuse clipboard writes from a background tab), and window.open
+   * runs synchronously inside the click so it isn't treated as a popup.
+   */
+  const copyLink = (order) => {
+    const url = portalUrlFor(order.portalSlug);
+    if (!url) return;
+    const copied = navigator.clipboard?.writeText(url) ?? Promise.reject(new Error('Clipboard unavailable'));
+    window.open(url, '_blank', 'noopener,noreferrer');
+    setSentLinks((prev) => ({ ...prev, [order._id]: true }));
+    copied
+      .then(() => {
+        setCopiedId(order._id);
+        setTimeout(() => setCopiedId((id) => (id === order._id ? null : id)), 2000);
+        showToast('success', 'Client link copied and opened in a new tab');
+      })
+      .catch(() => showToast('warning', 'Opened the client link — copying to the clipboard was blocked by the browser.'));
   };
 
-  // ── Shared row props ───────────────────────────────────────────────────────
-  const rowProps = {
-    loading, unreadCounts, sentLinks, copiedId, shipmentCounts,
-    onRowClick:       loadOrderAttachments,
-    onStartProject:   (order) => setQuotePrompt(order),
-    onMarkComplete:   (order) => setCompletionPrompt(order),
-    onOpenTimeline:   (order) => setTimelineOrder(order),
-    onOpenShipments:  (order) => setShipmentsOrder(order),
-    onOpenPortalChat: handleOpenPortalChat,
-    onCopyLink:       handleCopyLink,
-    onDelete:         deleteOrder,
-    onOpenFile: (file) => setLightboxFile(file),
+  // Stable handler bag so memoised rows don't re-render on unrelated state changes.
+  const handlersRef = useRef({});
+  handlersRef.current = {
+    open: (order, tab = 'details') => setDetail({ id: order._id, tab }),
+    openFile: (order, file) => setLightbox({ orderId: order._id, file }),
+    openTimeline,
+    openShipments: setShipmentsOrder,
+    startProject: setStartOrder,
+    complete: (order) => { setInvoiceNumber(''); setCompleteOrder(order); },
+    openChat,
+    copyLink,
+    remove: deleteOrder,
   };
+  const handlers = useMemo(() => new Proxy({}, { get: (_, key) => (...args) => handlersRef.current[key](...args) }), []);
 
-  // ── Column-header style (matches ClientList th) ────────────────────────────
+  const renderRow = (order) => (
+    <OrderRow
+      key={order._id}
+      order={order}
+      busy={Boolean(busyIds[order._id])}
+      unread={unreadCounts[order._id] || 0}
+      linkSent={Boolean(sentLinks[order._id])}
+      justCopied={copiedId === order._id}
+      handlers={handlers}
+    />
+  );
+
   const thStyle = {
-    padding: '12px 20px', textAlign: 'left',
-    fontFamily: jost, fontSize: 9, fontWeight: 400,
-    letterSpacing: '0.25em', textTransform: 'uppercase',
-    color: T.muted, borderBottom: `1px solid ${T.border}`,
-    background: T.offwhite,
+    padding: '12px 20px', textAlign: 'left', fontFamily: jost, fontSize: 9, fontWeight: 400,
+    letterSpacing: '0.25em', textTransform: 'uppercase', color: T.muted,
+    borderBottom: `1px solid ${T.border}`, background: T.offwhite,
   };
 
-  // ── Tab config ─────────────────────────────────────────────────────────────
-  const TABS = [
-    { id: 'inquiry',   label: 'Inquiries',       icon: Clock },
-    { id: 'ongoing',   label: 'Ongoing',          icon: ArrowRight },
-    { id: 'completed', label: 'Completed Orders', icon: Calendar },
-  ];
+  const hideMetaItem = (type, value, parentClient) => setMeta((prev) => (type === 'clients'
+    ? { ...prev, clients: prev.clients.filter((c) => c !== value) }
+    : { ...prev, clientContacts: { ...prev.clientContacts, [parentClient]: (prev.clientContacts[parentClient] || []).filter((c) => c !== value) } }));
 
-  // ── CustomCreatableSelect (local) ──────────────────────────────────────────
-  const CustomCreatableSelect = ({ label, options, value, onChange, onDelete, isDisabled }) => (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-      <FieldLabel>{label}</FieldLabel>
-      <CreatableSelect
-        isClearable
-        isDisabled={isDisabled}
-        options={options}
-        value={value}
-        onChange={onChange}
-        formatOptionLabel={(option, { context }) => (
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-            <span>{option.label}</span>
-            {context === 'menu' && (
-              <button
-                onClick={e => { e.stopPropagation(); onDelete(option.value); }}
-                style={{ background: 'none', border: 'none', cursor: 'pointer', color: T.muted, padding: 2 }}
-              >
-                <X size={11} />
-              </button>
-            )}
-          </div>
-        )}
-        styles={{
-          control: base => ({
-            ...base, border: `1px solid ${T.border}`, borderRadius: 3,
-            padding: '2px 4px', background: 'white', fontSize: 13, fontFamily: jost,
-            boxShadow: 'none', '&:hover': { borderColor: T.gold },
-          }),
-          option: (base, { isFocused }) => ({
-            ...base, fontFamily: jost, fontSize: 12,
-            background: isFocused ? T.dimBg : 'white',
-            color: T.text,
-          }),
-        }}
-      />
-    </div>
+  const emptyMessage = (what) => (
+    <p style={{ textAlign: 'center', padding: '64px 0', margin: 0, fontFamily: jost, fontSize: 12, fontWeight: 300, letterSpacing: '0.1em', color: T.muted }}>
+      {what}{searchTerm ? ` for "${searchTerm}"` : ''}
+    </p>
   );
 
   // ── Render ─────────────────────────────────────────────────────────────────
   return (
     <div style={{ minHeight: '100vh', background: T.offwhite, fontFamily: jost, padding: '56px 48px' }}>
-
       <Toast />
       <ConfirmDialog />
 
-      {/* ── Page header ─────────────────────────────────────────────────── */}
+      {/* ── Page header ── */}
       <div style={{ marginBottom: 40 }}>
         <GoldRule />
-        <p style={{
-          fontSize: 9, fontWeight: 400, letterSpacing: '0.3em',
-          textTransform: 'uppercase', color: T.muted, marginBottom: 10,
-        }}>
-          Operations
-        </p>
-        <h1 style={{
-          fontFamily: serif, fontSize: 40, fontWeight: 300,
-          color: T.navy, lineHeight: 1.05, margin: '0 0 24px',
-        }}>
+        <p style={{ fontSize: 9, letterSpacing: '0.3em', textTransform: 'uppercase', color: T.muted, marginBottom: 10 }}>Operations</p>
+        <h1 style={{ fontFamily: serif, fontSize: 40, fontWeight: 300, color: T.navy, lineHeight: 1.05, margin: '0 0 24px' }}>
           Order <em style={{ color: T.gold }}>Management.</em>
         </h1>
 
-        {/* Controls row */}
         <div style={{ display: 'flex', gap: 14, flexWrap: 'wrap', alignItems: 'center' }}>
-
-          {/* Search */}
           <div style={{ position: 'relative', flex: '1 1 260px', maxWidth: 420 }}>
-            <Search size={13} style={{
-              position: 'absolute', left: 13, top: '50%',
-              transform: 'translateY(-50%)', color: T.muted, pointerEvents: 'none',
-            }} />
+            <Search size={13} style={{ position: 'absolute', left: 13, top: '50%', transform: 'translateY(-50%)', color: T.muted, pointerEvents: 'none' }} />
             <input
               type="text"
               placeholder="Search orders, clients, references…"
               value={searchTerm}
-              onChange={e => setSearchTerm(e.target.value)}
+              onChange={(e) => setSearchTerm(e.target.value)}
               onFocus={() => setSearchFocused(true)}
               onBlur={() => setSearchFocused(false)}
               style={{
-                width: '100%', padding: '10px 36px 10px 36px',
-                background: 'white',
-                border: `1px solid ${searchFocused ? T.gold : T.border}`,
-                borderRadius: 3,
-                fontFamily: jost, fontSize: 12, fontWeight: 300,
-                color: T.text, outline: 'none',
-                boxSizing: 'border-box', transition: 'border-color 0.2s',
+                width: '100%', padding: '10px 36px', background: 'white', border: `1px solid ${searchFocused ? T.gold : T.border}`,
+                borderRadius: 3, fontFamily: jost, fontSize: 12, fontWeight: 300, color: T.text, outline: 'none', boxSizing: 'border-box',
               }}
             />
             {searchTerm && (
-              <button
-                onClick={() => setSearchTerm('')}
-                style={{
-                  position: 'absolute', right: 12, top: '50%',
-                  transform: 'translateY(-50%)', background: 'none',
-                  border: 'none', cursor: 'pointer', color: T.muted,
-                  display: 'flex', padding: 0,
-                }}
-              >✕</button>
+              <button type="button" aria-label="Clear search" onClick={() => setSearchTerm('')}
+                style={{ position: 'absolute', right: 12, top: '50%', transform: 'translateY(-50%)', background: 'none', border: 'none', cursor: 'pointer', color: T.muted, display: 'flex', padding: 0 }}>
+                <X size={13} />
+              </button>
             )}
           </div>
 
-          {/* Client filter */}
-          <select
+          <FilterSelect
+            placeholder="All Clients"
+            options={clientOptions}
             value={selectedClient}
-            onChange={e => { setSelectedClient(e.target.value); setSelectedContact(''); }}
-            style={{
-              padding: '10px 14px', background: 'white',
-              border: `1px solid ${T.border}`, borderRadius: 3,
-              fontFamily: jost, fontSize: 12, fontWeight: 300,
-              color: T.text, outline: 'none', cursor: 'pointer',
-            }}
-          >
-            <option value="">All Clients</option>
-            {meta.clients.map(c => <option key={c} value={c}>{c}</option>)}
-          </select>
+            onChange={(v) => { setSelectedClient(v); setSelectedContact(''); }}
+          />
 
-          {/* Contact filter */}
-          <select
+          <FilterSelect
+            placeholder="All Contacts"
+            options={contactOptions}
             value={selectedContact}
-            onChange={e => setSelectedContact(e.target.value)}
-            style={{
-              padding: '10px 14px', background: 'white',
-              border: `1px solid ${T.border}`, borderRadius: 3,
-              fontFamily: jost, fontSize: 12, fontWeight: 300,
-              color: T.text, outline: 'none', cursor: 'pointer',
-            }}
-          >
-            <option value="">All Contacts</option>
-            {(selectedClient
-              ? (meta.clientContacts[selectedClient] || [])
-              : Array.from(new Set(Object.values(meta.clientContacts).flat()))
-            ).map(c => <option key={c} value={c}>{c}</option>)}
-          </select>
+            onChange={setSelectedContact}
+          />
 
-          {/* Manage Statements — canned timeline messages */}
           <button
+            type="button"
             onClick={() => setTemplateMgrOpen(true)}
-            style={{
-              display: 'inline-flex', alignItems: 'center', gap: 6,
-              padding: '10px 14px', background: 'white',
-              border: `1px solid ${T.border}`, borderRadius: 3,
-              cursor: 'pointer', color: T.text,
-              fontFamily: jost, fontSize: 11, fontWeight: 400,
-              transition: 'border-color 0.2s, color 0.2s',
-            }}
-            onMouseEnter={e => { e.currentTarget.style.borderColor = T.gold; e.currentTarget.style.color = T.gold; }}
-            onMouseLeave={e => { e.currentTarget.style.borderColor = T.border; e.currentTarget.style.color = T.text; }}
             title="Manage timeline statement templates"
+            style={{ ...selectStyle, display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 11, fontWeight: 400 }}
           >
             <Settings size={13} /> Statements
           </button>
 
-          {/* Reset filters */}
           {(searchTerm || selectedClient || selectedContact) && (
-            <button
-              onClick={() => { setSearchTerm(''); setSelectedClient(''); setSelectedContact(''); }}
-              style={{
-                background: 'none', border: 'none', cursor: 'pointer',
-                color: T.muted, display: 'flex', padding: 6,
-                transition: 'color 0.2s',
-              }}
-              onMouseEnter={e => e.currentTarget.style.color = T.gold}
-              onMouseLeave={e => e.currentTarget.style.color = T.muted}
-              title="Reset Filters"
-            >
+            <IconBtn title="Reset filters" onClick={() => { setSearchTerm(''); setSelectedClient(''); setSelectedContact(''); }}>
               <X size={17} />
-            </button>
+            </IconBtn>
           )}
 
-          {/* New inquiry CTA */}
-          <GoldBtn onClick={() => setIsModalOpen(true)} style={{ marginLeft: 'auto', flexShrink: 0 }}>
-            + New Inquiry
-          </GoldBtn>
+          <GoldBtn onClick={() => setIsModalOpen(true)} style={{ marginLeft: 'auto', flexShrink: 0 }}>+ New Inquiry</GoldBtn>
         </div>
       </div>
 
-      {/* ── Tab bar ─────────────────────────────────────────────────────── */}
-      <div style={{
-        display: 'flex', gap: 2, marginBottom: 24,
-        borderBottom: `1px solid ${T.border}`,
-      }}>
-        {TABS.map(tab => (
+      {/* ── Tab bar ── */}
+      <div style={{ display: 'flex', gap: 2, marginBottom: 24, borderBottom: `1px solid ${T.border}` }}>
+        {TABS.map((tab) => (
           <button
             key={tab.id}
+            type="button"
             onClick={() => setActiveTab(tab.id)}
             style={{
-              display: 'inline-flex', alignItems: 'center', gap: 7,
-              padding: '10px 22px',
-              background: 'none', border: 'none', cursor: 'pointer',
-              fontFamily: jost, fontSize: 9, fontWeight: 400,
-              letterSpacing: '0.22em', textTransform: 'uppercase',
+              display: 'inline-flex', alignItems: 'center', gap: 7, padding: '10px 22px', background: 'none', border: 'none', cursor: 'pointer',
+              fontFamily: jost, fontSize: 9, letterSpacing: '0.22em', textTransform: 'uppercase',
               color: activeTab === tab.id ? T.gold : T.muted,
-              borderBottom: activeTab === tab.id ? `2px solid ${T.gold}` : '2px solid transparent',
-              marginBottom: -1,
-              transition: 'color 0.2s, border-color 0.2s',
+              borderBottom: activeTab === tab.id ? `2px solid ${T.gold}` : '2px solid transparent', marginBottom: -1,
             }}
           >
-            <tab.icon size={13} />
-            {tab.label}
+            <tab.icon size={13} /> {tab.label}
+            {tabCounts[tab.id] ? <span style={{ color: T.muted, letterSpacing: 0 }}>({tabCounts[tab.id]})</span> : null}
           </button>
         ))}
       </div>
 
-      {/* ── Table container ──────────────────────────────────────────────── */}
+      {/* ── Table ── */}
       <div style={{ background: 'white', border: `1px solid ${T.border}`, overflow: 'hidden' }}>
-
         {fetchLoading ? (
-          <div style={{
-            display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
-            gap: 14, padding: '80px 0',
-          }}>
+          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 14, padding: '80px 0' }}>
             <Spinner size={36} />
-            <p style={{
-              fontFamily: jost, fontSize: 9, fontWeight: 400,
-              letterSpacing: '0.3em', textTransform: 'uppercase', color: T.muted,
-            }}>
-              Fetching Orders…
-            </p>
+            <p style={{ fontFamily: jost, fontSize: 9, letterSpacing: '0.3em', textTransform: 'uppercase', color: T.muted }}>Fetching Orders…</p>
+          </div>
+        ) : fetchError ? (
+          <div style={{ textAlign: 'center', padding: '64px 0' }}>
+            <p style={{ fontFamily: jost, fontSize: 12, color: T.danger, margin: '0 0 16px' }}>Couldn't load orders: {fetchError}</p>
+            <GoldBtn onClick={fetchOrders}>Retry</GoldBtn>
           </div>
         ) : activeTab !== 'completed' ? (
-
-          /* ── Inquiries / Ongoing table ── */
-          <table style={{ width: '100%', borderCollapse: 'collapse' }}>
-            <thead>
-              <tr>
-                <th style={thStyle}>Identifiers</th>
-                <th style={thStyle}>Project</th>
-                <th style={thStyle}>Description</th>
-                <th style={thStyle}>Files</th>
-                <th style={{ ...thStyle, textAlign: 'right' }}>Actions</th>
-              </tr>
-            </thead>
-            <tbody>
-              {filteredOrders.map(order => (
-                <OrderRow key={order._id} order={order} {...rowProps} />
-              ))}
-              {filteredOrders.length === 0 && (
+          <>
+            <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+              <thead>
                 <tr>
-                  <td colSpan={5} style={{ padding: '64px 0', textAlign: 'center' }}>
-                    <p style={{
-                      fontFamily: jost, fontSize: 12, fontWeight: 300,
-                      letterSpacing: '0.1em', color: T.muted,
-                    }}>
-                      No matches found{searchTerm ? ` for "${searchTerm}"` : ''}
-                    </p>
-                  </td>
+                  <th style={thStyle}>Identifiers</th>
+                  <th style={thStyle}>Project</th>
+                  <th style={thStyle}>Description</th>
+                  <th style={thStyle}>Files</th>
+                  <th style={{ ...thStyle, textAlign: 'right' }}>Actions</th>
                 </tr>
-              )}
-            </tbody>
-          </table>
-
+              </thead>
+              <tbody>
+                {filteredOrders.map(renderRow)}
+                {filteredOrders.length === 0 && <tr><td colSpan={5}>{emptyMessage('No matches found')}</td></tr>}
+              </tbody>
+            </table>
+            <div style={{ borderTop: `1px solid ${T.border}`, padding: '10px 20px', fontFamily: jost, fontSize: 10, fontWeight: 300, letterSpacing: '0.12em', color: T.muted, textAlign: 'right' }}>
+              {filteredOrders.length} of {tabCounts[activeTab] || 0} records
+            </div>
+          </>
         ) : (
-
-          /* ── Completed orders — FY / Month hierarchy ── */
-          <div style={{ padding: '24px' }}>
-            {Object.entries(groupedCompleted).length === 0 && (
-              <p style={{
-                textAlign: 'center', padding: '64px 0',
-                fontFamily: jost, fontSize: 12, fontWeight: 300,
-                letterSpacing: '0.1em', color: T.muted,
-              }}>
-                No completed records found{searchTerm ? ` for "${searchTerm}"` : ''}
-              </p>
-            )}
-
+          <div style={{ padding: 24 }}>
+            {Object.keys(groupedCompleted).length === 0 && emptyMessage('No completed records found')}
             {Object.entries(groupedCompleted).map(([fy, months]) => (
               <div key={fy} style={{ marginBottom: 12 }}>
-                {/* FY row */}
                 <button
-                  onClick={() => toggleFolder(fy)}
+                  type="button"
+                  onClick={() => setExpandedFolders((p) => ({ ...p, [fy]: !p[fy] }))}
                   style={{
-                    width: '100%', display: 'flex', alignItems: 'center', gap: 10,
-                    padding: '14px 18px', background: T.offwhite,
-                    border: `1px solid ${T.border}`, cursor: 'pointer',
-                    fontFamily: jost, fontSize: 10, fontWeight: 500,
-                    letterSpacing: '0.2em', textTransform: 'uppercase', color: T.text,
-                    textAlign: 'left',
+                    width: '100%', display: 'flex', alignItems: 'center', gap: 10, padding: '14px 18px', background: T.offwhite,
+                    border: `1px solid ${T.border}`, cursor: 'pointer', fontFamily: jost, fontSize: 10, fontWeight: 500,
+                    letterSpacing: '0.2em', textTransform: 'uppercase', color: T.text, textAlign: 'left',
                   }}
                 >
-                  <FolderOpen size={15} style={{ color: T.gold }} />
-                  {fy}
-                  {expandedFolders[fy]
-                    ? <ChevronDown size={14} style={{ marginLeft: 'auto', color: T.muted }} />
-                    : <ChevronRight size={14} style={{ marginLeft: 'auto', color: T.muted }} />}
+                  <FolderOpen size={15} style={{ color: T.gold }} /> {fy}
+                  {expandedFolders[fy] ? <ChevronDown size={14} style={{ marginLeft: 'auto', color: T.muted }} /> : <ChevronRight size={14} style={{ marginLeft: 'auto', color: T.muted }} />}
                 </button>
-
                 {expandedFolders[fy] && (
                   <div style={{ marginLeft: 24, marginTop: 4, display: 'flex', flexDirection: 'column', gap: 6 }}>
-                    {Object.entries(months).map(([month, items]) => (
-                      <div key={month}>
-                        {/* Month row */}
-                        <button
-                          onClick={() => toggleFolder(`${fy}-${month}`)}
-                          style={{
-                            width: '100%', display: 'flex', alignItems: 'center', gap: 8,
-                            padding: '10px 14px', background: 'white',
-                            border: `1px solid ${T.border}`, cursor: 'pointer',
-                            fontFamily: jost, fontSize: 9, fontWeight: 400,
-                            letterSpacing: '0.22em', textTransform: 'uppercase', color: T.muted,
-                            textAlign: 'left',
-                          }}
-                        >
-                          <Calendar size={12} />
-                          {month} ({items.length})
-                        </button>
-
-                        {expandedFolders[`${fy}-${month}`] && (
-                          <div style={{
-                            border: `1px solid ${T.border}`,
-                            borderTop: 'none',
-                            overflow: 'hidden',
-                            marginBottom: 8,
-                          }}>
-                            <table style={{ width: '100%', borderCollapse: 'collapse' }}>
-                              <tbody>
-                                {items.map(order => (
-                                  <OrderRow key={order._id} order={order} {...rowProps} />
-                                ))}
-                              </tbody>
-                            </table>
-                          </div>
-                        )}
-                      </div>
-                    ))}
+                    {Object.entries(months).map(([month, items]) => {
+                      const key = `${fy}-${month}`;
+                      return (
+                        <div key={month}>
+                          <button
+                            type="button"
+                            onClick={() => setExpandedFolders((p) => ({ ...p, [key]: !p[key] }))}
+                            style={{
+                              width: '100%', display: 'flex', alignItems: 'center', gap: 8, padding: '10px 14px', background: 'white',
+                              border: `1px solid ${T.border}`, cursor: 'pointer', fontFamily: jost, fontSize: 9,
+                              letterSpacing: '0.22em', textTransform: 'uppercase', color: T.muted, textAlign: 'left',
+                            }}
+                          >
+                            <Calendar size={12} /> {month} ({items.length})
+                          </button>
+                          {expandedFolders[key] && (
+                            <div style={{ border: `1px solid ${T.border}`, borderTop: 'none', marginBottom: 8 }}>
+                              <table style={{ width: '100%', borderCollapse: 'collapse' }}><tbody>{items.map(renderRow)}</tbody></table>
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
                   </div>
                 )}
               </div>
             ))}
           </div>
         )}
-
-        {/* Row count footer (mirrors ClientList) */}
-        {!fetchLoading && activeTab !== 'completed' && (
-          <div style={{
-            borderTop: `1px solid ${T.border}`,
-            padding: '10px 20px',
-            fontFamily: jost, fontSize: 10, fontWeight: 300,
-            letterSpacing: '0.12em', color: T.muted, textAlign: 'right',
-          }}>
-            {filteredOrders.length} of {orders.filter(o => o.status === activeTab).length} records
-          </div>
-        )}
       </div>
 
-      {/* ════════════════════════════════════════════════════════════════════
-          EDIT ORDER MODAL
-      ════════════════════════════════════════════════════════════════════ */}
-      {editOrder && (
-        <div style={{
-          position: 'fixed', inset: 0,
-          background: 'rgba(14,21,32,0.78)', backdropFilter: 'blur(6px)',
-          display: 'flex', alignItems: 'center', justifyContent: 'center',
-          padding: 24, zIndex: 50,
-        }}>
-          <div style={{
-            background: 'white', border: `1px solid ${T.border}`,
-            width: '100%', maxWidth: 720,
-            maxHeight: '92vh', overflowY: 'auto',
-            padding: '40px 40px 32px',
-          }}>
-            {/* Header */}
-            <div style={{
-              display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start',
-              marginBottom: 32, paddingBottom: 20, borderBottom: `1px solid ${T.border}`,
-            }}>
-              <div>
-                <p style={{
-                  fontFamily: jost, fontSize: 9, fontWeight: 400,
-                  letterSpacing: '0.28em', textTransform: 'uppercase',
-                  color: T.muted, marginBottom: 6,
-                }}>
-                  Update Record
-                </p>
-                <h2 style={{ fontFamily: serif, fontSize: 28, fontWeight: 300, color: T.navy, margin: 0 }}>
-                  Record Details
-                </h2>
-              </div>
-              <button
-                disabled={loading}
-                onClick={() => setEditOrder(null)}
-                style={{
-                  background: 'none', border: 'none', cursor: loading ? 'not-allowed' : 'pointer',
-                  color: T.muted, fontSize: 20, lineHeight: 1, padding: 4,
-                  opacity: loading ? 0.3 : 1,
-                }}
-              >
-                ✕
-              </button>
-            </div>
-
-            {loading ? (
-              <div style={{
-                display: 'flex', flexDirection: 'column', alignItems: 'center',
-                justifyContent: 'center', gap: 14, padding: '80px 0',
-              }}>
-                <Spinner size={40} />
-                <div style={{ textAlign: 'center' }}>
-                  <p style={{
-                    fontFamily: jost, fontSize: 10, fontWeight: 500,
-                    letterSpacing: '0.22em', textTransform: 'uppercase', color: T.text,
-                  }}>
-                    Updating Record…
-                  </p>
-                  <p style={{
-                    fontFamily: jost, fontSize: 9, fontWeight: 300,
-                    letterSpacing: '0.12em', color: T.muted, marginTop: 4,
-                  }}>
-                    Syncing changes to database
-                  </p>
-                </div>
-              </div>
-            ) : (
-              <>
-                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16, marginBottom: 16 }}>
-                  <div>
-                    <FieldLabel>Project Title</FieldLabel>
-                    <FocusInput
-                      value={editOrder.title || ''}
-                      onChange={e => setEditOrder({ ...editOrder, title: e.target.value })}
-                      placeholder="Project Title"
-                    />
-                  </div>
-                  <div>
-                    <FieldLabel>Client Name</FieldLabel>
-                    <FocusInput
-                      value={editOrder.clientName || ''}
-                      onChange={e => setEditOrder({ ...editOrder, clientName: e.target.value })}
-                      placeholder="Client Name"
-                    />
-                  </div>
-                </div>
-
-                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: 16, marginBottom: 16 }}>
-                  <div>
-                    <FieldLabel>Ref Number</FieldLabel>
-                    <FocusInput value={editOrder.refNumber || ''} readOnly />
-                  </div>
-                  {(editOrder.quoteNumber || editOrder.status !== 'inquiry') && (
-                    <div>
-                      <FieldLabel>Quote Number</FieldLabel>
-                      <FocusInput value={editOrder.quoteNumber || '—'} readOnly />
-                    </div>
-                  )}
-                  {(editOrder.invoiceNumber || editOrder.status === 'completed') && (
-                    <div>
-                      <FieldLabel>Invoice Number</FieldLabel>
-                      <FocusInput value={editOrder.invoiceNumber || '—'} readOnly />
-                    </div>
-                  )}
-                  <div>
-                    <FieldLabel>Order Placed By</FieldLabel>
-                    <FocusInput
-                      value={editOrder.orderPlacedBy || ''}
-                      onChange={e => setEditOrder({ ...editOrder, orderPlacedBy: e.target.value })}
-                      placeholder="N/A"
-                    />
-                  </div>
-                </div>
-
-                {/* Rich text notes */}
-                <div style={{ marginBottom: 16 }}>
-                  <div style={{
-                    display: 'flex', justifyContent: 'space-between', alignItems: 'center',
-                    marginBottom: 8,
-                  }}>
-                    <FieldLabel>Project Notes</FieldLabel>
-                    <div style={{ display: 'flex', gap: 8, color: T.muted }}>
-                      <ImageIcon size={12} /> <TableIcon size={12} />
-                    </div>
-                  </div>
-                  <div
-                    ref={editEditorRef}
-                    contentEditable
-                    onPaste={handlePaste}
-                    onDrop={handleDrop}
-                    dangerouslySetInnerHTML={{ __html: editOrder.description || '' }}
-                    style={{
-                      width: '100%', minHeight: 400,
-                      padding: '16px 18px',
-                      background: T.offwhite, border: `1px solid ${T.border}`,
-                      fontFamily: jost, fontSize: 13, fontWeight: 300,
-                      outline: 'none', boxSizing: 'border-box',
-                      whiteSpace: 'pre-wrap', wordBreak: 'break-word',
-                      overflowY: 'auto',
-                      transition: 'border-color 0.2s',
-                    }}
-                    onFocus={e => e.currentTarget.style.borderColor = T.gold}
-                    onBlur={e => e.currentTarget.style.borderColor = T.border}
-                  />
-                </div>
-
-                {/* Attachments */}
-                <div style={{ marginBottom: 20 }}>
-                  <FieldLabel>Attachments</FieldLabel>
-                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginTop: 8 }}>
-                    {editOrder.attachments?.map((file, idx) => (
-                      <div key={idx} style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
-                        <AttachmentThumb
-                          file={file}
-                          onClick={f => setLightboxFile(f)}
-                        />
-                        <button
-                          onClick={() =>
-                            setEditOrder({ ...editOrder, attachments: editOrder.attachments.filter((_, i) => i !== idx) })
-                          }
-                          style={{ background: 'none', border: 'none', cursor: 'pointer', color: T.danger, padding: 2, display: 'flex' }}
-                          title="Remove attachment"
-                        >
-                          <X size={11} />
-                        </button>
-                      </div>
-                    ))}
-                    <label style={{
-                      display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
-                      width: 38, height: 38, cursor: 'pointer',
-                      background: T.dimBg, border: `1px solid ${T.borderG}`, color: T.gold,
-                    }}>
-                      <Plus size={15} />
-                      <input type="file" multiple style={{ display: 'none' }} onChange={e => handleFileUpload(e, true)} />
-                    </label>
-                  </div>
-                </div>
-
-                {/* Footer actions */}
-                <div style={{
-                  display: 'flex', justifyContent: 'flex-end', gap: 14,
-                  borderTop: `1px solid ${T.border}`, paddingTop: 24,
-                }}>
-                  <GhostBtn onClick={() => setEditOrder(null)}>Cancel</GhostBtn>
-                  <GoldBtn
-                    onClick={() => updateOrder(editOrder._id, editOrder)}
-                    disabled={loading}
-                  >
-                    {loading ? 'Saving…' : 'Update Database'}
-                  </GoldBtn>
-                </div>
-              </>
-            )}
-          </div>
-        </div>
+      {/* ══ Order detail popup (details, screenshots & files, procurement) ══ */}
+      {detailOrder && (
+        <OrderDetailModal
+          key={detailOrder._id}
+          order={detailOrder}
+          initialTab={detail.tab}
+          statuses={statuses}
+          onClose={() => setDetail(null)}
+          onChange={onDetailChange}
+          showToast={showToast}
+          confirm={confirm}
+        />
       )}
 
-      {/* ════════════════════════════════════════════════════════════════════
-          TIMELINE MODAL — opened directly from the order row, no need to
-          go through Update Record first.
-      ════════════════════════════════════════════════════════════════════ */}
-      {timelineOrder && (
-        <div style={{
-          position: 'fixed', inset: 0,
-          background: 'rgba(14,21,32,0.78)', backdropFilter: 'blur(6px)',
-          display: 'flex', alignItems: 'center', justifyContent: 'center',
-          padding: 24, zIndex: 50,
-        }}>
-          <div style={{
-            background: 'white', border: `1px solid ${T.border}`,
-            width: '100%', maxWidth: 640,
-            maxHeight: '88vh', overflowY: 'auto',
-            padding: '36px 36px 28px',
-          }}>
-            {/* Header */}
-            <div style={{
-              display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start',
-              marginBottom: 24, paddingBottom: 18, borderBottom: `1px solid ${T.border}`,
-            }}>
-              <div>
-                <p style={{
-                  fontFamily: jost, fontSize: 9, fontWeight: 400,
-                  letterSpacing: '0.28em', textTransform: 'uppercase',
-                  color: T.muted, marginBottom: 6,
-                }}>
-                  {timelineOrder.refNumber || `#${timelineOrder._id.slice(-6)}`}
-                </p>
-                <h2 style={{ fontFamily: serif, fontSize: 26, fontWeight: 300, color: T.navy, margin: 0 }}>
-                  {timelineOrder.title || 'Timeline'}
-                </h2>
-              </div>
-              <button
-                onClick={() => setTimelineOrder(null)}
-                style={{
-                  background: 'none', border: 'none', cursor: 'pointer',
-                  color: T.muted, fontSize: 20, lineHeight: 1, padding: 4,
-                }}
-              >
-                ✕
-              </button>
-            </div>
+      {/* ══ Start Project — quote number + optional quote upload ══ */}
+      {startOrder && (
+        <StartProjectModal
+          order={startOrder}
+          onClose={() => setStartOrder(null)}
+          onStarted={(updated) => {
+            patchOrder(updated._id, updated);
+            setStartOrder(null);
+          }}
+          showToast={showToast}
+        />
+      )}
 
+      {/* ══ Completion prompt ══ */}
+      {completeOrder && (
+        <Modal onClose={() => setCompleteOrder(null)} width={400} zIndex={100} padding="40px">
+          <div style={{ textAlign: 'center', marginBottom: 24 }}>
+            <div style={{ width: 44, height: 44, background: 'rgba(5,150,105,0.08)', display: 'flex', alignItems: 'center', justifyContent: 'center', margin: '0 auto 14px', color: T.emerald }}>
+              <Receipt size={22} />
+            </div>
+            <h3 style={{ fontFamily: serif, fontSize: 26, fontWeight: 300, color: T.navy, margin: '0 0 8px' }}>Completed Order</h3>
+            <p style={{ fontFamily: jost, fontSize: 9, letterSpacing: '0.18em', textTransform: 'uppercase', color: T.muted, margin: 0 }}>
+              Enter final invoice number before closing
+            </p>
+          </div>
+          <FocusInput
+            autoFocus
+            value={invoiceNumber}
+            onChange={(e) => setInvoiceNumber(e.target.value.toUpperCase())}
+            onKeyDown={(e) => { if (e.key === 'Enter') submitComplete(); }}
+            placeholder="e.g. INV-26-27/0094"
+            style={{ textAlign: 'center', fontWeight: 500, marginBottom: 20 }}
+          />
+          <div style={{ display: 'flex', gap: 12 }}>
+            <GhostBtn onClick={() => setCompleteOrder(null)} style={{ flex: 1 }}>Cancel</GhostBtn>
+            <GoldBtn onClick={submitComplete} disabled={!invoiceNumber.trim()} style={{ flex: 1 }}>Save</GoldBtn>
+          </div>
+        </Modal>
+      )}
+
+      {/* ══ Timeline ══ */}
+      {timelineOrder && (
+        <Modal fullScreen onClose={() => setTimelineOrder(null)} eyebrow={`Timeline · ${timelineOrder.refNumber || `#${timelineOrder._id.slice(-6)}`}`} title={timelineOrder.title || timelineOrder.clientName}>
+          <div style={{ maxWidth: 1100, margin: '0 auto', padding: '28px 32px' }}>
+          {timelineOrder.timeline === null ? (
+            <div style={{ display: 'flex', justifyContent: 'center', padding: 40, color: T.muted }}><Spinner size={20} /></div>
+          ) : (
             <OrderTimeline
               order={timelineOrder}
-              onPosted={(newEvent) => {
-                setTimelineOrder(prev => (
-                  prev ? { ...prev, timeline: [...(prev.timeline || []), newEvent] } : prev
-                ));
-                setOrders(prev => prev.map(o => (
-                  o._id === timelineOrder._id
-                    ? { ...o, timeline: [...(o.timeline || []), newEvent] }
-                    : o
-                )));
+              onPosted={(event) => {
+                setTimelineOrder((prev) => (prev ? { ...prev, timeline: [...(prev.timeline || []), event] } : prev));
+                setOrders((prev) => prev.map((o) => (o._id === timelineOrder._id ? { ...o, timelineCount: (o.timelineCount || 0) + 1 } : o)));
               }}
             />
+          )}
           </div>
-        </div>
+        </Modal>
       )}
 
-      {/* ════════════════════════════════════════════════════════════════════
-          LINKED SHIPMENTS MODAL — opened directly from the order row.
-          Sized larger than the other popups since the shipment table
-          carries a lot of columns/data.
-      ════════════════════════════════════════════════════════════════════ */}
+      {/* ══ Linked shipments — full screen, with filters ══ */}
       {shipmentsOrder && (
-        <div style={{
-          position: 'fixed', inset: 0,
-          background: 'rgba(14,21,32,0.78)', backdropFilter: 'blur(6px)',
-          display: 'flex', alignItems: 'center', justifyContent: 'center',
-          padding: 24, zIndex: 50,
-        }}>
-          <div style={{
-            background: 'white', border: `1px solid ${T.border}`,
-            width: '100%', maxWidth: 980,
-            maxHeight: '90vh', overflowY: 'auto',
-            padding: '36px 40px 32px',
-          }}>
-            {/* Header */}
-            <div style={{
-              display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start',
-              marginBottom: 24, paddingBottom: 18, borderBottom: `1px solid ${T.border}`,
-            }}>
-              <div>
-                <p style={{
-                  fontFamily: jost, fontSize: 9, fontWeight: 400,
-                  letterSpacing: '0.28em', textTransform: 'uppercase',
-                  color: T.muted, marginBottom: 6,
-                }}>
-                  {shipmentsOrder.refNumber || `#${shipmentsOrder._id.slice(-6)}`}
-                </p>
-                <h2 style={{ fontFamily: serif, fontSize: 26, fontWeight: 300, color: T.navy, margin: 0 }}>
-                  Linked Shipments — {shipmentsOrder.title || shipmentsOrder.clientName}
-                </h2>
-              </div>
-              <button
-                onClick={() => { setShipmentsOrder(null); fetchShipmentCounts(); }}
-                style={{
-                  background: 'none', border: 'none', cursor: 'pointer',
-                  color: T.muted, fontSize: 20, lineHeight: 1, padding: 4,
-                }}
-              >
-                ✕
-              </button>
-            </div>
-
+        <Modal
+          fullScreen
+          onClose={() => setShipmentsOrder(null)}
+          eyebrow={`Linked Shipments · ${shipmentsOrder.refNumber || `#${shipmentsOrder._id.slice(-6)}`}`}
+          title={shipmentsOrder.title || shipmentsOrder.clientName}
+        >
+          <div style={{ padding: '24px 32px' }}>
             <LinkedShipmentsPanel orderId={shipmentsOrder._id} />
           </div>
-        </div>
+        </Modal>
       )}
 
-      {/* ════════════════════════════════════════════════════════════════════
-          MANAGE STATEMENTS MODAL
-      ════════════════════════════════════════════════════════════════════ */}
-      <MessageTemplateManager
-        isOpen={templateMgrOpen}
-        onClose={() => setTemplateMgrOpen(false)}
-      />
+      <MessageTemplateManager isOpen={templateMgrOpen} onClose={() => setTemplateMgrOpen(false)} />
 
-      {/* ════════════════════════════════════════════════════════════════════
-          NEW INQUIRY MODAL
-      ════════════════════════════════════════════════════════════════════ */}
+      {/* ══ New inquiry ══ */}
       {isModalOpen && (
-        <div style={{
-          position: 'fixed', inset: 0,
-          background: 'rgba(14,21,32,0.75)', backdropFilter: 'blur(4px)',
-          display: 'flex', alignItems: 'center', justifyContent: 'center',
-          padding: 24, zIndex: 50,
-        }}>
-          <div style={{
-            background: 'white', border: `1px solid ${T.border}`,
-            width: '100%', maxWidth: 620,
-            maxHeight: '90vh', overflow: 'hidden',
-            display: 'flex', flexDirection: 'column',
-          }}>
-            {/* Header */}
-            <div style={{
-              display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start',
-              padding: '32px 36px 20px',
-              borderBottom: `1px solid ${T.border}`,
-            }}>
-              <div>
-                <p style={{
-                  fontFamily: jost, fontSize: 9, fontWeight: 400,
-                  letterSpacing: '0.28em', textTransform: 'uppercase',
-                  color: T.muted, marginBottom: 6,
-                }}>
-                  New Registration
-                </p>
-                <h2 style={{ fontFamily: serif, fontSize: 28, fontWeight: 300, color: T.navy, margin: 0 }}>
-                  Create Inquiry
-                </h2>
-                <p style={{
-                  fontFamily: jost, fontSize: 9, fontWeight: 300,
-                  color: T.muted, marginTop: 6, letterSpacing: '0.12em',
-                }}>
-                  Paste screenshots and tables directly into the notes field.
-                </p>
-              </div>
-              <button
-                disabled={loading}
-                onClick={() => setIsModalOpen(false)}
-                style={{
-                  background: 'none', border: 'none', cursor: loading ? 'not-allowed' : 'pointer',
-                  color: T.muted, fontSize: 20, lineHeight: 1, padding: 4,
-                  opacity: loading ? 0.3 : 1,
-                }}
-              >
-                ✕
-              </button>
+        <Modal onClose={closeCreate} busy={creating} width={640} eyebrow="New Registration" title="Create Inquiry">
+          {creating ? (
+            <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 14, padding: '60px 0' }}>
+              <Spinner size={36} />
+              <p style={{ fontFamily: jost, fontSize: 9, letterSpacing: '0.28em', textTransform: 'uppercase', color: T.muted }}>Submitting Inquiry…</p>
             </div>
-
-            {loading ? (
-              <div style={{
-                flex: 1, display: 'flex', flexDirection: 'column',
-                alignItems: 'center', justifyContent: 'center', gap: 14, padding: '60px 0',
-              }}>
-                <Spinner size={36} />
-                <p style={{
-                  fontFamily: jost, fontSize: 9, fontWeight: 400,
-                  letterSpacing: '0.28em', textTransform: 'uppercase', color: T.muted,
-                }}>
-                  Submitting Inquiry…
-                </p>
+          ) : (
+            <form onSubmit={saveOrder} style={{ display: 'flex', flexDirection: 'column', gap: 18 }}>
+              <div>
+                <FieldLabel>Project Title</FieldLabel>
+                <FocusInput value={formData.title} onChange={(e) => setFormData({ ...formData, title: e.target.value })} placeholder="Project title" />
               </div>
-            ) : (
-              <form
-                onSubmit={saveOrder}
-                style={{ padding: '28px 36px 32px', overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 18 }}
-              >
-                {/* Project title */}
-                <div>
-                  <FieldLabel>Project Title</FieldLabel>
-                  <FocusInput
-                    value={formData.title}
-                    onChange={e => setFormData({ ...formData, title: e.target.value })}
-                    placeholder="Project title"
-                  />
-                </div>
 
-                {/* Order type toggle */}
-                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+                {[{ v: 'product', label: '🎁 Product Gifting' }, { v: 'offsite', label: '🏨 Offsite' }].map(({ v, label }) => (
+                  <button
+                    type="button"
+                    key={v}
+                    onClick={() => setFormData({ ...formData, orderType: v })}
+                    style={{
+                      padding: '12px 0', cursor: 'pointer', fontFamily: jost, fontSize: 9, letterSpacing: '0.2em', textTransform: 'uppercase',
+                      background: formData.orderType === v ? T.dimBg : 'white',
+                      border: `1px solid ${formData.orderType === v ? T.gold : T.border}`,
+                      color: formData.orderType === v ? T.gold : T.muted,
+                    }}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
+                <CustomCreatableSelect
+                  label="Client Company *"
+                  options={meta.clients.map((c) => ({ label: c, value: c }))}
+                  value={formData.clientName ? { label: formData.clientName, value: formData.clientName } : null}
+                  onChange={(v) => setFormData({ ...formData, clientName: v?.value || '', orderPlacedBy: '' })}
+                  onDelete={(val) => hideMetaItem('clients', val)}
+                />
+                <CustomCreatableSelect
+                  label="Contact Person *"
+                  isDisabled={!formData.clientName}
+                  options={(meta.clientContacts[formData.clientName] || []).map((c) => ({ label: c, value: c }))}
+                  value={formData.orderPlacedBy ? { label: formData.orderPlacedBy, value: formData.orderPlacedBy } : null}
+                  onChange={(v) => setFormData({ ...formData, orderPlacedBy: v?.value || '' })}
+                  onDelete={(val) => hideMetaItem('contacts', val, formData.clientName)}
+                />
+              </div>
+
+              <div>
+                <FieldLabel>Requirements</FieldLabel>
+                <div
+                  ref={createEditorRef}
+                  contentEditable
+                  suppressContentEditableWarning
+                  onPaste={(e) => { const text = e.clipboardData?.getData('text/plain'); e.preventDefault(); if (text) document.execCommand('insertText', false, text); }}
+                  onDrop={(e) => { if (e.dataTransfer?.files?.length) { e.preventDefault(); stageFiles(e.dataTransfer.files[0].type.startsWith('image/') ? 'screenshot' : 'attachment', Array.from(e.dataTransfer.files)); } }}
+                  data-placeholder="Describe project details… paste screenshots with Ctrl/⌘+V."
+                  style={{
+                    width: '100%', minHeight: 180, padding: '14px 16px', background: T.offwhite, border: `1px solid ${T.border}`,
+                    fontFamily: jost, fontSize: 13, fontWeight: 300, color: T.text, outline: 'none', boxSizing: 'border-box',
+                    whiteSpace: 'pre-wrap', wordBreak: 'break-word',
+                  }}
+                  onFocus={(e) => { e.currentTarget.style.borderColor = T.gold; }}
+                  onBlur={(e) => { e.currentTarget.style.borderColor = T.border; }}
+                />
+              </div>
+
+              {/* Staged files — uploaded into the new order's folder once it's saved */}
+              <div style={{ padding: '14px 16px', background: T.offwhite, border: `1px dashed ${T.border}`, display: 'flex', flexDirection: 'column', gap: 10 }}>
+                <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
                   {[
-                    { v: 'product', label: '🎁 Product Gifting' },
-                    { v: 'offsite', label: '🏨 Offsite' },
-                  ].map(({ v, label }) => (
-                    <button
-                      type="button"
-                      key={v}
-                      onClick={() => setFormData({ ...formData, orderType: v })}
-                      style={{
-                        padding: '12px 0', cursor: 'pointer',
-                        fontFamily: jost, fontSize: 9, fontWeight: 400,
-                        letterSpacing: '0.2em', textTransform: 'uppercase',
-                        background: formData.orderType === v ? T.dimBg : 'white',
-                        border: `1px solid ${formData.orderType === v ? T.gold : T.border}`,
-                        color: formData.orderType === v ? T.gold : T.muted,
-                        transition: 'all 0.2s',
-                      }}
-                    >
-                      {label}
-                    </button>
+                    { category: 'screenshot', label: 'Add Screenshots', icon: ImagePlus, accept: 'image/*' },
+                    { category: 'attachment', label: 'Attach Files', icon: Paperclip },
+                  ].map(({ category, label, icon: Icon, accept }) => (
+                    <label key={category} style={{
+                      display: 'inline-flex', alignItems: 'center', gap: 7, padding: '8px 16px', cursor: 'pointer', background: 'white',
+                      border: `1px solid ${T.border}`, fontFamily: jost, fontSize: 9, letterSpacing: '0.18em', textTransform: 'uppercase', color: T.muted,
+                    }}>
+                      <Icon size={12} /> {label}
+                      <input type="file" multiple accept={accept} style={{ display: 'none' }}
+                        onChange={(e) => { const files = Array.from(e.target.files || []); e.target.value = ''; stageFiles(category, files); }} />
+                    </label>
                   ))}
                 </div>
-
-                {/* Client + Contact */}
-                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
-                  <CustomCreatableSelect
-                    label="Client Company"
-                    options={meta.clients.map(c => ({ label: c, value: c }))}
-                    value={formData.clientName ? { label: formData.clientName, value: formData.clientName } : null}
-                    onChange={v => setFormData({ ...formData, clientName: v?.value || '', orderPlacedBy: '' })}
-                    onDelete={val => deleteMetaItem('clients', val)}
-                  />
-                  <CustomCreatableSelect
-                    label="Contact Person"
-                    isDisabled={!formData.clientName}
-                    options={(meta.clientContacts[formData.clientName] || []).map(c => ({ label: c, value: c }))}
-                    value={formData.orderPlacedBy ? { label: formData.orderPlacedBy, value: formData.orderPlacedBy } : null}
-                    onChange={v => setFormData({ ...formData, orderPlacedBy: v?.value || '' })}
-                    onDelete={val => deleteMetaItem('contacts', val, formData.clientName)}
-                  />
-                </div>
-
-                {/* Requirements (rich text) */}
-                <div>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
-                    <FieldLabel>Requirements</FieldLabel>
-                    <div style={{ display: 'flex', gap: 8, color: T.muted }}>
-                      <ImageIcon size={12} /> <TableIcon size={12} />
-                    </div>
+                {['screenshot', 'attachment'].flatMap((category) => stagedFiles[category].map((f, idx) => (
+                  <div key={`${category}-${idx}`} style={{ display: 'flex', alignItems: 'center', gap: 8, fontFamily: jost, fontSize: 11, color: T.text }}>
+                    {category === 'screenshot' ? <ImagePlus size={12} style={{ color: T.gold }} /> : <Paperclip size={12} style={{ color: T.muted }} />}
+                    <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{f.name || 'Pasted screenshot'}</span>
+                    <IconBtn title="Remove" onClick={() => unstageFile(category, idx)} color={T.danger} hover={T.danger}><X size={12} /></IconBtn>
                   </div>
-                  <div
-                    ref={createEditorRef}
-                    contentEditable
-                    onPaste={handlePaste}
-                    onDrop={handleDrop}
-                    onInput={e => setFormData({ ...formData, description: e.currentTarget.innerHTML })}
-                    style={{
-                      width: '100%', minHeight: 220, padding: '14px 16px',
-                      background: T.offwhite, border: `1px solid ${T.border}`,
-                      fontFamily: jost, fontSize: 13, fontWeight: 300, color: T.text,
-                      outline: 'none', boxSizing: 'border-box',
-                      whiteSpace: 'pre-wrap', wordBreak: 'break-word',
-                      transition: 'border-color 0.2s',
-                    }}
-                    data-placeholder="Describe project details… paste images or Excel tables here."
-                    onFocus={e => e.currentTarget.style.borderColor = T.gold}
-                    onBlur={e => e.currentTarget.style.borderColor = T.border}
-                  />
-                </div>
-
-                {/* Attachments */}
-                <div style={{
-                  display: 'flex', justifyContent: 'space-between', alignItems: 'center',
-                  padding: '14px 16px',
-                  background: T.offwhite, border: `1px dashed ${T.border}`,
-                }}>
-                  <label style={{
-                    display: 'inline-flex', alignItems: 'center', gap: 7,
-                    padding: '8px 18px', cursor: 'pointer',
-                    background: 'white', border: `1px solid ${T.border}`,
-                    fontFamily: jost, fontSize: 9, fontWeight: 400,
-                    letterSpacing: '0.18em', textTransform: 'uppercase', color: T.muted,
-                  }}>
-                    <Plus size={12} /> Attach Files
-                    <input type="file" multiple style={{ display: 'none' }} onChange={e => handleFileUpload(e, false)} />
-                  </label>
-                  <span style={{ fontFamily: jost, fontSize: 10, fontWeight: 300, color: T.muted }}>
-                    {formData.attachments.length} file{formData.attachments.length !== 1 ? 's' : ''} attached
-                  </span>
-                </div>
-
-                {/* Submit */}
-                <div style={{ display: 'flex', justifyContent: 'flex-end', borderTop: `1px solid ${T.border}`, paddingTop: 20 }}>
-                  <GoldBtn style={{ padding: '13px 48px' }}>
-                    Submit Inquiry
-                  </GoldBtn>
-                </div>
-              </form>
-            )}
-          </div>
-        </div>
-      )}
-
-      {/* ════════════════════════════════════════════════════════════════════
-          QUOTE PROMPT
-      ════════════════════════════════════════════════════════════════════ */}
-      {quotePrompt && (
-        <div style={{
-          position: 'fixed', inset: 0, background: 'rgba(14,21,32,0.82)', backdropFilter: 'blur(8px)',
-          display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 24, zIndex: 100,
-        }}>
-          <div style={{
-            background: 'white', border: `1px solid ${T.border}`,
-            padding: '40px', width: '100%', maxWidth: 380,
-          }}>
-            <div style={{ textAlign: 'center', marginBottom: 28 }}>
-              <div style={{
-                width: 44, height: 44, background: 'rgba(79,70,229,0.08)',
-                display: 'flex', alignItems: 'center', justifyContent: 'center',
-                margin: '0 auto 14px', color: T.indigo,
-              }}>
-                <Hash size={22} />
+                )))}
+                <p style={{ fontFamily: jost, fontSize: 10, fontWeight: 300, color: T.muted, margin: 0 }}>
+                  Screenshots can be pasted anywhere in this form (Ctrl/⌘+V). Files are saved to the inquiry's OneDrive folder.
+                </p>
               </div>
-              <h3 style={{ fontFamily: serif, fontSize: 26, fontWeight: 300, color: T.navy, margin: '0 0 8px' }}>
-                Finalize Quote
-              </h3>
-              <p style={{
-                fontFamily: jost, fontSize: 9, fontWeight: 400,
-                letterSpacing: '0.18em', textTransform: 'uppercase', color: T.muted,
-              }}>
-                Assign a quote number to move to production
-              </p>
-            </div>
 
-            <FocusInput
-              inputRef={quoteInputRef}
-              placeholder="e.g. QT-26-27/0095"
-              style={{ textAlign: 'center', fontWeight: 500, textTransform: 'uppercase', marginBottom: 20 }}
-            />
-
-            <div style={{ display: 'flex', gap: 12, marginTop: 8 }}>
-              <GhostBtn onClick={() => setQuotePrompt(null)} style={{ flex: 1, textAlign: 'center', padding: '12px 0' }}>
-                Cancel
-              </GhostBtn>
-              <GoldBtn
-                onClick={() => {
-                  const val = quoteInputRef.current?.value?.trim();
-                  if (val) { updateOrder(quotePrompt._id, { status: 'ongoing', quoteNumber: val }); setQuotePrompt(null); }
-                }}
-                style={{ flex: 1, textAlign: 'center' }}
-              >
-                Confirm & Start
-              </GoldBtn>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* ════════════════════════════════════════════════════════════════════
-          COMPLETION PROMPT
-      ════════════════════════════════════════════════════════════════════ */}
-      {completionPrompt && (
-        <div style={{
-          position: 'fixed', inset: 0, background: 'rgba(14,21,32,0.82)', backdropFilter: 'blur(8px)',
-          display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 24, zIndex: 100,
-        }}>
-          <div style={{
-            background: 'white', border: `1px solid ${T.border}`,
-            padding: '40px', width: '100%', maxWidth: 380,
-          }}>
-            <div style={{ textAlign: 'center', marginBottom: 28 }}>
-              <div style={{
-                width: 44, height: 44, background: 'rgba(5,150,105,0.08)',
-                display: 'flex', alignItems: 'center', justifyContent: 'center',
-                margin: '0 auto 14px', color: T.emerald,
-              }}>
-                <Receipt size={22} />
+              <div style={{ display: 'flex', justifyContent: 'flex-end', borderTop: `1px solid ${T.border}`, paddingTop: 20 }}>
+                <GoldBtn type="submit" disabled={!formData.clientName || !formData.orderPlacedBy} style={{ padding: '13px 48px' }}>
+                  <Plus size={13} /> Submit Inquiry
+                </GoldBtn>
               </div>
-              <h3 style={{ fontFamily: serif, fontSize: 26, fontWeight: 300, color: T.navy, margin: '0 0 8px' }}>
-                Completed Order
-              </h3>
-              <p style={{
-                fontFamily: jost, fontSize: 9, fontWeight: 400,
-                letterSpacing: '0.18em', textTransform: 'uppercase', color: T.muted,
-              }}>
-                Enter final invoice number before closing
-              </p>
-            </div>
-
-            <FocusInput
-              inputRef={invoiceInputRef}
-              placeholder="e.g. INV-10293"
-              style={{ textAlign: 'center', fontWeight: 500, textTransform: 'uppercase', marginBottom: 20 }}
-            />
-
-            <div style={{ display: 'flex', gap: 12, marginTop: 8 }}>
-              <GhostBtn onClick={() => setCompletionPrompt(null)} style={{ flex: 1, textAlign: 'center', padding: '12px 0' }}>
-                Cancel
-              </GhostBtn>
-              <GoldBtn
-                onClick={() => {
-                  const val = invoiceInputRef.current?.value?.trim();
-                  if (val) {
-                    updateOrder(completionPrompt._id, {
-                      status: 'completed', invoiceNumber: val,
-                      completedAt: new Date().toISOString(),
-                    });
-                    setCompletionPrompt(null);
-                  }
-                }}
-                style={{ flex: 1, textAlign: 'center' }}
-              >
-                Save
-              </GoldBtn>
-            </div>
-          </div>
-        </div>
+            </form>
+          )}
+        </Modal>
       )}
 
-      {/* ════════════════════════════════════════════════════════════════════
-          CLIENT CHECK MODAL
-          mode: 'create'      — client not in DB
-          mode: 'add-contact' — client exists, contact is new
-      ════════════════════════════════════════════════════════════════════ */}
+      {/* ══ Client check — client or contact missing an e-mail ══ */}
       {clientCheckModal && (
-        <div style={{
-          position: 'fixed', inset: 0,
-          background: 'rgba(14,21,32,0.78)', backdropFilter: 'blur(6px)',
-          display: 'flex', alignItems: 'center', justifyContent: 'center',
-          padding: 24, zIndex: 300,
-        }}>
+        <Modal onClose={() => setClientCheckModal(null)} width={520} zIndex={300} padding="0">
           <div style={{
-            background: 'white', border: `1px solid ${T.border}`,
-            width: '100%', maxWidth: 520, overflow: 'hidden',
+            display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '20px 28px',
+            background: 'rgba(184,151,90,0.05)', borderBottom: `1px solid ${T.borderG}`,
           }}>
-            {/* Header */}
-            <div style={{
-              display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-              padding: '20px 28px', background: 'rgba(184,151,90,0.05)',
-              borderBottom: `1px solid ${T.borderG}`,
-            }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-                <div style={{
-                  width: 36, height: 36,
-                  background: 'rgba(184,151,90,0.1)',
-                  display: 'flex', alignItems: 'center', justifyContent: 'center',
-                  color: T.gold, fontSize: 18,
-                }}>
-                  {clientCheckModal.mode === 'create' ? '⚠️' : <UserPlus size={16} style={{ color: T.gold }} />}
-                </div>
-                <div>
-                  <p style={{
-                    fontFamily: jost, fontSize: 12, fontWeight: 500, color: T.text, margin: '0 0 3px',
-                  }}>
-                    {clientCheckModal.mode === 'create' ? 'Client Not in Database' : 'New Contact Person'}
-                  </p>
-                  <p style={{
-                    fontFamily: jost, fontSize: 10, fontWeight: 300, color: T.gold, margin: 0,
-                  }}>
-                    {clientCheckModal.mode === 'create'
-                      ? `"${clientCheckModal.clientName}" has no client record yet.`
-                      : `"${clientCheckModal.contactName}" is not listed under ${clientCheckModal.companyName}.`
-                    }
-                  </p>
-                </div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+              <div style={{ width: 36, height: 36, background: 'rgba(184,151,90,0.1)', display: 'flex', alignItems: 'center', justifyContent: 'center', color: T.gold }}>
+                <UserPlus size={16} />
               </div>
-              <button
-                onClick={() => setClientCheckModal(null)}
-                style={{
-                  background: 'none', border: 'none', cursor: 'pointer',
-                  color: T.muted, fontSize: 18, lineHeight: 1, padding: 4,
-                }}
-              >
-                ✕
-              </button>
+              <div>
+                <p style={{ fontFamily: jost, fontSize: 12, fontWeight: 500, color: T.text, margin: '0 0 3px' }}>
+                  {clientCheckModal.mode === 'create' ? 'Client Not in Database' : 'New Contact Person'}
+                </p>
+                <p style={{ fontFamily: jost, fontSize: 10, fontWeight: 300, color: T.gold, margin: 0 }}>
+                  {clientCheckModal.mode === 'create'
+                    ? `"${clientCheckModal.clientName}" has no client record yet.`
+                    : `"${clientCheckModal.contactName}" has no e-mail under ${clientCheckModal.companyName}.`}
+                </p>
+              </div>
             </div>
-
-            {/* Body */}
-            {clientCheckModal.mode === 'create' ? (
-              <ClientCreateInlineForm
-                clientName={clientCheckModal.clientName}
-                contactName={clientCheckModal.contactName}
-                showToast={showToast}
-                onCreated={async (newClient) => {
-                  setClientCheckModal(null);
-                  await fetchClients();
-                  const emailContact = newClient.contacts?.find(ct => ct.email?.includes('@'));
-                  if (emailContact?.email) {
-                    try {
-                      await sendPortalEmail({
-                        slug: clientCheckModal.portalSlug,
-                        clientEmail: emailContact.email,
-                        contactName: newClient.contacts?.[0]?.name || emailContact.name || '',
-                        clientName:  newClient.companyName,
-                        orderRef:    clientCheckModal.orderRef,
-                        title:       clientCheckModal.title
-                      });
-                      showToast('success', `Portal link sent to ${emailContact.email}`);
-                    } catch (err) {
-                      showToast('error', 'Client created but email failed: ' + err.message);
-                    }
-                  } else {
-                    showToast('warning', 'Client created. Add an email address to send the portal link.');
-                  }
-                }}
-                onSkip={() => setClientCheckModal(null)}
-              />
-            ) : (
-              <ContactAddInlineForm
-                clientId={clientCheckModal.clientId}
-                companyName={clientCheckModal.companyName}
-                contactName={clientCheckModal.contactName}
-                showToast={showToast}
-                onAdded={async (updatedClient) => {
-                  setClientCheckModal(null);
-                  await fetchClients();
-                  const newContact = updatedClient.contacts?.find(
-                    ct => ct.name?.toLowerCase() === clientCheckModal.contactName?.toLowerCase()
-                  );
-                  if (newContact?.email) {
-                    try {
-                      await sendPortalEmail({
-                        slug: clientCheckModal.portalSlug,
-                        clientEmail: newContact.email,
-                        contactName: newContact.name,
-                        clientName:  updatedClient.companyName,
-                        orderRef:    clientCheckModal.orderRef,
-                        title:       clientCheckModal.title
-                      });
-                      showToast('success', `Contact added & portal link sent to ${newContact.email}`);
-                    } catch (err) {
-                      showToast('error', 'Contact added but email failed: ' + err.message);
-                    }
-                  } else {
-                    showToast('warning', 'Contact added. No email provided — portal link not sent.');
-                  }
-                }}
-                onSkip={() => setClientCheckModal(null)}
-              />
-            )}
+            <IconBtn title="Close" onClick={() => setClientCheckModal(null)}><X size={18} /></IconBtn>
           </div>
-        </div>
+
+          {clientCheckModal.mode === 'create' ? (
+            <ClientCreateInlineForm
+              clientName={clientCheckModal.clientName}
+              contactName={clientCheckModal.contactName}
+              showToast={showToast}
+              onCreated={async (newClient) => {
+                const ctx = clientCheckModal;
+                setClientCheckModal(null);
+                fetchClients();
+                const emailContact = newClient.contacts?.find((ct) => ct.email?.includes('@'));
+                if (!emailContact) { showToast('warning', 'Client created. Add an email address to send the portal link.'); return; }
+                try {
+                  await sendPortalEmail({
+                    slug: ctx.portalSlug, clientEmail: emailContact.email, contactName: emailContact.name || '',
+                    clientName: newClient.companyName, orderRef: ctx.orderRef, title: ctx.title,
+                  });
+                  showToast('success', `Portal link sent to ${emailContact.email}`);
+                } catch (err) {
+                  showToast('error', `Client created but email failed: ${err.message}`);
+                }
+              }}
+              onSkip={() => setClientCheckModal(null)}
+            />
+          ) : (
+            <ContactAddInlineForm
+              clientId={clientCheckModal.clientId}
+              companyName={clientCheckModal.companyName}
+              contactName={clientCheckModal.contactName}
+              showToast={showToast}
+              onAdded={async (updatedClient) => {
+                const ctx = clientCheckModal;
+                setClientCheckModal(null);
+                fetchClients();
+                const contact = updatedClient.contacts?.find((ct) => ct.name?.toLowerCase() === ctx.contactName?.toLowerCase());
+                if (!contact?.email) { showToast('warning', 'Contact added. No email provided — portal link not sent.'); return; }
+                try {
+                  await sendPortalEmail({
+                    slug: ctx.portalSlug, clientEmail: contact.email, contactName: contact.name,
+                    clientName: updatedClient.companyName, orderRef: ctx.orderRef, title: ctx.title,
+                  });
+                  showToast('success', `Contact added & portal link sent to ${contact.email}`);
+                } catch (err) {
+                  showToast('error', `Contact added but email failed: ${err.message}`);
+                }
+              }}
+              onSkip={() => setClientCheckModal(null)}
+            />
+          )}
+        </Modal>
       )}
 
-      {/* ════════════════════════════════════════════════════════════════════
-          CLIENT PORTAL EDITOR DRAWER
-      ════════════════════════════════════════════════════════════════════ */}
+      {/* ══ Client portal editor drawer ══ */}
       {chatOrder && (
         <div
-          style={{
-            position: 'fixed', inset: 0, zIndex: 200,
-            background: 'rgba(14,21,32,0.55)', backdropFilter: 'blur(4px)',
-          }}
-          onClick={e => { if (e.target === e.currentTarget) setChatOrder(null); }}
+          style={{ position: 'fixed', inset: 0, zIndex: 200, background: 'rgba(14,21,32,0.55)', backdropFilter: 'blur(4px)' }}
+          onClick={(e) => { if (e.target === e.currentTarget) setChatOrder(null); }}
         >
           <div style={{
-            position: 'absolute', top: 0, right: 0, bottom: 0,
-            width: '100%', maxWidth: 480,
-            background: 'white', display: 'flex', flexDirection: 'column',
-            animation: 'slideInRight 0.25s ease',
+            position: 'absolute', top: 0, right: 0, bottom: 0, width: '100%', maxWidth: 480,
+            background: 'white', display: 'flex', flexDirection: 'column', animation: 'slideInRight 0.25s ease',
           }}>
-            <style>{`@keyframes slideInRight{from{transform:translateX(100%)}to{transform:none}}`}</style>
             <ClientPortalEditor order={chatOrder} onClose={() => setChatOrder(null)} />
           </div>
         </div>
       )}
 
-      {/* ── Attachment lightbox ──────────────────────────────────────────── */}
-      {lightboxFile && (
-        <AttachmentLightbox
-          file={lightboxFile}
-          onClose={() => setLightboxFile(null)}
-        />
-      )}
+      {lightbox && <FileLightbox orderId={lightbox.orderId} file={lightbox.file} onClose={() => setLightbox(null)} />}
 
-      {/* ── Custom scrollbar CSS ─────────────────────────────────────────── */}
       <style>{`
         ::-webkit-scrollbar { width: 5px; }
         ::-webkit-scrollbar-track { background: transparent; }
         ::-webkit-scrollbar-thumb { background: rgba(184,151,90,0.25); border-radius: 10px; }
         [contentEditable]:empty:before { content: attr(data-placeholder); color: #aaa; }
-        [contentEditable] table { border-collapse: collapse; width: 100%; margin: 8px 0; border: 1px solid rgba(0,0,0,0.07); font-size: 12px; }
-        [contentEditable] td, [contentEditable] th { border: 1px solid rgba(0,0,0,0.07); padding: 6px 10px; }
-        [contentEditable] th { background: #faf8f5; }
         @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
         @keyframes shimmer { to { background-position: -200% 0; } }
+        @keyframes slideInRight { from { transform: translateX(100%); } to { transform: none; } }
       `}</style>
     </div>
   );

@@ -13,6 +13,7 @@
 
 import React, { useState, useEffect, useCallback } from 'react';
 import api from '../api';
+import ordersApi from './orders/ordersApi';
 import { Send, Mail, MailWarning } from 'lucide-react';
 
 const jost = '"Jost", sans-serif';
@@ -91,15 +92,12 @@ export default function OrderTimeline({ order, onPosted }) {
     setPosting(true);
     setError(null);
     try {
-      const res = await api.post(`/orders/${order._id}/timeline`, {
-        status,
-        message: message.trim(),
-      });
+      const event = await ordersApi.postTimeline(order._id, { status, message: message.trim() });
       setMessage('');
       setQuickStatement(CUSTOM_VALUE);
-      onPosted?.(res.data);
+      onPosted?.(event);
     } catch (err) {
-      setError(err.response?.data?.error || err.message);
+      setError(err.message);
     } finally {
       setPosting(false);
     }

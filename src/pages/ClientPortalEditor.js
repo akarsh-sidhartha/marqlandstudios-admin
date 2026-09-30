@@ -17,7 +17,7 @@ import { requestNotifPermission, pushNotif, subscribeToPortalPush } from '../uti
  * Includes integrated Dynamic Combo Creator (Combos tab).
  */
 
-const CLIENT_BASE_URL = import.meta.env.VITE_CLIENT_URL?.replace(/\/$/, '') || 'https://www.marqlandstudios.com';
+const CLIENT_BASE_URL = process.env.REACT_APP_CLIENT_URL?.replace(/\/$/, '') || 'https://www.marqlandstudios.com';
 
 // ─── Design tokens ─────────────────────────────────────────────────────────
 const T = {
